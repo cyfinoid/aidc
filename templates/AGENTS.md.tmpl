@@ -1,0 +1,26 @@
+<!-- aidc:core-logics:start -->
+# Shared Agent Guidance (aidc)
+
+Read `/opt/CORE_LOGICS/patternlist.md` before starting work.
+
+Use `/opt/CORE_LOGICS` for reusable guidance that should survive beyond this repo. Add broadly useful patterns there on the current project branch rather than storing them only in repo-local scratch files.
+
+Keep project edits inside `/workspace` unless the task explicitly targets `/opt/CORE_LOGICS`.
+
+## Security guardrails (non-negotiable)
+
+Before declaring any code task complete, run the relevant scanners on what you changed and fix every finding above LOW. Do not dismiss findings as "out of scope" or "pre-existing" without explicit user confirmation — fix or flag, never silently skip.
+
+All scanners are pre-installed in the aidc container.
+
+- **Every project**: `semgrep scan --config auto <paths>` on changed files (or the repo for larger changes).
+- **Secrets**: `gitleaks detect --no-banner` on the working tree; `trufflehog filesystem --no-update .` if anything looks live.
+- **Go** (when `go.mod` present): `gosec ./...`
+- **Python** (when `pyproject.toml` / `requirements.txt` / similar): `bandit -r <src>`
+- **Rust** (when `Cargo.toml` present): `cargo audit`
+- **Ruby** (when `Gemfile` present): `bundle-audit check --update`
+- **Node** (when `package.json` present): `npm audit --omit=dev` (or `pnpm audit` / `yarn npm audit`).
+- **Dependency vetting** (any language): `vet scan -D .` for SCA against the OSV database.
+
+When findings exist, the work is not done. Fix them, re-run the scan, and only then report the task as complete.
+<!-- aidc:core-logics:end -->

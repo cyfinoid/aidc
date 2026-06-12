@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Per-project image setup hook for aidc.
+#
+# Runs as 'vscode' during 'aidc up' / 'aidc rebuild'. Use 'sudo' for root.
+# Edits invalidate ONLY this Docker layer, so the upstream tool layers stay cached.
+# aidc does NOT touch this file once created. Track with 'git add -f' if you want.
+#
+# Examples:
+#   sudo apt-get update && sudo apt-get install -y --no-install-recommends golang-go
+#   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+#   uv tool install ruff
+#   go install golang.org/x/tools/gopls@latest
+#   sudo npm_config_ignore_scripts=false npm install -g typescript
+
+set -euo pipefail
+
+# Add project-specific installs below.
+:

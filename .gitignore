@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+
+# Internal scratch — design notes and imported reference scripts that are
+# kept locally for context but not shipped publicly.
+plans/
+references/
+
+# Per-repo aidc state and generated devcontainer scaffold. The repo dogfoods
+# itself, so these appear locally; they should never be tracked.
+.ai-container/
+.devcontainer/
+.cursor/
+.claude/settings.local.json
+
+# Agent-guidance files that aidc generates into every repo it scaffolds.
+# This repo ships templates/CLAUDE.md.tmpl and templates/AGENTS.md.tmpl as
+# the source of truth; the generated copies at the repo root are local-only.
+/CLAUDE.md
+/AGENTS.md
+
+# Editor / OS noise
+.DS_Store
+*.swp

@@ -1,0 +1,81 @@
+# aidc-managed
+services:
+  workspace:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        AIDC_TOOLCHAINS: ${AIDC_TOOLCHAINS:-}
+        AIDC_SECURITY_TOOLS: ${AIDC_SECURITY_TOOLS:-}
+    init: true
+    stdin_open: true
+    tty: true
+    user: vscode
+    working_dir: /workspace
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      HOME: /home/vscode
+      HISTFILE: /commandhistory/.zsh_history
+      GIT_CONFIG_GLOBAL: /home/vscode/.gitconfig.local
+      AIDC_CONTAINER_HOME: /home/vscode
+      AIDC_CORE_LOGICS_DIR: /opt/CORE_LOGICS
+      AIDC_WORKSPACE_DIR: /workspace
+    command:
+      - /bin/bash
+      - -lc
+      - /workspace/.devcontainer/scripts/bootstrap-state.sh init && sleep infinity
+    volumes:
+      - type: bind
+        source: ${AIDC_WORKSPACE}
+        target: /workspace
+      - type: bind
+        source: ${AIDC_DEVCONTAINER_DIR}
+        target: /workspace/.devcontainer
+        read_only: true
+      - type: bind
+        source: ${AIDC_CORE_LOGICS_WORKTREE}
+        target: /opt/CORE_LOGICS
+      - type: bind
+        source: ${AIDC_HOST_SEED_CLAUDE}
+        target: /host-seed/claude
+        read_only: true
+      - type: bind
+        source: ${AIDC_HOST_SEED_CODEX}
+        target: /host-seed/codex
+        read_only: true
+      - type: bind
+        source: ${AIDC_HOST_SEED_OPENCODE}
+        target: /host-seed/opencode
+        read_only: true
+      - type: bind
+        source: ${AIDC_GITCONFIG_SOURCE}
+        target: /host-seed/gitconfig
+        read_only: true
+      - type: bind
+        source: ${AIDC_CLIPBOARD_DIR_SOURCE}
+        target: /host-clipboard
+        read_only: true
+      - type: volume
+        source: command_history
+        target: /commandhistory
+      - type: volume
+        source: claude_home
+        target: /home/vscode/.claude
+      - type: volume
+        source: codex_home
+        target: /home/vscode/.codex
+      - type: volume
+        source: opencode_home
+        target: /home/vscode/.config/opencode
+      - type: volume
+        source: cursor_agent_home
+        target: /home/vscode/.cursor-agent
+
+volumes:
+  command_history:
+  claude_home:
+  codex_home:
+  opencode_home:
+  cursor_agent_home:

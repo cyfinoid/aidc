@@ -1,0 +1,282 @@
+# aidc-managed
+# Base image and uv stage pinned by index (multi-arch) digest.
+# To repin: `docker pull <ref>:<tag>` then read the "Digest:" line.
+FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec AS uv
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
+
+ARG GIT_DELTA_VERSION=0.18.2
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      bubblewrap \
+      build-essential \
+      ca-certificates \
+      curl \
+      dnsutils \
+      fd-find \
+      fzf \
+      gh \
+      gnupg \
+      ipset \
+      iptables \
+      iproute2 \
+      jq \
+      nano \
+      ripgrep \
+      rsync \
+      socat \
+      tmux \
+      unzip \
+      vim \
+      xz-utils \
+      zip \
+      zsh \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb \
+    && dpkg -i /tmp/git-delta.deb \
+    && rm /tmp/git-delta.deb
+
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_TOOL_DIR=/opt/uv/tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin \
+    UV_LINK_MODE=copy
+RUN uv python install 3.13 \
+    && ln -sf "$(uv python find 3.13)" /usr/local/bin/python3 \
+    && ln -sf /usr/local/bin/python3 /usr/local/bin/python \
+    && uv tool install ast-grep-cli
+
+ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
+    NPM_CONFIG_AUDIT=true \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_SAVE_EXACT=true \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_MINIMUM_RELEASE_AGE=1440 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NODE_OPTIONS=--max-old-space-size=4096
+
+RUN npm_config_ignore_scripts=false npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai@latest \
+    && npm cache clean --force
+
+# Supply-chain guardrails: pmg intercepts npm/pip/uv/etc. and runs vet checks
+# before installs. Binaries installed system-wide; shell/shim wiring done
+# per-user below.
+RUN curl -fsSL https://raw.githubusercontent.com/safedep/pmg/main/install.sh | sh
+
+# Pinned. To bump: check https://github.com/safedep/vet/releases for the
+# newest tag, update VET_VERSION, rebuild, and commit. "latest" is honoured
+# for ad-hoc overrides but resolves at build time, which defeats the pin —
+# avoid in committed configs.
+ARG VET_VERSION=v1.17.3
+RUN ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) VET_ARCH="x86_64" ;; \
+         arm64) VET_ARCH="arm64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && if [ "$VET_VERSION" = "latest" ]; then \
+         VET_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/safedep/vet/releases/latest | sed 's|.*/||')"; \
+       else \
+         VET_TAG="$VET_VERSION"; \
+       fi \
+    && curl -fsSL "https://github.com/safedep/vet/releases/download/${VET_TAG}/vet_Linux_${VET_ARCH}.tar.gz" -o /tmp/vet.tar.gz \
+    && tar -xzf /tmp/vet.tar.gz -C /usr/local/bin vet \
+    && chmod 0755 /usr/local/bin/vet \
+    && rm /tmp/vet.tar.gz
+
+# Agent security/observability layer for Claude Code, Codex, OpenCode, Cursor.
+RUN curl -fsSL https://raw.githubusercontent.com/safedep/gryph/main/install.sh | sh
+
+# Always-on security tooling: semgrep (SAST), gitleaks + trufflehog (secrets).
+# SCA is handled by vet/pmg above; this layer covers code-pattern and secret scans.
+RUN uv tool install semgrep \
+    && curl -fsSL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+       | sh -s -- -b /usr/local/bin
+
+# Pinned. To bump: check https://github.com/gitleaks/gitleaks/releases for the
+# newest tag, update GITLEAKS_VERSION, rebuild, and commit. "latest" still
+# works for ad-hoc overrides but resolves at build time and breaks the pin.
+ARG GITLEAKS_VERSION=v8.30.1
+RUN ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) GL_ARCH="x64" ;; \
+         arm64) GL_ARCH="arm64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && if [ "$GITLEAKS_VERSION" = "latest" ]; then \
+         GL_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/gitleaks/gitleaks/releases/latest | sed 's|.*/||')"; \
+       else \
+         GL_TAG="$GITLEAKS_VERSION"; \
+       fi \
+    && GL_VER="${GL_TAG#v}" \
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${GL_TAG}/gitleaks_${GL_VER}_linux_${GL_ARCH}.tar.gz" -o /tmp/gitleaks.tar.gz \
+    && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+    && chmod 0755 /usr/local/bin/gitleaks \
+    && rm /tmp/gitleaks.tar.gz
+
+# Rust Token Killer: CLI proxy that cuts token usage on dev operations.
+# Env var goes on the sh side of the pipe so the installer (not curl) sees it.
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh \
+    | RTK_INSTALL_DIR=/usr/local/bin sh
+
+RUN mkdir -p /commandhistory \
+    && touch /commandhistory/.bash_history /commandhistory/.zsh_history \
+    && chown -R vscode:vscode /commandhistory \
+    && echo 'export HISTFILE=/commandhistory/.bash_history' >> /etc/bash.bashrc
+
+# Clipboard bridge: pbpaste/xclip/wl-paste all proxy to a host Unix socket
+# bind-mounted at /host-clipboard/clipboard.sock. If the host clipboard
+# server is not running, the shim fails benignly with "connection refused".
+RUN printf '#!/usr/bin/env bash\nexec socat - UNIX-CONNECT:/host-clipboard/clipboard.sock\n' \
+      > /usr/local/bin/aidc-clipboard-recv \
+    && chmod 0755 /usr/local/bin/aidc-clipboard-recv \
+    && ln -sf /usr/local/bin/aidc-clipboard-recv /usr/local/bin/pbpaste \
+    && ln -sf /usr/local/bin/aidc-clipboard-recv /usr/local/bin/xclip \
+    && ln -sf /usr/local/bin/aidc-clipboard-recv /usr/local/bin/wl-paste
+
+# Bootstrap Claude OAuth + skip the first-run welcome screen when a token
+# is present. Idempotent: returns immediately if ~/.claude.json already has
+# hasCompletedOnboarding=true. Invoked by aidc::run_tool before 'aidc claude'.
+COPY --chown=root:root <<'EOF' /usr/local/bin/aidc-bootstrap-claude
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || exit 0
+
+config="$HOME/.claude.json"
+if [[ -f "$config" ]] && python3 - "$config" <<'PY' 2>/dev/null
+import json, sys
+try:
+    sys.exit(0 if json.load(open(sys.argv[1])).get("hasCompletedOnboarding") else 1)
+except Exception:
+    sys.exit(1)
+PY
+then
+  exit 0
+fi
+
+claude -p ok >/dev/null 2>&1 || true
+
+python3 - "$config" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+try:
+    cfg = json.load(open(p))
+except (FileNotFoundError, ValueError):
+    cfg = {}
+cfg["hasCompletedOnboarding"] = True
+with open(p, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+EOF
+RUN chmod 0755 /usr/local/bin/aidc-bootstrap-claude
+
+USER vscode
+
+ENV HOME=/home/vscode
+ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+RUN mkdir -p \
+      /home/vscode/.local/bin \
+      /home/vscode/.claude \
+      /home/vscode/.codex \
+      /home/vscode/.config/opencode \
+      /home/vscode/.cursor-agent \
+    && curl -fsS https://cursor.com/install | bash \
+    && { cursor-agent --version || true; } \
+    && pmg setup install \
+    && pmg setup doctor || true
+
+# Auto-detected toolchains. aidc fills AIDC_TOOLCHAINS by scanning the
+# workspace for marker files (go.mod, Cargo.toml, etc.). Override per repo
+# by setting AIDC_TOOLCHAINS in .ai-container/project.env.
+ARG AIDC_TOOLCHAINS=""
+RUN if [ -n "$AIDC_TOOLCHAINS" ]; then \
+      echo "aidc: installing toolchains: $AIDC_TOOLCHAINS"; \
+      for tc in $(echo "$AIDC_TOOLCHAINS" | tr ',' ' '); do \
+        case "$tc" in \
+          go) \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends golang-go && \
+            GOBIN=/home/vscode/.local/bin go install github.com/securego/gosec/v2/cmd/gosec@latest ;; \
+          rust) \
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path && \
+            mkdir -p /home/vscode/.local/bin && \
+            ln -sf "$HOME/.cargo/bin/cargo" /home/vscode/.local/bin/cargo && \
+            ln -sf "$HOME/.cargo/bin/rustc" /home/vscode/.local/bin/rustc && \
+            ln -sf "$HOME/.cargo/bin/rustup" /home/vscode/.local/bin/rustup && \
+            "$HOME/.cargo/bin/cargo" install cargo-audit --locked && \
+            ln -sf "$HOME/.cargo/bin/cargo-audit" /home/vscode/.local/bin/cargo-audit ;; \
+          ruby) \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends ruby-full && \
+            sudo gem install --no-document bundler-audit ;; \
+          java) \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends default-jdk ;; \
+          php) \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends php-cli ;; \
+          node) \
+            echo "aidc: node 22 already in base (npm/pnpm/yarn/bun via pmg shims; npm audit built-in)" ;; \
+          python) \
+            UV_TOOL_BIN_DIR="$HOME/.local/bin" \
+            UV_TOOL_DIR="$HOME/.local/share/uv-tools" \
+            uv tool install bandit && \
+            echo "aidc: python 3.13 already in base (uv-managed); bandit installed" ;; \
+          *) \
+            echo "aidc: unknown toolchain '$tc' (skipped)" >&2 ;; \
+        esac; \
+      done; \
+      sudo apt-get clean && sudo rm -rf /var/lib/apt/lists/*; \
+    fi
+
+# Opt-in per-project security tools. aidc reads AIDC_SECURITY_TOOLS from
+# .ai-container/project.env (comma-separated). Tools install under
+# /home/vscode/.local so no sudo needed.
+ARG AIDC_SECURITY_TOOLS=""
+RUN if [ -n "$AIDC_SECURITY_TOOLS" ]; then \
+      echo "aidc: installing security tools: $AIDC_SECURITY_TOOLS"; \
+      mkdir -p "$HOME/.local/bin" "$HOME/.local/share/uv-tools"; \
+      for tool in $(echo "$AIDC_SECURITY_TOOLS" | tr ',' ' '); do \
+        case "$tool" in \
+          grype) \
+            curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+              | sh -s -- -b "$HOME/.local/bin" ;; \
+          syft) \
+            curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+              | sh -s -- -b "$HOME/.local/bin" ;; \
+          checkov) \
+            UV_TOOL_BIN_DIR="$HOME/.local/bin" \
+            UV_TOOL_DIR="$HOME/.local/share/uv-tools" \
+            uv tool install checkov ;; \
+          bandit) \
+            UV_TOOL_BIN_DIR="$HOME/.local/bin" \
+            UV_TOOL_DIR="$HOME/.local/share/uv-tools" \
+            uv tool install bandit ;; \
+          *) \
+            echo "aidc: unknown security tool '$tool' (skipped)" >&2 ;; \
+        esac; \
+      done; \
+    fi
+
+# Per-project setup hook. User-owned, copied verbatim from the workspace.
+# Last in the Dockerfile so edits invalidate only this layer.
+COPY --chown=vscode:vscode project-setup.sh /tmp/aidc-project-setup.sh
+RUN bash /tmp/aidc-project-setup.sh && rm /tmp/aidc-project-setup.sh
+
+WORKDIR /workspace

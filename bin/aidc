@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+aidc_source="${BASH_SOURCE[0]}"
+while [ -L "$aidc_source" ]; do
+  aidc_dir="$(cd -P "$(dirname "$aidc_source")" && pwd)"
+  aidc_link_target="$(readlink "$aidc_source")"
+  if [[ "$aidc_link_target" == /* ]]; then
+    aidc_source="$aidc_link_target"
+  else
+    aidc_source="$aidc_dir/$aidc_link_target"
+  fi
+done
+
+AIDC_ROOT="$(cd -P "$(dirname "$aidc_source")/.." && pwd)"
+export AIDC_ROOT
+. "$AIDC_ROOT/lib/aidc.sh"
+
+aidc::main "$@"

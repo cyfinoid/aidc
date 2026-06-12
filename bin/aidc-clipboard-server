@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""
+Host-side clipboard server for aidc containers.
+
+Listens on a Unix socket. On each connection, runs `pbpaste -Prefer png`
+and sends the bytes back. The socket directory is bind-mounted read-only
+into each aidc container at /host-clipboard, and the in-container shims
+(pbpaste, xclip, wl-paste) proxy to this socket via socat.
+
+Run in the foreground manually, or install as a LaunchAgent.
+See HOW_TO_USE.md.
+"""
+import os
+import socket
+import subprocess
+import sys
+import threading
+
+socket_dir = os.environ.get("AIDC_CLIPBOARD_DIR") or os.path.expanduser(
+    "~/.config/aidc/clipboard"
+)
+os.makedirs(socket_dir, mode=0o700, exist_ok=True)
+os.chmod(socket_dir, 0o700)
+socket_path = os.path.join(socket_dir, "clipboard.sock")
+
+try:
+    os.unlink(socket_path)
+except FileNotFoundError:
+    pass
+
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(socket_path)
+os.chmod(socket_path, 0o600)
+server.listen(8)
+
+
+def handle(conn):
+    try:
+        result = subprocess.run(
+            ["pbpaste", "-Prefer", "png"], capture_output=True, check=False
+        )
+        conn.sendall(result.stdout)
+    except Exception as exc:
+        print(f"aidc-clipboard-server: handler error: {exc}", file=sys.stderr)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+print(f"aidc-clipboard-server: listening on {socket_path}", file=sys.stderr)
+try:
+    while True:
+        conn, _ = server.accept()
+        threading.Thread(target=handle, args=(conn,), daemon=True).start()
+except KeyboardInterrupt:
+    pass
+finally:
+    server.close()
+    try:
+        os.unlink(socket_path)
+    except FileNotFoundError:
+        pass

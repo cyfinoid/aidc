@@ -1,0 +1,73 @@
+# Security tooling
+
+For aidc's own vulnerability-disclosure policy, see [`/SECURITY.md`](../SECURITY.md). This page documents the scanners and guardrails baked into every aidc container.
+
+## Always-on scanners
+
+Every aidc image ships with:
+
+- [`semgrep`](https://semgrep.dev) — SAST. Run: `semgrep scan --config auto <paths>`.
+- [`gitleaks`](https://github.com/gitleaks/gitleaks) — secret detection. Run: `gitleaks detect --no-banner`.
+- [`trufflehog`](https://github.com/trufflesecurity/trufflehog) — secret detection with optional verification.
+
+If the egress firewall is enabled, `semgrep.dev` is in the default allowlist so `--config auto` works.
+
+## Per-toolchain linters (auto-installed)
+
+When aidc detects a language toolchain it also installs the standard security linter for that language:
+
+| Detected toolchain | Linter | Invocation |
+|---|---|---|
+| Go (`go.mod`) | `gosec` | `gosec ./...` |
+| Python (`pyproject.toml`, etc.) | `bandit` | `bandit -r <src>` |
+| Rust (`Cargo.toml`) | `cargo-audit` | `cargo audit` |
+| Ruby (`Gemfile`) | `bundler-audit` | `bundle-audit check --update` |
+
+Node uses the built-in `npm audit` (or `pnpm audit` / `yarn npm audit`); Java and PHP rely on semgrep for SAST.
+
+## Opt-in heavier tools
+
+Add to `.ai-container/project.env` and `aidc rebuild`:
+
+```bash
+AIDC_SECURITY_TOOLS=grype,syft,checkov,bandit
+```
+
+Supported: `grype` (vuln scan), `syft` (SBOM), `checkov` (IaC), `bandit` (Python SAST — already auto-installed when Python is detected; explicit listing is a no-op).
+
+## Agent-enforced guardrails
+
+The scaffold writes a "Security guardrails (non-negotiable)" block into `CLAUDE.md` and `AGENTS.md` inside the aidc-managed marker. It instructs agents to run the relevant scanners on every code change and fix findings above LOW before declaring work complete. User-edited content outside the markers is preserved on scaffold refresh.
+
+## Supply-chain guardrails (always on)
+
+The container ships with SafeDep's [`pmg`](https://github.com/safedep/pmg) and [`vet`](https://github.com/safedep/vet) baked in. `pmg setup install` runs at image build, so `~/.pmg/bin` is first on `PATH` and intercepts `npm`, `pnpm`, `yarn`, `bun`, `npx`, `pnpx`, `pip`, `pip3`, `uv`, and `poetry` — including subprocess calls from agents (Claude, Codex, OpenCode, Cursor Agent). Malicious packages are blocked before install.
+
+Run scans by hand with `aidc exec -- vet scan -D /workspace`. Re-run `pmg setup doctor` inside the container to verify wiring (`aidc exec -- pmg setup doctor`).
+
+If the egress firewall is enabled, the allowlist already includes `api.safedep.io`, `vetpkg.dev`, `osv.dev`, and `semgrep.dev`.
+
+## Agent guardrails: gryph + rtk
+
+The image also ships [`gryph`](https://github.com/safedep/gryph) (SafeDep's agent security layer — patches hook entries into the detected agents' settings) and [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — token-saving CLI proxy that rewrites commands like `git status` → `rtk git status` via the Claude Code hook).
+
+Both are auto-initialised the first time a fresh `claude_home` volume is created: `bootstrap-state.sh init` runs `gryph install` and `rtk init --global`, then drops a marker at `~/.claude/.aidc-agent-hooks-installed` so it's not rerun on every container restart. `aidc destroy -f` wipes the volume and the marker, so the next `aidc up` re-applies hooks cleanly.
+
+Verify:
+
+```bash
+aidc exec -- gryph status
+aidc exec -- rtk --version
+aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # hook entries from both
+```
+
+## Optional: egress firewall
+
+Default-deny outbound with an allowlist (Anthropic, OpenAI, Z.ai, OpenRouter, GitHub, npm, PyPI, SafeDep, OSV, semgrep.dev). All ports are open to the Tailscale CGNAT range (`100.64.0.0/10`) so tailnet peers stay reachable.
+
+```bash
+echo 'AIDC_ENABLE_EGRESS_FIREWALL=1' >> .ai-container/project.env
+aidc rebuild
+```
+
+Extend the allowlist via `.ai-container/firewall-allowlist.txt` (one hostname per line). Hostnames resolve at container start; restart to refresh.

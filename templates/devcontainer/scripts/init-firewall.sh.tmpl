@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# aidc-managed
+# Default-deny egress firewall. Run as root (sudo). Idempotent.
+# Triggered by bootstrap-state.sh when AIDC_ENABLE_EGRESS_FIREWALL=1.
+#
+# Allowlist sources, in order:
+#   1. Built-in defaults below
+#   2. /workspace/.ai-container/firewall-allowlist.txt (one host per line)
+#
+# Names are resolved at firewall-init time. If a host's IPs change later,
+# rerun the entrypoint or restart the container.
+
+set -euo pipefail
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "init-firewall.sh: must run as root" >&2
+  exit 1
+fi
+
+DEFAULT_HOSTS=(
+  api.anthropic.com
+  statsig.anthropic.com
+  api.openai.com
+  api.z.ai
+  openrouter.ai
+  github.com
+  api.github.com
+  codeload.github.com
+  objects.githubusercontent.com
+  raw.githubusercontent.com
+  registry.npmjs.org
+  pypi.org
+  files.pythonhosted.org
+  api.safedep.io
+  vetpkg.dev
+  osv.dev
+  api.osv.dev
+  semgrep.dev
+)
+
+allowlist_file="/workspace/.ai-container/firewall-allowlist.txt"
+extra_hosts=()
+if [[ -f "$allowlist_file" ]]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="${line//[[:space:]]/}"
+    [[ -n "$line" ]] || continue
+    extra_hosts+=("$line")
+  done <"$allowlist_file"
+fi
+
+hosts=("${DEFAULT_HOSTS[@]}" "${extra_hosts[@]}")
+
+ipset destroy aidc-allow 2>/dev/null || true
+ipset create aidc-allow hash:ip family inet hashsize 1024 maxelem 65536
+
+for host in "${hosts[@]}"; do
+  while IFS= read -r ip; do
+    [[ -n "$ip" ]] || continue
+    ipset add aidc-allow "$ip" 2>/dev/null || true
+  done < <(getent ahostsv4 "$host" | awk '{print $1}' | sort -u)
+done
+
+iptables -F
+iptables -X
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+iptables -A OUTPUT -m set --match-set aidc-allow dst -p tcp --dport 443 -j ACCEPT
+iptables -A OUTPUT -m set --match-set aidc-allow dst -p tcp --dport 80 -j ACCEPT
+# Tailscale CGNAT — all ports allowed (overlay is itself authenticated/encrypted).
+iptables -A OUTPUT -d 100.64.0.0/10 -j ACCEPT
+
+echo "[firewall] egress restricted; allowlist size: $(ipset list aidc-allow | grep -c '^[0-9]')"

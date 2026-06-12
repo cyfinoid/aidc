@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode="${1:-init}"
+tool="${2:-all}"
+home_dir="${AIDC_CONTAINER_HOME:-/home/vscode}"
+
+project_env="/workspace/.ai-container/project.env"
+if [[ -f "$project_env" ]]; then
+  # shellcheck disable=SC1090
+  . "$project_env"
+fi
+
+ensure_dir() {
+  mkdir -p "$1"
+}
+
+copy_file_from_seed() {
+  local source="$1"
+  local target="$2"
+  local perms="$3"
+
+  [[ -f "$source" ]] || return 0
+  ensure_dir "$(dirname "$target")"
+
+  if [[ "$mode" == "init" && -e "$target" ]]; then
+    return 0
+  fi
+
+  cp "$source" "$target"
+  chmod "$perms" "$target"
+}
+
+copy_dir_from_seed() {
+  local source="$1"
+  local target="$2"
+
+  [[ -d "$source" ]] || return 0
+
+  if [[ "$mode" == "init" && -d "$target" ]]; then
+    return 0
+  fi
+
+  ensure_dir "$target"
+  rsync -a --delete "$source"/ "$target"/
+}
+
+sync_claude() {
+  ensure_dir "$home_dir/.claude"
+  copy_file_from_seed "/host-seed/claude/settings.json" "$home_dir/.claude/settings.json" "0600"
+  copy_file_from_seed "/host-seed/claude/CLAUDE.md" "$home_dir/.claude/CLAUDE.md" "0644"
+}
+
+sync_codex() {
+  ensure_dir "$home_dir/.codex"
+  copy_file_from_seed "/host-seed/codex/auth.json" "$home_dir/.codex/auth.json" "0600"
+  copy_file_from_seed "/host-seed/codex/config.toml" "$home_dir/.codex/config.toml" "0600"
+  copy_file_from_seed "/host-seed/codex/AGENTS.md" "$home_dir/.codex/AGENTS.md" "0644"
+  copy_dir_from_seed "/host-seed/codex/rules" "$home_dir/.codex/rules"
+  copy_dir_from_seed "/host-seed/codex/skills" "$home_dir/.codex/skills"
+}
+
+sync_opencode() {
+  ensure_dir "$home_dir/.config/opencode"
+  copy_file_from_seed "/host-seed/opencode/opencode.json" "$home_dir/.config/opencode/opencode.json" "0600"
+  copy_dir_from_seed "/host-seed/opencode/plugins" "$home_dir/.config/opencode/plugins"
+}
+
+sync_gitconfig_overlay() {
+  local overlay="$home_dir/.gitconfig.local"
+  if [[ ! -f "$overlay" && -f /host-seed/gitconfig ]]; then
+    cp /host-seed/gitconfig "$overlay"
+    chmod 0644 "$overlay"
+  fi
+}
+
+install_agent_hooks() {
+  # Marker lives in the claude_home volume so it survives container restarts
+  # but is wiped by 'aidc destroy', triggering a fresh re-init.
+  local marker="$home_dir/.claude/.aidc-agent-hooks-installed"
+  [[ -f "$marker" ]] && return 0
+
+  if command -v gryph >/dev/null 2>&1; then
+    gryph install >/dev/null 2>&1 || echo "[bootstrap] gryph install failed" >&2
+  fi
+  if command -v rtk >/dev/null 2>&1; then
+    rtk init --global >/dev/null 2>&1 || echo "[bootstrap] rtk init --global failed" >&2
+  fi
+
+  mkdir -p "$(dirname "$marker")"
+  touch "$marker"
+}
+
+align_uid() {
+  # No-op unless invoked as root AND /workspace is owned by a non-vscode uid.
+  # On macOS (Docker Desktop / OrbStack) bind mounts already present the
+  # container user's uid, so this stays dormant. Kept here so the setup is
+  # correct if the compose entrypoint is ever switched to root.
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  [[ -d /workspace ]] || return 0
+
+  local host_uid host_gid
+  host_uid="$(stat -c %u /workspace 2>/dev/null || echo 1000)"
+  host_gid="$(stat -c %g /workspace 2>/dev/null || echo 1000)"
+  [[ "$host_uid" -eq 1000 && "$host_gid" -eq 1000 ]] && return 0
+
+  usermod -u "$host_uid" vscode 2>/dev/null || true
+  groupmod -g "$host_gid" vscode 2>/dev/null || true
+  chown -R "$host_uid:$host_gid" "$home_dir" /commandhistory 2>/dev/null || true
+}
+
+run_firewall_if_enabled() {
+  [[ "${AIDC_ENABLE_EGRESS_FIREWALL:-0}" == "1" ]] || return 0
+  local script="/workspace/.devcontainer/scripts/init-firewall.sh"
+  [[ -x "$script" ]] || return 0
+
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$script" || echo "[bootstrap] firewall init failed" >&2
+  else
+    sudo -n "$script" || echo "[bootstrap] firewall init failed (sudo required)" >&2
+  fi
+}
+
+sync_tool() {
+  case "$1" in
+    claude)
+      sync_claude
+      ;;
+    codex)
+      sync_codex
+      ;;
+    opencode)
+      sync_opencode
+      ;;
+    all)
+      sync_claude
+      sync_codex
+      sync_opencode
+      ;;
+    *)
+      echo "unsupported tool: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+case "$mode" in
+  init)
+    align_uid
+    ensure_dir "/commandhistory"
+    sync_tool "all"
+    sync_gitconfig_overlay
+    install_agent_hooks
+    run_firewall_if_enabled
+    ;;
+  sync)
+    sync_tool "$tool"
+    ;;
+  *)
+    echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|all]" >&2
+    exit 1
+    ;;
+esac
