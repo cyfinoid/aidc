@@ -1029,7 +1029,9 @@ aidc::lima_export_docker_host() {
     mkdir -p "$socket_dir"
     limactl copy "$vm_name:/var/run/docker.sock" "$(aidc::vm_socket_path "$vm_name")" 2>/dev/null || true
     if [[ -S "$(aidc::vm_socket_path "$vm_name")" ]]; then
-      export DOCKER_HOST="unix://$(aidc::vm_socket_path "$vm_name")"
+      local vm_docker_host
+      vm_docker_host="unix://$(aidc::vm_socket_path "$vm_name")"
+      export DOCKER_HOST="$vm_docker_host"
       aidc::log "DOCKER_HOST set to Lima VM: $DOCKER_HOST"
     else
       aidc::warn "could not locate Docker socket for Lima VM $vm_name"
@@ -1111,10 +1113,7 @@ aidc::firecracker_ensure() {
   aidc::log "  Kernel: $AIDC_FIRECRACKER_KERNEL  Rootfs: $AIDC_FIRECRACKER_ROOTFS"
   aidc::log "  ⚠ Each isolated VM uses significant CPU/RAM/disk. See README 'Isolation modes'."
 
-  # Generate a unique VMID for the jailer (if using jailer) or direct launch.
-  local vmid="$vm_name"
-
-  # Create a per-VM copy-on-write rootfs overlay so the base image stays clean.
+  # Generate a per-VM copy-on-write rootfs overlay so the base image stays clean.
   local vm_rootfs="$socket_dir/$vm_name-rootfs.ext4"
   if [[ ! -f "$vm_rootfs" ]]; then
     cp --reflink=auto "$AIDC_FIRECRACKER_ROOTFS" "$vm_rootfs" 2>/dev/null || \
