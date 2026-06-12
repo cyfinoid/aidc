@@ -64,9 +64,9 @@ Tool commands (`aidc claude` / `codex` / `opencode` / `cursor-agent`) auto-boots
 
 ```bash
 aidc init [path]
-aidc up
+aidc up [--clipboard]
 aidc down
-aidc rebuild
+aidc rebuild [--clipboard]
 aidc status [--global]
 aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
 aidc shell
@@ -89,6 +89,7 @@ aidc sync-sessions [claude|codex|opencode|all]
 
 - Generated files are added to `.git/info/exclude` when the target directory is a git repo, so your project stays clean.
 - Container egress is open by default; set `AIDC_ENABLE_EGRESS_FIREWALL=1` in `.ai-container/project.env` for a default-deny allowlist. See [`docs/security.md`](docs/security.md#optional-egress-firewall).
+- The host-clipboard bridge is **off by default** — no host clipboard socket is mounted into the container. Opt in per (re)create with `aidc up --clipboard` / `aidc rebuild --clipboard`, or persist `AIDC_ENABLE_CLIPBOARD=1` in `.ai-container/project.env`. See [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md).
 - Generated Claude alias wrappers are `aidc`-managed and live in `~/.local/bin` by default.
 
 ## 🤖 AI-Assisted Development

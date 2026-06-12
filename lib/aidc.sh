@@ -52,13 +52,13 @@ aidc::main() {
       aidc::cmd_init "$@"
       ;;
     up)
-      aidc::cmd_up
+      aidc::cmd_up "$@"
       ;;
     down)
       aidc::cmd_down
       ;;
     rebuild)
-      aidc::cmd_rebuild
+      aidc::cmd_rebuild "$@"
       ;;
     status)
       aidc::cmd_status "$@"
@@ -111,9 +111,9 @@ aidc - AI devcontainer bootstrapper
 
 Usage:
   aidc init [path]
-  aidc up
+  aidc up [--clipboard]
   aidc down
-  aidc rebuild
+  aidc rebuild [--clipboard]
   aidc status [--global]
   aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
   aidc shell
@@ -136,6 +136,8 @@ Notes:
     Worktree and scaffold removal are opt-in via the listed flags.
   - aidc sync-sessions pulls in-container session logs back to host
     ~/.claude/projects so '/insights' on the host can see them.
+  - The host-clipboard bridge is off by default. Enable it at (re)create time
+    with 'aidc up --clipboard' or 'aidc rebuild --clipboard'.
 EOF
 }
 
@@ -201,6 +203,7 @@ aidc::refresh_scaffold() {
 
 aidc::cmd_up() {
   local workspace
+  aidc::parse_clipboard_flag "$@"
   workspace="$(aidc::default_workspace)"
   aidc::ensure_workspace_ready "$workspace"
   aidc::compose "$workspace" up -d --build workspace
@@ -209,10 +212,25 @@ aidc::cmd_up() {
 
 aidc::cmd_rebuild() {
   local workspace
+  aidc::parse_clipboard_flag "$@"
   workspace="$(aidc::default_workspace)"
   aidc::ensure_workspace_ready "$workspace"
   aidc::compose "$workspace" up -d --build --force-recreate workspace
   aidc::log "container rebuilt for $(basename "$workspace")"
+}
+
+# Opt-in host-clipboard bridge. Off by default: 'aidc up --clipboard' (or
+# 'aidc rebuild --clipboard') exports AIDC_ENABLE_CLIPBOARD=1 so the mount is
+# wired in at container (re)create time. The toggle can also be persisted in
+# .ai-container/project.env. See docs/clipboard-bridge.md.
+aidc::parse_clipboard_flag() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --clipboard) export AIDC_ENABLE_CLIPBOARD=1 ;;
+      *) aidc::die "unknown flag: $1" ;;
+    esac
+    shift
+  done
 }
 
 aidc::cmd_down() {
@@ -1146,7 +1164,11 @@ aidc::compose_capture() {
 
 aidc::export_compose_env() {
   local workspace="$1"
+  # Capture any CLI/ambient clipboard toggle before project.env is sourced, so
+  # an explicit 'aidc up --clipboard' wins over a project.env default.
+  local clipboard_override="${AIDC_ENABLE_CLIPBOARD:-}"
   aidc::load_project_env "$workspace"
+  [[ -n "$clipboard_override" ]] && AIDC_ENABLE_CLIPBOARD="$clipboard_override"
 
   export COMPOSE_PROJECT_NAME="aidc_${AIDC_REPO_SLUG}"
   export AIDC_WORKSPACE="$workspace"
@@ -1160,8 +1182,16 @@ aidc::export_compose_env() {
   AIDC_HOST_SEED_OPENCODE="$(aidc::mount_dir_or_empty "$HOME/.config/opencode" "opencode")"
   export AIDC_GITCONFIG_SOURCE
   AIDC_GITCONFIG_SOURCE="$(aidc::mount_file_or_empty "$HOME/.gitconfig" "gitconfig")"
+  # Host-clipboard bridge is opt-in (off by default). When disabled, mount an
+  # empty dir so no host clipboard socket is ever exposed to the container.
+  # Enable per (re)create with 'aidc up --clipboard' / 'aidc rebuild --clipboard'
+  # or persist AIDC_ENABLE_CLIPBOARD=1 in .ai-container/project.env.
   export AIDC_CLIPBOARD_DIR_SOURCE
-  AIDC_CLIPBOARD_DIR_SOURCE="$(aidc::mount_dir_or_empty "$HOME/.config/aidc/clipboard" "clipboard")"
+  if [[ "${AIDC_ENABLE_CLIPBOARD:-0}" == "1" ]]; then
+    AIDC_CLIPBOARD_DIR_SOURCE="$(aidc::mount_dir_or_empty "$HOME/.config/aidc/clipboard" "clipboard")"
+  else
+    AIDC_CLIPBOARD_DIR_SOURCE="$(aidc::mount_dir_or_empty "" "clipboard")"
+  fi
   export AIDC_TOOLCHAINS
   AIDC_TOOLCHAINS="$(aidc::compute_toolchains "$workspace")"
   # Opt-in security tools (semgrep/gitleaks/trufflehog are always-on in the
