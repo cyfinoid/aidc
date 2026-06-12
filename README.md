@@ -91,6 +91,9 @@ aidc sync-sessions [claude|codex|opencode|all]
 - Container egress is open by default; set `AIDC_ENABLE_EGRESS_FIREWALL=1` in `.ai-container/project.env` for a default-deny allowlist. See [`docs/security.md`](docs/security.md#optional-egress-firewall).
 - Generated Claude alias wrappers are `aidc`-managed and live in `~/.local/bin` by default.
 
+## 🤖 AI-Assisted Development
+This project was developed with the assistance of AI tools, most notably Cursor IDE and Claude Code. These tools helped accelerate development and improve velocity. All AI-generated code has been carefully reviewed and validated through human inspection to ensure it aligns with the project's intended functionality and quality standards.
+
 ## License
 
 GPL-3.0-only. See [`LICENSE`](LICENSE).
