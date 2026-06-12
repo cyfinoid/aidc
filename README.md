@@ -17,6 +17,7 @@ Pre-1.0, rolling-release, personal-ish. The author uses it daily; the API may st
 - **macOS** (host-side bits assume Mac — Keychain, LaunchAgent, `pbpaste`, `~/.local/bin` aliases)
 - **Docker** running (Docker Desktop / OrbStack / Colima)
 - **git**
+- *(optional, high-security mode)* **Lima** on macOS or **Firecracker** on Linux — only needed if you enable `--isolate-vm`
 
 ## Install
 
@@ -64,9 +65,9 @@ Tool commands (`aidc claude` / `codex` / `opencode` / `cursor-agent`) auto-boots
 
 ```bash
 aidc init [path]
-aidc up [--clipboard]
+aidc up [--clipboard] [--isolate-vm]
 aidc down
-aidc rebuild [--clipboard]
+aidc rebuild [--clipboard] [--isolate-vm]
 aidc status [--global]
 aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
 aidc shell
@@ -85,11 +86,59 @@ aidc sync-sessions [claude|codex|opencode|all]
 
 `--provider` remains as a compatibility alias for `--profile`.
 
+## Isolation modes
+
+aidc runs in one of two isolation modes. **Normal mode is the default and is what most people should use.**
+
+### Normal mode (default)
+
+Runs your project inside a Docker container. On macOS, Docker Desktop/OrbStack/Colima already wraps that container inside a Linux VM — your code is isolated from the host by both the container boundary *and* the VM boundary. All aidc containers share the same Docker VM, so they're isolated from each other by standard container namespacing (PID, network, filesystem, IPC) but not by a hypervisor boundary.
+
+**This is fine for practically everyone.** The container + VM double boundary on macOS, combined with aidc's always-on scanners, read-only mounts, named volumes (no host home directory access), and optional egress firewall, already provides strong isolation between the AI agent and your host system.
+
+### High-security mode (`--isolate-vm`)
+
+Spawns each project in its own lightweight VM instead of sharing a single Docker VM.
+
+| | Normal | High-security |
+|---|---|---|
+| **macOS** | Docker container inside shared Docker VM | Dedicated Lima VM per project |
+| **Linux** | Docker container (shared kernel) | Dedicated Firecracker microVM per project |
+| **Isolation boundary** | Container namespaces | Hypervisor (hardware-enforced) |
+| **Per-project overhead** | ~50–100 MB RAM | ~512 MB–1 GB RAM + ~1 GB disk per VM |
+| **Startup time** | ~2–5 s | ~10–30 s (VM boot + container init) |
+| **Use when** | Everyday development | See below |
+
+Enable it per-project:
+```bash
+aidc up --isolate-vm
+# or persist it:
+echo "AIDC_ISOLATE_VM=1" >> .ai-container/project.env
+```
+
+**Resource warning:** Each isolated VM consumes significantly more CPU, RAM, and disk than a shared Docker container. On a machine with 8 GB RAM, running more than 2–3 isolated projects simultaneously will be uncomfortable. Use this mode only when you have a clear reason.
+
+### When high-security mode *might* make sense
+
+- **You're running AI agents against proprietary or regulated codebases** (e.g., financial, healthcare, defense) where a container escape — even theoretical — is unacceptable.
+- **You don't trust the Docker VM shared-tenant model** and want hardware-enforced hypervisor boundaries between projects.
+- **You're on Linux** where normal Docker containers share the host kernel directly (no nested VM), so a kernel exploit in one container could affect the host and sibling containers.
+- **You're running untrusted or third-party agent code** (custom MCP servers, community tool plugins) and want an additional containment layer.
+
+### When high-security mode is almost certainly overkill
+
+- **You're a solo developer on a personal machine.** The attacker model here is "the AI agent goes rogue" — and aidc's default container isolation, volume architecture, scanner enforcement, and optional egress firewall already handle that scenario well.
+- **You're on macOS and already trust Docker Desktop / OrbStack.** Your containers are already inside a VM. A breakout requires two independent escapes (container → VM, then VM → host). Adding a per-project VM adds a third boundary, but the incremental security gain is small compared to the resource cost.
+- **You're just trying aidc out.** Start with normal mode. You can always switch later with `aidc rebuild --isolate-vm`.
+
+> **Note:** Linux + Firecracker support is included in the codebase but is not yet enabled by default. aidc currently ships as macOS-first. If you're on Linux and want to experiment, set `AIDC_ISOLATE_VM=1` and ensure `firecracker` is installed — but expect rough edges.
+
 ## Notes
 
 - Generated files are added to `.git/info/exclude` when the target directory is a git repo, so your project stays clean.
 - Container egress is open by default; set `AIDC_ENABLE_EGRESS_FIREWALL=1` in `.ai-container/project.env` for a default-deny allowlist. See [`docs/security.md`](docs/security.md#optional-egress-firewall).
 - The host-clipboard bridge is **off by default** — no host clipboard socket is mounted into the container. Opt in per (re)create with `aidc up --clipboard` / `aidc rebuild --clipboard`, or persist `AIDC_ENABLE_CLIPBOARD=1` in `.ai-container/project.env`. See [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md).
+- Per-project VM isolation (`--isolate-vm`) is **off by default** due to resource cost. Opt in per (re)create with `aidc up --isolate-vm` / `aidc rebuild --isolate-vm`, or persist `AIDC_ISOLATE_VM=1` in `.ai-container/project.env`. See [Isolation modes](#isolation-modes) above.
 - Generated Claude alias wrappers are `aidc`-managed and live in `~/.local/bin` by default.
 
 ## 🤖 AI-Assisted Development
