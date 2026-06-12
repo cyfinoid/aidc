@@ -1218,7 +1218,12 @@ aidc::detect_toolchains() {
   if [[ -f "$workspace/requirements.txt" || -f "$workspace/uv.lock" || -f "$workspace/pyproject.toml" || -f "$workspace/Pipfile" || -f "$workspace/Pipfile.lock" || -f "$workspace/poetry.lock" ]]; then
     detected+=("python")
   fi
-  (IFS=,; printf '%s' "${detected[*]}")
+  # Join with commas without touching the global IFS.
+  local out="" item
+  for item in "${detected[@]}"; do
+    out+="${out:+,}$item"
+  done
+  printf '%s' "$out"
 }
 
 aidc::compute_toolchains() {
