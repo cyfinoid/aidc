@@ -66,6 +66,16 @@ sync_opencode() {
   copy_dir_from_seed "/host-seed/opencode/plugins" "$home_dir/.config/opencode/plugins"
 }
 
+sync_grok() {
+  ensure_dir "$home_dir/.grok"
+  # Grok stores config + credentials under ~/.grok. Filenames differ across
+  # builds (config.toml / user-settings.json / an auth file), so copy whichever
+  # the host provides — copy_file_from_seed is a no-op when the source is absent.
+  copy_file_from_seed "/host-seed/grok/config.toml" "$home_dir/.grok/config.toml" "0600"
+  copy_file_from_seed "/host-seed/grok/user-settings.json" "$home_dir/.grok/user-settings.json" "0600"
+  copy_file_from_seed "/host-seed/grok/auth.json" "$home_dir/.grok/auth.json" "0600"
+}
+
 sync_gitconfig_overlay() {
   local overlay="$home_dir/.gitconfig.local"
   if [[ ! -f "$overlay" && -f /host-seed/gitconfig ]]; then
@@ -132,10 +142,14 @@ sync_tool() {
     opencode)
       sync_opencode
       ;;
+    grok)
+      sync_grok
+      ;;
     all)
       sync_claude
       sync_codex
       sync_opencode
+      sync_grok
       ;;
     *)
       echo "unsupported tool: $1" >&2
@@ -157,7 +171,7 @@ case "$mode" in
     sync_tool "$tool"
     ;;
   *)
-    echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|all]" >&2
+    echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|all]" >&2
     exit 1
     ;;
 esac

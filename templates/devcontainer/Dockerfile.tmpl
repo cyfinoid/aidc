@@ -68,8 +68,10 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NODE_OPTIONS=--max-old-space-size=4096
 
-RUN npm_config_ignore_scripts=false npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai@latest \
-    && npm cache clean --force
+# Coding agents are installed as native prebuilt binaries per-user below (no
+# npm-global, no Node runtime dependency for the agents themselves). The
+# NPM_CONFIG_* hardening above still governs any npm the agents or project
+# toolchains invoke at runtime.
 
 # Supply-chain guardrails: pmg intercepts npm/pip/uv/etc. and runs vet checks
 # before installs. Binaries installed system-wide; shell/shim wiring done
@@ -187,18 +189,34 @@ RUN chmod 0755 /usr/local/bin/aidc-bootstrap-claude
 USER vscode
 
 ENV HOME=/home/vscode
+# ~/.pmg/bin is FIRST on PATH on purpose. pmg interception rides on these PATH
+# shims, NOT on the shell aliases pmg also writes to ~/.zshrc/~/.bashrc: build
+# RUN steps and exec'd agent subprocesses never source rc files, so only the
+# shims (first on PATH at build and runtime) reliably gate npm/pip/uv/etc.
 ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/bin
 
+# Wire pmg in before ANY user-level package install so nothing slips past it.
+RUN pmg setup install \
+    && pmg setup doctor || true
+
+# Coding agents as native prebuilt binaries. Each installer drops a binary into
+# ~/.local/bin (already on PATH) via plain curl — no npm dependency resolution,
+# so pmg has nothing to vet here; the "pmg first" invariant above still holds.
+# Grok's binary is forced into ~/.local/bin via GROK_BIN_DIR so the grok_home
+# volume mounted at ~/.grok at runtime cannot shadow it.
 RUN mkdir -p \
       /home/vscode/.local/bin \
       /home/vscode/.claude \
       /home/vscode/.codex \
       /home/vscode/.config/opencode \
       /home/vscode/.cursor-agent \
+      /home/vscode/.grok \
+    && curl -fsSL https://claude.ai/install.sh | bash \
+    && curl -fsSL https://chatgpt.com/codex/install.sh | sh \
+    && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
     && curl -fsS https://cursor.com/install | bash \
     && { cursor-agent --version || true; } \
-    && pmg setup install \
-    && pmg setup doctor || true
+    && curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/home/vscode/.local/bin bash
 
 # Auto-detected toolchains. aidc fills AIDC_TOOLCHAINS by scanning the
 # workspace for marker files (go.mod, Cargo.toml, etc.). Override per repo

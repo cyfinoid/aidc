@@ -81,6 +81,9 @@ aidc::main() {
     opencode)
       aidc::cmd_opencode "$@"
       ;;
+    grok)
+      aidc::cmd_grok "$@"
+      ;;
     cursor-agent)
       aidc::cmd_cursor_agent "$@"
       ;;
@@ -121,11 +124,12 @@ Usage:
   aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
   aidc codex [-- ...]
   aidc opencode [-- ...]
+  aidc grok [-- ...]
   aidc cursor-agent [-- ...]
   aidc cursor
   aidc sync-claude-aliases
-  aidc sync-config <claude|codex|opencode|all>
-  aidc sync-sessions [claude|codex|opencode|all]
+  aidc sync-config <claude|codex|opencode|grok|all>
+  aidc sync-sessions [claude|codex|opencode|grok|all]
 
 Notes:
   - Run commands from the repo root you want to isolate.
@@ -385,6 +389,7 @@ aidc::status_config() {
   aidc::status_mount_row "/host-seed/claude" "$AIDC_HOST_SEED_CLAUDE" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/codex" "$AIDC_HOST_SEED_CODEX" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/opencode" "$AIDC_HOST_SEED_OPENCODE" "$c_dim" "$c_rst"
+  aidc::status_mount_row "/host-seed/grok" "$AIDC_HOST_SEED_GROK" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/gitconfig" "$AIDC_GITCONFIG_SOURCE" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-clipboard" "$AIDC_CLIPBOARD_DIR_SOURCE" "$c_dim" "$c_rst"
 
@@ -680,6 +685,10 @@ aidc::cmd_opencode() {
   aidc::run_tool "opencode" "" "$@"
 }
 
+aidc::cmd_grok() {
+  aidc::run_tool "grok" "" "$@"
+}
+
 aidc::cmd_cursor_agent() {
   aidc::run_tool "cursor-agent" "" "$@"
 }
@@ -704,7 +713,7 @@ aidc::cmd_sync_config() {
   local workspace
   workspace="$(aidc::default_workspace)"
   local tool="${1:-}"
-  [[ -n "$tool" ]] || aidc::die "usage: aidc sync-config <claude|codex|opencode|all>"
+  [[ -n "$tool" ]] || aidc::die "usage: aidc sync-config <claude|codex|opencode|grok|all>"
   aidc::ensure_container_running "$workspace"
   aidc::compose "$workspace" exec workspace /workspace/.devcontainer/scripts/bootstrap-state.sh sync "$tool"
   aidc::log "synced $tool config into the container volume"
@@ -717,14 +726,15 @@ aidc::cmd_sync_sessions() {
   aidc::ensure_container_running "$workspace"
 
   case "$tool" in
-    claude|codex|opencode|all) ;;
-    *) aidc::die "usage: aidc sync-sessions [claude|codex|opencode|all]" ;;
+    claude|codex|opencode|grok|all) ;;
+    *) aidc::die "usage: aidc sync-sessions [claude|codex|opencode|grok|all]" ;;
   esac
 
   if [[ "$tool" == "all" ]]; then
     aidc::sync_session_tool "$workspace" claude
     aidc::sync_session_tool "$workspace" codex
     aidc::sync_session_tool "$workspace" opencode
+    aidc::sync_session_tool "$workspace" grok
   else
     aidc::sync_session_tool "$workspace" "$tool"
   fi
@@ -747,6 +757,10 @@ aidc::sync_session_tool() {
     opencode)
       container_src="/home/vscode/.config/opencode/projects"
       host_dst="$HOME/.config/opencode/projects"
+      ;;
+    grok)
+      container_src="/home/vscode/.grok/sessions"
+      host_dst="$HOME/.grok/sessions"
       ;;
     *)
       aidc::die "unknown session tool: $tool"
@@ -794,6 +808,12 @@ aidc::run_tool() {
       ;;
     opencode)
       command=("opencode")
+      ;;
+    grok)
+      # The container is already the isolation boundary; grok runs unsandboxed
+      # like the other agents. Grok Build has operating modes (e.g. plan/auto);
+      # append the full-autonomy mode flag here once confirmed against the CLI.
+      command=("grok")
       ;;
     cursor-agent)
       command=("cursor-agent" "--sandbox" "disabled" "-f")
@@ -1501,7 +1521,7 @@ aidc::ensure_core_worktree() {
 
 aidc::ensure_host_config_dirs() {
   mkdir -p "$AIDC_HOST_CONFIG_ROOT" "$AIDC_EMPTY_ROOT" "$AIDC_CLAUDE_PROFILE_ROOT"
-  mkdir -p "$AIDC_EMPTY_ROOT/claude" "$AIDC_EMPTY_ROOT/codex" "$AIDC_EMPTY_ROOT/opencode" "$AIDC_EMPTY_ROOT/clipboard"
+  mkdir -p "$AIDC_EMPTY_ROOT/claude" "$AIDC_EMPTY_ROOT/codex" "$AIDC_EMPTY_ROOT/opencode" "$AIDC_EMPTY_ROOT/grok" "$AIDC_EMPTY_ROOT/clipboard"
   touch "$AIDC_EMPTY_ROOT/gitconfig"
 }
 
@@ -1600,6 +1620,8 @@ aidc::export_compose_env() {
   AIDC_HOST_SEED_CODEX="$(aidc::mount_dir_or_empty "$HOME/.codex" "codex")"
   export AIDC_HOST_SEED_OPENCODE
   AIDC_HOST_SEED_OPENCODE="$(aidc::mount_dir_or_empty "$HOME/.config/opencode" "opencode")"
+  export AIDC_HOST_SEED_GROK
+  AIDC_HOST_SEED_GROK="$(aidc::mount_dir_or_empty "$HOME/.grok" "grok")"
   export AIDC_GITCONFIG_SOURCE
   AIDC_GITCONFIG_SOURCE="$(aidc::mount_file_or_empty "$HOME/.gitconfig" "gitconfig")"
   # Host-clipboard bridge is opt-in (off by default). When disabled, mount an

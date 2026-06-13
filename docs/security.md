@@ -41,11 +41,44 @@ The scaffold writes a "Security guardrails (non-negotiable)" block into `CLAUDE.
 
 ## Supply-chain guardrails (always on)
 
-The container ships with SafeDep's [`pmg`](https://github.com/safedep/pmg) and [`vet`](https://github.com/safedep/vet) baked in. `pmg setup install` runs at image build, so `~/.pmg/bin` is first on `PATH` and intercepts `npm`, `pnpm`, `yarn`, `bun`, `npx`, `pnpx`, `pip`, `pip3`, `uv`, and `poetry` — including subprocess calls from agents (Claude, Codex, OpenCode, Cursor Agent). Malicious packages are blocked before install.
+The container ships with SafeDep's [`pmg`](https://github.com/safedep/pmg) and [`vet`](https://github.com/safedep/vet) baked in. `pmg setup install` runs at image build **before any user-level package install**, and interception rides on the `~/.pmg/bin` PATH shims — which are first on the image `ENV PATH` for both build and runtime. It is deliberately **not** dependent on the shell aliases pmg also writes to `~/.zshrc`/`~/.bashrc`: Docker build `RUN` steps and exec'd agent subprocesses never source rc files, so only the PATH shims reliably gate package managers. The shims intercept `npm`, `pnpm`, `yarn`, `bun`, `npx`, `pnpx`, `pip`, `pip3`, `uv`, and `poetry` — including subprocess calls from agents (Claude, Codex, OpenCode, Grok, Cursor Agent). Malicious packages are blocked before install.
 
-Run scans by hand with `aidc exec -- vet scan -D /workspace`. Re-run `pmg setup doctor` inside the container to verify wiring (`aidc exec -- pmg setup doctor`).
+The coding agents themselves are installed as **native prebuilt binaries** (via each vendor's `curl | sh` installer), not `npm install -g`, so there is no agent-install step for pmg to vet and no Node runtime dependency for the agents. The `NPM_CONFIG_*` hardening in the image still governs any npm the agents or project toolchains invoke at runtime, which the pmg shims gate.
+
+Run scans by hand with `aidc exec -- vet scan -D /workspace`. Re-run `pmg setup doctor` inside the container to verify wiring (`aidc exec -- pmg setup doctor`). To confirm interception is alias-independent, check that the shim wins without sourcing rc files: `aidc exec -- bash -c 'command -v npm'` should resolve under `~/.pmg/bin`.
 
 If the egress firewall is enabled, the allowlist already includes `api.safedep.io`, `vetpkg.dev`, `osv.dev`, and `semgrep.dev`.
+
+## Sharing credentials with the agents
+
+aidc never mounts your whole host home into the container. Instead each agent's
+config/auth is shared two ways, both scoped to that agent:
+
+**1. Read-only seed mounts (the default path).** On first startup
+`bootstrap-state.sh init` copies selected files from host config dirs (mounted
+read-only at `/host-seed/<tool>`) into the agent's per-repo volume:
+
+| Agent | Host source | Container volume | Seeded by |
+|---|---|---|---|
+| Claude | `~/.claude` | `~/.claude` | `settings.json`, `CLAUDE.md` |
+| Codex | `~/.codex` | `~/.codex` | `auth.json`, `config.toml`, `AGENTS.md`, `rules/`, `skills/` |
+| OpenCode | `~/.config/opencode` | `~/.config/opencode` | `opencode.json`, `plugins/` |
+| Grok | `~/.grok` | `~/.grok` | `config.toml` / `user-settings.json` / `auth.json` (whichever exists) |
+
+Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|all>`.
+Because the seed is read-only and only specific files are copied, the agents
+reuse your existing logins without the container being able to write back to the
+host. After interactive login *inside* the container, credentials persist in the
+named volume across restarts (and are wiped by `aidc destroy`).
+
+**2. Environment-variable passthrough.** For headless/API-key auth, `aidc`
+forwards a fixed set of host env vars into the agent process when present:
+`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
+`CURSOR_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL`. OpenCode and Grok can
+both speak to multiple providers, so these shared keys let all the agents reuse
+the same host credentials. For xAI specifically, either log in interactively
+(persisted in `~/.grok`) or export the xAI key on the host and add it to the
+passthrough list in `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc.sh`) before launching.
 
 ## Agent guardrails: gryph + rtk
 

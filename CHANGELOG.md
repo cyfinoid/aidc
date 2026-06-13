@@ -6,6 +6,7 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ### Added
 
+- **Grok Build agent.** `aidc grok` launches xAI's Grok Build CLI inside the container, with a `grok_home` named volume (`~/.grok`), a read-only `/host-seed/grok` seed mount, `sync_grok` seeding in `bootstrap-state.sh`, and `aidc sync-config`/`sync-sessions` support. Grok reads the same generated `AGENTS.md`.
 - **GPL-3.0 license.** `LICENSE` at repo root.
 - **Vulnerability disclosure policy.** `SECURITY.md` documents scope, reporting channels, and timelines.
 - **Shellcheck CI.** `.github/workflows/shellcheck.yml` lints `bin/aidc`, `install.sh`, `lib/aidc.sh`, and `templates/**/*.sh`, plus syntax-checks the Python clipboard server.
@@ -22,6 +23,8 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ### Changed
 
+- **Coding agents now install as native prebuilt binaries.** `claude`, `codex`, and `opencode` switched from a root `npm install -g` to each vendor's native `curl | sh` installer (into `~/.local/bin`), dropping the Node runtime dependency for the agents and shrinking the npm supply-chain surface. Removes the only build step that ran package-manager installs *before* `pmg setup install`.
+- **pmg wired in before any user-level install.** `pmg setup install` is now the first `USER vscode` build step. Interception is documented as riding on the `~/.pmg/bin` PATH shims (first on `ENV PATH`) rather than the rc-file aliases pmg also writes — build `RUN` steps and exec'd agents never source rc files. `docs/security.md` now describes the shared-credentials seed-mount/env-passthrough matrix.
 - **Pinned `gitleaks` and `vet` versions** in `templates/devcontainer/Dockerfile.tmpl` (`v8.30.1` and `v1.17.3` respectively). Defaults were `latest`, which resolved at build time and defeated the surrounding base-image SHA pin. Repin instructions are in the Dockerfile.
 - **README** and the docs/ tree brought into sync with the above. README's command list includes `aidc status`, `aidc down`, `aidc destroy`, `aidc exec`, and `aidc sync-sessions`. `docs/security.md` covers the scanners, supply-chain guardrails, and egress firewall; `docs/claude-profiles.md` covers the local-model profiles (`localhost.env.example`, `localnetwork.env.example`).
 
