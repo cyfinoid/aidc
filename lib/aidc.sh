@@ -628,7 +628,7 @@ aidc::cmd_exec() {
 
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_passthrough_env_args
-  aidc::compose "$workspace" exec "${AIDC_EXEC_ENV_ARGS[@]}" workspace "$@"
+  aidc::compose_exec "$workspace" "$@"
 }
 
 aidc::cmd_claude() {
@@ -669,7 +669,7 @@ aidc::cmd_claude() {
     return
   fi
 
-  aidc::run_tool "claude" "$profile" "${args[@]}"
+  aidc::run_tool "claude" "$profile" "${args[@]+"${args[@]}"}"
 }
 
 aidc::cmd_codex() {
@@ -807,7 +807,7 @@ aidc::run_tool() {
     command+=("$@")
   fi
 
-  aidc::compose "$workspace" exec "${AIDC_EXEC_ENV_ARGS[@]}" workspace "${command[@]}"
+  aidc::compose_exec "$workspace" "${command[@]}"
 }
 
 aidc::need_cmd() {
@@ -1572,6 +1572,19 @@ aidc::compose() {
   docker compose -f "$workspace/.devcontainer/compose.yaml" "$@"
 }
 
+# `compose exec` with the accumulated passthrough env flags injected before
+# the service name. The ${arr[@]+"${arr[@]}"} guard is the project-wide idiom
+# for expanding a possibly-empty array: macOS ships bash 3.2, where a plain
+# "${arr[@]}" on an empty array is an "unbound variable" error under `set -u`.
+# Use this same guard anywhere a dynamically-built array may be empty.
+aidc::compose_exec() {
+  local workspace="$1"
+  shift
+  aidc::compose "$workspace" exec \
+    "${AIDC_EXEC_ENV_ARGS[@]+"${AIDC_EXEC_ENV_ARGS[@]}"}" \
+    workspace "$@"
+}
+
 aidc::compose_capture() {
   local workspace="$1"
   shift
@@ -1661,7 +1674,7 @@ aidc::detect_toolchains() {
   fi
   # Join with commas without touching the global IFS.
   local out="" item
-  for item in "${detected[@]}"; do
+  for item in "${detected[@]+"${detected[@]}"}"; do
     out+="${out:+,}$item"
   done
   printf '%s' "$out"
@@ -1834,7 +1847,7 @@ aidc::remove_stale_claude_aliases() {
     fi
 
     alias_name="$(basename "$path")"
-    if ! aidc::array_contains "$alias_name" "${desired_aliases[@]}"; then
+    if ! aidc::array_contains "$alias_name" "${desired_aliases[@]+"${desired_aliases[@]}"}"; then
       rm -f "$path"
       aidc::log "removed stale Claude alias $alias_name"
     fi
@@ -1862,7 +1875,7 @@ aidc::sync_claude_aliases() {
     aidc::log "synced Claude alias $alias_name"
   done < <(aidc::find_claude_profiles)
 
-  aidc::remove_stale_claude_aliases "${desired_aliases[@]}"
+  aidc::remove_stale_claude_aliases "${desired_aliases[@]+"${desired_aliases[@]}"}"
 }
 
 aidc::load_claude_profile_env() {
