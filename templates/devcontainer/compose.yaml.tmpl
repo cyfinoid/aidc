@@ -50,6 +50,10 @@ services:
         target: /host-seed/opencode
         read_only: true
       - type: bind
+        source: ${AIDC_HOST_SEED_GROK}
+        target: /host-seed/grok
+        read_only: true
+      - type: bind
         source: ${AIDC_GITCONFIG_SOURCE}
         target: /host-seed/gitconfig
         read_only: true
@@ -72,6 +76,9 @@ services:
       - type: volume
         source: cursor_agent_home
         target: /home/vscode/.cursor-agent
+      - type: volume
+        source: grok_home
+        target: /home/vscode/.grok
 
 volumes:
   command_history:
@@ -79,3 +86,4 @@ volumes:
   codex_home:
   opencode_home:
   cursor_agent_home:
+  grok_home:

@@ -36,6 +36,7 @@ aidc up            # build + start container
 | `aidc claude --profile <name>` | start Claude against a host-defined profile |
 | `aidc codex` | start OpenAI Codex |
 | `aidc opencode` | start OpenCode |
+| `aidc grok` | start Grok Build |
 | `aidc cursor-agent` | start Cursor Agent |
 | `aidc cursor` | open host Cursor on the repo |
 | `aidc status` | container + config/mounts status for this folder |
@@ -53,8 +54,9 @@ aidc up            # build + start container
 /home/vscode/.claude             Claude state (named volume)
 /home/vscode/.codex              Codex state (named volume)
 /home/vscode/.config/opencode    OpenCode state (named volume)
+/home/vscode/.grok               Grok state (named volume)
 /commandhistory                  bash + zsh history (named volume)
-/host-seed/{claude,codex,opencode,gitconfig}   read-only host seeds
+/host-seed/{claude,codex,opencode,grok,gitconfig}   read-only host seeds
 ```
 
 `GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).
@@ -100,7 +102,7 @@ sudo apt-get install -y --no-install-recommends golang-go
 go install golang.org/x/tools/gopls@latest
 ```
 
-Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, npm globals, pmg/vet/gryph/rtk) stay cached.
+Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/gryph/rtk) stay cached.
 
 After editing, `aidc rebuild` (or just `aidc up` — `--build` is implicit) picks up the change.
 
