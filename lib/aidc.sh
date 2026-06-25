@@ -616,6 +616,15 @@ aidc::cmd_shell() {
   aidc::compose "$workspace" exec workspace zsh -l
 }
 
+# Run a command in the workspace container with the collected passthrough env
+# args. Centralizes the `${AIDC_EXEC_ENV_ARGS[@]+...}` guard so empty-array
+# expansion under `set -u` (bash 3.2) can't be reintroduced at a call site.
+aidc::compose_exec() {
+  local workspace="$1"
+  shift
+  aidc::compose "$workspace" exec ${AIDC_EXEC_ENV_ARGS[@]+"${AIDC_EXEC_ENV_ARGS[@]}"} workspace "$@"
+}
+
 aidc::cmd_exec() {
   local workspace
   workspace="$(aidc::default_workspace)"
@@ -628,7 +637,7 @@ aidc::cmd_exec() {
 
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_passthrough_env_args
-  aidc::compose "$workspace" exec ${AIDC_EXEC_ENV_ARGS[@]+"${AIDC_EXEC_ENV_ARGS[@]}"} workspace "$@"
+  aidc::compose_exec "$workspace" "$@"
 }
 
 aidc::cmd_claude() {
@@ -807,7 +816,7 @@ aidc::run_tool() {
     command+=("$@")
   fi
 
-  aidc::compose "$workspace" exec ${AIDC_EXEC_ENV_ARGS[@]+"${AIDC_EXEC_ENV_ARGS[@]}"} workspace "${command[@]}"
+  aidc::compose_exec "$workspace" "${command[@]}"
 }
 
 aidc::need_cmd() {
