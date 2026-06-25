@@ -102,7 +102,7 @@ sudo apt-get install -y --no-install-recommends golang-go
 go install golang.org/x/tools/gopls@latest
 ```
 
-Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/gryph/rtk) stay cached.
+Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/rtk) stay cached.
 
 After editing, `aidc rebuild` (or just `aidc up` — `--build` is implicit) picks up the change.
 

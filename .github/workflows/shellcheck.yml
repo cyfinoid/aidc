@@ -33,3 +33,6 @@ jobs:
 
       - name: Syntax-check Python clipboard server
         run: python3 -m py_compile bin/aidc-clipboard-server
+
+      - name: Run bootstrap unit tests
+        run: .github/scripts/test-bootstrap-state.sh

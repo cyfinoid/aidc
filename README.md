@@ -52,14 +52,14 @@ Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `cursor-agent`) a
 - seeds non-negotiable guidance into `CLAUDE.md` / `AGENTS.md` for every project — security guardrails, test-coverage discipline, and changelog/session-log conventions
 - seeds committed project docs once, never overwriting your edits — `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and a `logs/` session journal
 - auto-syncs in-container agent session transcripts back to the host on container start and exit, so the host's `/insights` stays current
-- ships SafeDep's `pmg` / `vet` / `gryph` for supply-chain interception and `rtk` for token-saving CLI proxying
+- ships SafeDep's `pmg` / `vet` for supply-chain interception and `rtk` for token-saving CLI proxying
 - offers an opt-in default-deny egress firewall with a sane allowlist
 
 ## Documentation
 
 - [`docs/install.md`](docs/install.md) — prereqs, install, daily commands, what lives where, per-project customisation, cleanup
 - [`docs/claude-profiles.md`](docs/claude-profiles.md) — alternate Claude API targets, local-model profiles, one-time OAuth login, session sync
-- [`docs/security.md`](docs/security.md) — scanners, supply-chain guardrails, agent guardrails (gryph + rtk), opt-in egress firewall
+- [`docs/security.md`](docs/security.md) — scanners, supply-chain guardrails, agent guardrails (rtk), opt-in egress firewall
 - [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md) — host-clipboard → container PNG paste bridge
 - [`CHANGELOG.md`](CHANGELOG.md) — high-level release notes; [`DETAILED_CHANGELOG.md`](DETAILED_CHANGELOG.md) — long-form per-change rationale
 - [`SECURITY.md`](SECURITY.md) — how to report vulnerabilities in aidc itself

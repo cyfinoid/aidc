@@ -33,6 +33,8 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 - **Pinned `gitleaks` and `vet` versions** in `templates/devcontainer/Dockerfile.tmpl` (`v8.30.1` and `v1.17.3` respectively). Defaults were `latest`, which resolved at build time and defeated the surrounding base-image SHA pin. Repin instructions are in the Dockerfile.
 - **README** and the docs/ tree brought into sync with the above. README's command list includes `aidc status`, `aidc down`, `aidc destroy`, `aidc exec`, and `aidc sync-sessions`. `docs/security.md` covers the scanners, supply-chain guardrails, and egress firewall; `docs/claude-profiles.md` covers the local-model profiles (`localhost.env.example`, `localnetwork.env.example`).
 
+- **VM Claude hooks are now rtk-only.** The host-seed `settings.json` carries hooks for host-only tools (`gryph`, and `cot` on a hard-coded macOS path) that are pointless or broken inside the container. `bootstrap-state.sh` now strips just those entries on every `sync_claude` (preserving rtk and any user hooks; self-heals volumes seeded by an older bootstrap), and `install_agent_hooks` wires only `rtk init --global --auto-patch --hook-only` (non-interactive; installs just the hook without re-writing `CLAUDE.md`/`RTK.md`). In-container session transcripts already auto-sync to the host on start/exit, so agent observability stays host-side.
+
 ### Fixed
 
 - **RTK install path.** Dockerfile previously set `RTK_INSTALL_DIR=/usr/local/bin` on the wrong side of the pipe (`VAR=val cmd1 | cmd2` scopes `VAR` to `cmd1`), so the installer fell back to `$HOME/.local/bin` while running as root — the binary landed in `/root/.local/bin/rtk` and was invisible to the `vscode` user. Env var moved onto the `sh` side of the pipe.
@@ -40,5 +42,7 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 ### Removed
 
 - **AWS Bedrock and Google Vertex support.** `/host-auth/aws` and `/host-auth/gcloud` bind mounts dropped. `AIDC_AWS_SOURCE`, `AIDC_GCLOUD_SOURCE`, `bedrock.env.example`, and `vertex.env.example` removed. AWS- and Google-specific keys (`AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_DEFAULT_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_PROJECT`) dropped from `AIDC_PASSTHROUGH_ENV_KEYS`.
+
+- **gryph removed from the image.** SafeDep's `gryph` agent-audit layer is no longer installed (Dockerfile) or hooked (`gryph install` dropped from `bootstrap-state.sh`); host-side hooks for it are stripped from the seeded `settings.json`. `cot` was never in the image (its hook command pointed at a macOS-only binary path) and is likewise stripped. Agent observability is host-side now that sessions auto-sync on container start and exit.
 
 [Unreleased]: https://github.com/cyfinoid/aidc/commits/main

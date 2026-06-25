@@ -45,10 +45,66 @@ copy_dir_from_seed() {
   rsync -a --delete "$source"/ "$target"/
 }
 
+# Remove hook entries that reference host-only tooling from a Claude Code
+# settings.json: `gryph` (agent audit layer — handled on the host now that
+# sessions auto-sync) and `cot` (whose command is a hard-coded macOS binary
+# path that can never resolve inside the VM). Surgical and idempotent: rtk's
+# PreToolUse/Bash hook and any user hooks are preserved; only matching commands
+# are dropped, then emptied hook arrays and emptied event keys are pruned. The
+# file is left untouched when nothing matches. Safe to run on every init, which
+# also self-heals settings.json on volumes seeded by an older bootstrap.
+strip_host_hooks() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$f" <<'PY'
+import json, re, sys
+p = sys.argv[1]
+try:
+    cfg = json.load(open(p))
+except (FileNotFoundError, ValueError):
+    sys.exit(0)
+hooks = cfg.get("hooks")
+if not isinstance(hooks, dict):
+    sys.exit(0)
+bad = re.compile(r"\bgryph\b|\bcot\b")
+changed = False
+for event in list(hooks):
+    entries = hooks[event]
+    if not isinstance(entries, list):
+        continue
+    kept_entries = []
+    for entry in entries:
+        cmds = entry.get("hooks") if isinstance(entry, dict) else None
+        if not isinstance(cmds, list):
+            kept_entries.append(entry)
+            continue
+        kept = [c for c in cmds if not bad.search(c.get("command", ""))]
+        if len(kept) != len(cmds):
+            changed = True
+        if kept:
+            entry["hooks"] = kept
+            kept_entries.append(entry)
+    if kept_entries:
+        hooks[event] = kept_entries
+    else:
+        del hooks[event]
+        changed = True
+if changed:
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+PY
+}
+
 sync_claude() {
   ensure_dir "$home_dir/.claude"
   copy_file_from_seed "/host-seed/claude/settings.json" "$home_dir/.claude/settings.json" "0600"
   copy_file_from_seed "/host-seed/claude/CLAUDE.md" "$home_dir/.claude/CLAUDE.md" "0644"
+  # The host seed's settings.json carries hooks for host-only tools (gryph, cot);
+  # they're pointless in the VM and cot would error on every fire. Strip just
+  # those — rtk installs its own hook below and any user hooks are preserved.
+  strip_host_hooks "$home_dir/.claude/settings.json"
 }
 
 sync_codex() {
@@ -90,11 +146,13 @@ install_agent_hooks() {
   local marker="$home_dir/.claude/.aidc-agent-hooks-installed"
   [[ -f "$marker" ]] && return 0
 
-  if command -v gryph >/dev/null 2>&1; then
-    gryph install >/dev/null 2>&1 || echo "[bootstrap] gryph install failed" >&2
-  fi
+  # rtk is the only agent hook wired inside the VM. gryph/cot run on the host
+  # (sessions auto-sync), so neither is installed nor hooked here. --auto-patch
+  # makes init non-interactive; --hook-only adds just the PreToolUse/Bash hook
+  # without re-writing CLAUDE.md/RTK.md (both already seeded from the host).
   if command -v rtk >/dev/null 2>&1; then
-    rtk init --global >/dev/null 2>&1 || echo "[bootstrap] rtk init --global failed" >&2
+    rtk init --global --auto-patch --hook-only >/dev/null 2>&1 \
+      || echo "[bootstrap] rtk init --global failed" >&2
   fi
 
   mkdir -p "$(dirname "$marker")"
@@ -158,20 +216,25 @@ sync_tool() {
   esac
 }
 
-case "$mode" in
-  init)
-    align_uid
-    ensure_dir "/commandhistory"
-    sync_tool "all"
-    sync_gitconfig_overlay
-    install_agent_hooks
-    run_firewall_if_enabled
-    ;;
-  sync)
-    sync_tool "$tool"
-    ;;
-  *)
-    echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|all]" >&2
-    exit 1
-    ;;
-esac
+# Only run the dispatch when executed directly, not when sourced (e.g. by unit
+# tests exercising strip_host_hooks()). This keeps the helper functions above
+# importable without triggering the init/sync side effects.
+if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
+  case "$mode" in
+    init)
+      align_uid
+      ensure_dir "/commandhistory"
+      sync_tool "all"
+      sync_gitconfig_overlay
+      install_agent_hooks
+      run_firewall_if_enabled
+      ;;
+    sync)
+      sync_tool "$tool"
+      ;;
+    *)
+      echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|all]" >&2
+      exit 1
+      ;;
+  esac
+fi

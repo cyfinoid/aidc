@@ -99,9 +99,6 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && chmod 0755 /usr/local/bin/vet \
     && rm /tmp/vet.tar.gz
 
-# Agent security/observability layer for Claude Code, Codex, OpenCode, Cursor.
-RUN curl -fsSL https://raw.githubusercontent.com/safedep/gryph/main/install.sh | sh
-
 # Always-on security tooling: semgrep (SAST), gitleaks + trufflehog (secrets).
 # SCA is handled by vet/pmg above; this layer covers code-pattern and secret scans.
 RUN uv tool install semgrep \

@@ -80,18 +80,20 @@ the same host credentials. For xAI specifically, either log in interactively
 (persisted in `~/.grok`) or export the xAI key on the host and add it to the
 passthrough list in `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc.sh`) before launching.
 
-## Agent guardrails: gryph + rtk
+## Agent guardrails: rtk
 
-The image also ships [`gryph`](https://github.com/safedep/gryph) (SafeDep's agent security layer — patches hook entries into the detected agents' settings) and [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — token-saving CLI proxy that rewrites commands like `git status` → `rtk git status` via the Claude Code hook).
+The image ships [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — a token-saving CLI proxy that rewrites commands like `git status` → `rtk git status` via the Claude Code `PreToolUse`/`Bash` hook, typically cutting 60–90% of the tokens dev operations cost).
 
-Both are auto-initialised the first time a fresh `claude_home` volume is created: `bootstrap-state.sh init` runs `gryph install` and `rtk init --global`, then drops a marker at `~/.claude/.aidc-agent-hooks-installed` so it's not rerun on every container restart. `aidc destroy -f` wipes the volume and the marker, so the next `aidc up` re-applies hooks cleanly.
+rtk is auto-initialised the first time a fresh `claude_home` volume is created: `bootstrap-state.sh init` runs `rtk init --global --auto-patch --hook-only` (non-interactive; installs just the hook, no `RTK.md`/`CLAUDE.md` rewrite since both are seeded from the host), then drops a marker at `~/.claude/.aidc-agent-hooks-installed` so it isn't rerun on every container restart. `aidc destroy -f` wipes the volume and the marker, so the next `aidc up` re-applies the hook cleanly.
+
+The host's own agent hooks — SafeDep's `gryph` audit layer, and `cot` (whose command is a macOS-only binary path) — are host-side concerns: in-container transcripts auto-sync back to the host on container start and exit, so observability happens there rather than in the VM. `bootstrap-state.sh` strips those host-only hook entries from the seeded `settings.json` on every sync (preserving rtk and any user hooks), so the VM never carries hooks that can't run inside it.
 
 Verify:
 
 ```bash
-aidc exec -- gryph status
 aidc exec -- rtk --version
-aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # hook entries from both
+aidc exec -- rtk gain                                                     # token savings so far
+aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # just the rtk PreToolUse/Bash hook
 ```
 
 ## Optional: egress firewall
