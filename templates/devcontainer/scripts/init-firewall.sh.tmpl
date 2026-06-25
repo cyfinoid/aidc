@@ -49,7 +49,7 @@ if [[ -f "$allowlist_file" ]]; then
   done <"$allowlist_file"
 fi
 
-hosts=("${DEFAULT_HOSTS[@]}" "${extra_hosts[@]}")
+hosts=("${DEFAULT_HOSTS[@]}" ${extra_hosts[@]+"${extra_hosts[@]}"})
 
 ipset destroy aidc-allow 2>/dev/null || true
 ipset create aidc-allow hash:ip family inet hashsize 1024 maxelem 65536

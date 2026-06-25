@@ -1,0 +1,203 @@
+name: aidc-e2e
+
+# End-to-end smoke tests for the host-side aidc CLI across both supported
+# host platforms. These cover the Docker-free code paths (install, Claude
+# profile alias syncing, profile listing, toolchain detection) plus the full
+# `aidc init` scaffold where a Docker CLI is available.
+#
+# The macOS leg deliberately runs under the system bash 3.2 (see the PATH
+# shim below). macOS ships bash 3.2.57, where "${arr[@]}" on an *empty* array
+# is an "unbound variable" error under `set -u` — the exact failure mode this
+# suite regression-tests. GitHub's macOS image otherwise resolves a newer
+# Homebrew bash first on PATH, which would silently skip that path.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aidc-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      # Make `#!/usr/bin/env bash` resolve to the system bash 3.2 on macOS so
+      # the install/sync paths are exercised under the interpreter real macOS
+      # users have. Prepending a shim dir that contains only `bash` avoids
+      # shadowing any other tool. No-op on Linux (already bash 5.x).
+      - name: Pin macOS to system bash 3.2
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          shim="$RUNNER_TEMP/bash32"
+          mkdir -p "$shim"
+          ln -sf /bin/bash "$shim/bash"
+          echo "$shim" >> "$GITHUB_PATH"
+
+      - name: Show + verify bash version
+        run: |
+          set -euo pipefail
+          echo "bash on PATH:    $(command -v bash)"
+          bash --version | head -1
+          echo "env bash:        $(env bash -c 'echo $BASH_VERSION')"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            ver="$(env bash -c 'echo $BASH_VERSION')"
+            case "$ver" in
+              3.2*) echo "macOS is running the system bash 3.2 as intended ($ver)";;
+              *) echo "::error::expected system bash 3.2 on macOS but got $ver — the shim did not take effect"; exit 1;;
+            esac
+          fi
+
+      # Core regression: on a clean runner there are no *.env profiles (only
+      # the generated *.env.example files), so `desired_aliases` is empty.
+      # Before the fix this aborted here with "unbound variable" on bash 3.2.
+      - name: install.sh (empty-profile path)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          ./install.sh
+
+          aidc_bin="$HOME/.local/bin/aidc"
+          [ -L "$aidc_bin" ] || fail "expected symlink at $aidc_bin"
+          target="$(readlink "$aidc_bin")"
+          case "$target" in
+            *"/bin/aidc") echo "symlink -> $target";;
+            *) fail "symlink points at unexpected target: $target";;
+          esac
+
+          prof_dir="$HOME/.config/aidc/providers/claude"
+          [ -f "$prof_dir/zai.env.example" ] || fail "profile examples were not seeded in $prof_dir"
+
+          # Make the freshly installed CLI available to later steps.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "install.sh OK"
+
+      - name: Docker-free command smoke test
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          aidc help >/dev/null || fail "aidc help failed"
+
+          # No profiles yet -> must exit 0 (empty-array path again).
+          out="$(aidc claude --list-profiles)" || fail "--list-profiles exited non-zero"
+          echo "$out" | grep -q "no Claude profiles found" \
+            || fail "unexpected --list-profiles output: $out"
+
+          # Idempotent re-sync with no profiles must also stay clean.
+          aidc sync-claude-aliases >/dev/null || fail "sync-claude-aliases (empty) failed"
+
+          # status outside any project should report cleanly, not crash.
+          ( cd "$RUNNER_TEMP" && aidc status >/dev/null ) || fail "aidc status failed outside a project"
+          echo "smoke OK"
+
+      - name: Claude profile alias lifecycle (non-empty + stale-removal paths)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          prof_dir="$HOME/.config/aidc/providers/claude"
+          alias_bin="$HOME/.local/bin/claude-ci"
+          mkdir -p "$prof_dir"
+
+          cat > "$prof_dir/ci.env" <<'EOF'
+          AIDC_CLAUDE_DESCRIPTION="CI test profile"
+          ANTHROPIC_AUTH_TOKEN="dummy-token"
+          ANTHROPIC_BASE_URL="https://example.invalid"
+          EOF
+          chmod 600 "$prof_dir/ci.env"
+
+          # Sync should materialize a managed wrapper for the new profile.
+          aidc sync-claude-aliases >/dev/null || fail "sync with a profile failed"
+          [ -x "$alias_bin" ] || fail "expected executable alias at $alias_bin"
+          grep -q 'exec aidc claude --profile ci' "$alias_bin" \
+            || fail "alias wrapper does not invoke the ci profile"
+
+          aidc claude --list-profiles | grep -q 'claude-ci' \
+            || fail "ci profile not shown in --list-profiles"
+
+          # Remove the profile and re-sync: the managed alias must be pruned.
+          # This drives the empty-desired-aliases branch *with* an existing
+          # managed alias present (the array_contains guard).
+          rm -f "$prof_dir/ci.env"
+          aidc sync-claude-aliases >/dev/null || fail "stale-removal sync failed"
+          [ ! -e "$alias_bin" ] || fail "stale alias $alias_bin was not removed"
+          echo "alias lifecycle OK"
+
+      - name: Toolchain detection under set -u
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          lib="$GITHUB_WORKSPACE/lib/aidc.sh"
+
+          empty="$RUNNER_TEMP/proj-empty"
+          mkdir -p "$empty"
+          # No marker files -> empty result. Run under `bash -u` so the empty
+          # array expansion in detect_toolchains is actually exercised.
+          out="$(bash -u -c 'source "$1"; aidc::detect_toolchains "$2"' _ "$lib" "$empty")" \
+            || fail "detect_toolchains crashed on a project with no toolchains"
+          [ -z "$out" ] || fail "expected empty toolchain list, got: '$out'"
+
+          go="$RUNNER_TEMP/proj-go"
+          mkdir -p "$go"
+          printf 'module example.com/x\n' > "$go/go.mod"
+          out="$(bash -u -c 'source "$1"; aidc::detect_toolchains "$2"' _ "$lib" "$go")" \
+            || fail "detect_toolchains crashed on a go project"
+          [ "$out" = "go" ] || fail "expected 'go', got: '$out'"
+          echo "toolchain detection OK"
+
+      # Full scaffold. `aidc init` only needs the Docker *CLI* present (a
+      # binary presence check), not a running daemon. ubuntu-latest ships it;
+      # macOS runners do not, so this skips cleanly there.
+      - name: aidc init scaffold (requires docker CLI)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "docker CLI not present on ${{ runner.os }} — skipping init scaffold test"
+            exit 0
+          fi
+
+          work="$RUNNER_TEMP/scaffold-proj"
+          rm -rf "$work"
+          mkdir -p "$work"
+          git -C "$work" init -q
+
+          ( cd "$work" && aidc init ) || fail "aidc init failed"
+
+          for f in \
+            .devcontainer/Dockerfile \
+            .devcontainer/compose.yaml \
+            .devcontainer/devcontainer.json \
+            .devcontainer/scripts/bootstrap-state.sh \
+            .devcontainer/scripts/init-firewall.sh \
+            .ai-container/project.env \
+            CLAUDE.md \
+            AGENTS.md \
+            .cursor/rules/00-core-logics.mdc; do
+            [ -f "$work/$f" ] || fail "init did not create $f"
+          done
+
+          grep -q '^AIDC_REPO_SLUG=' "$work/.ai-container/project.env" \
+            || fail "project.env missing AIDC_REPO_SLUG"
+
+          # Re-running init over an initialized repo must be a clean no-op.
+          ( cd "$work" && aidc init ) || fail "second aidc init was not idempotent"
+          echo "init scaffold OK"

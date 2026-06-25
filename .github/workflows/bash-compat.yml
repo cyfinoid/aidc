@@ -1,0 +1,36 @@
+name: bash-compat
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bash-compat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.2 = macOS's system bash (the floor we must support).
+        # 4.2 = still common on older RHEL/CentOS.
+        # 4.4 = first release that tolerates empty-array expansion under `set -u`.
+        # 5.2 = current.
+        bash: ["3.2", "4.2", "4.4", "5.2"]
+    name: bash ${{ matrix.bash }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # Run the checks inside the official bash image for this version. The
+      # checkout lives on the host and is bind-mounted in, so the container
+      # only needs bash + busybox (no git/node) — keeping even the 3.2 image
+      # usable.
+      - name: Check under bash ${{ matrix.bash }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            "bash:${{ matrix.bash }}" \
+            bash /work/.github/scripts/bash-compat-check.sh

@@ -616,6 +616,15 @@ aidc::cmd_shell() {
   aidc::compose "$workspace" exec workspace zsh -l
 }
 
+# Run a command in the workspace container with the collected passthrough env
+# args. Centralizes the `${AIDC_EXEC_ENV_ARGS[@]+...}` guard so empty-array
+# expansion under `set -u` (bash 3.2) can't be reintroduced at a call site.
+aidc::compose_exec() {
+  local workspace="$1"
+  shift
+  aidc::compose "$workspace" exec ${AIDC_EXEC_ENV_ARGS[@]+"${AIDC_EXEC_ENV_ARGS[@]}"} workspace "$@"
+}
+
 aidc::cmd_exec() {
   local workspace
   workspace="$(aidc::default_workspace)"
@@ -628,7 +637,7 @@ aidc::cmd_exec() {
 
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_passthrough_env_args
-  aidc::compose "$workspace" exec "${AIDC_EXEC_ENV_ARGS[@]}" workspace "$@"
+  aidc::compose_exec "$workspace" "$@"
 }
 
 aidc::cmd_claude() {
@@ -669,7 +678,7 @@ aidc::cmd_claude() {
     return
   fi
 
-  aidc::run_tool "claude" "$profile" "${args[@]}"
+  aidc::run_tool "claude" "$profile" ${args[@]+"${args[@]}"}
 }
 
 aidc::cmd_codex() {
@@ -807,7 +816,7 @@ aidc::run_tool() {
     command+=("$@")
   fi
 
-  aidc::compose "$workspace" exec "${AIDC_EXEC_ENV_ARGS[@]}" workspace "${command[@]}"
+  aidc::compose_exec "$workspace" "${command[@]}"
 }
 
 aidc::need_cmd() {
@@ -1661,7 +1670,7 @@ aidc::detect_toolchains() {
   fi
   # Join with commas without touching the global IFS.
   local out="" item
-  for item in "${detected[@]}"; do
+  for item in ${detected[@]+"${detected[@]}"}; do
     out+="${out:+,}$item"
   done
   printf '%s' "$out"
@@ -1834,7 +1843,7 @@ aidc::remove_stale_claude_aliases() {
     fi
 
     alias_name="$(basename "$path")"
-    if ! aidc::array_contains "$alias_name" "${desired_aliases[@]}"; then
+    if ! aidc::array_contains "$alias_name" ${desired_aliases[@]+"${desired_aliases[@]}"}; then
       rm -f "$path"
       aidc::log "removed stale Claude alias $alias_name"
     fi
@@ -1862,7 +1871,7 @@ aidc::sync_claude_aliases() {
     aidc::log "synced Claude alias $alias_name"
   done < <(aidc::find_claude_profiles)
 
-  aidc::remove_stale_claude_aliases "${desired_aliases[@]}"
+  aidc::remove_stale_claude_aliases ${desired_aliases[@]+"${desired_aliases[@]}"}
 }
 
 aidc::load_claude_profile_env() {
