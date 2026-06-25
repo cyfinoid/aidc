@@ -191,12 +191,21 @@ jobs:
             .ai-container/project.env \
             CLAUDE.md \
             AGENTS.md \
+            CHANGELOG.md \
+            DETAILED_CHANGELOG.md \
+            logs/README.md \
             .cursor/rules/00-core-logics.mdc; do
             [ -f "$work/$f" ] || fail "init did not create $f"
           done
 
           grep -q '^AIDC_REPO_SLUG=' "$work/.ai-container/project.env" \
             || fail "project.env missing AIDC_REPO_SLUG"
+
+          # Documentation seeds are copy-once: a hand-edit must survive re-init.
+          echo "EDITED-BY-USER" >> "$work/CHANGELOG.md"
+          ( cd "$work" && aidc init ) || fail "second aidc init failed"
+          grep -q 'EDITED-BY-USER' "$work/CHANGELOG.md" \
+            || fail "re-init clobbered a user edit to CHANGELOG.md"
 
           # Re-running init over an initialized repo must be a clean no-op.
           ( cd "$work" && aidc init ) || fail "second aidc init was not idempotent"

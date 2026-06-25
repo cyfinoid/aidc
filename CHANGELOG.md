@@ -6,6 +6,11 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ### Added
 
+- **Automatic session sync.** In-container agent transcripts now sync to the host on container start (down→up transition), agent exit, `aidc down`, and `aidc destroy` (synced before `-v` removes the volumes), so `/insights` stays current without a manual `aidc sync-sessions`. The start sync is the recovery path for ungraceful exits (crash / `docker kill`) the on-exit hooks can't cover. Toggle with `AIDC_AUTO_SYNC_SESSIONS` host-wide in `~/.config/aidc/config.env` or per project in `.ai-container/project.env` (per-folder overrides global). The agent's exit code is preserved across the post-run sync.
+- **Host-wide config file.** New `~/.config/aidc/config.env` holds universal aidc defaults for every project; `.ai-container/project.env` is sourced after it and overrides per folder. Seeded (fully commented) on first run.
+- **`aidc rescan` command.** Re-detects project languages and rebuilds so a repo that started empty (or single-language) picks up the matching toolchains and security scanners once code lands. Prints detected vs. effective (overridden) toolchains before building.
+- **`shell` toolchain → shellcheck.** `aidc::detect_toolchains` now detects shell scripts (any `*.sh` file, or an extensionless executable with a shell shebang such as `bin/aidc`) and installs `shellcheck` via a new `shell)` arm in the Dockerfile toolchain block.
+- **Project documentation seeds.** `aidc init` now seeds `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and `logs/README.md` into each project once (never overwritten, and intentionally not git-excluded so they are committed). The scaffolded `CLAUDE.md`/`AGENTS.md` guidance gains **Testing & coverage**, **Documentation & changelog**, **Documentation requirements**, and **Session log convention** sections, plus a `shellcheck` line in the security guardrails.
 - **Grok Build agent.** `aidc grok` launches xAI's Grok Build CLI inside the container, with a `grok_home` named volume (`~/.grok`), a read-only `/host-seed/grok` seed mount, `sync_grok` seeding in `bootstrap-state.sh`, and `aidc sync-config`/`sync-sessions` support. Grok reads the same generated `AGENTS.md`.
 - **GPL-3.0 license.** `LICENSE` at repo root.
 - **Vulnerability disclosure policy.** `SECURITY.md` documents scope, reporting channels, and timelines.
