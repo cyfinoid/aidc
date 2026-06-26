@@ -39,6 +39,26 @@ aidc claude        # auto-runs `aidc up` if needed, then drops you into Claude C
 
 Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `cursor-agent`) auto-bootstrap the container on first run.
 
+## Claude authentication
+
+`aidc claude` needs a Claude credential inside the container. The recommended, durable setup is a **long-lived OAuth token kept in your macOS Keychain** — aidc reads it on demand at runtime, so the token is never exported into every shell and never written to a dotfile.
+
+```bash
+# 1. Mint a long-lived token (one time; survives across repos and `aidc destroy`)
+claude setup-token                 # prints sk-ant-oat01-...
+
+# 2. Store it in the Keychain under the service aidc looks up
+security add-generic-password -U \
+  -a "$USER" -s claude-code-oauth-token \
+  -w 'sk-ant-oat01-...'
+```
+
+That's it — `aidc claude` resolves `CLAUDE_CODE_OAUTH_TOKEN` from the Keychain on every run (no per-repo login, no `~/.zshrc` export). The first run prompts macOS to allow `security` to read the item — click **Always Allow**.
+
+> **Don't** use the short-lived `accessToken` from Claude Code's own `Claude Code-credentials` Keychain item. That token expires within hours and is only refreshed when you run Claude Code *on the host*, so it goes stale for container-only use. The `claude setup-token` value above is long-lived and built for exactly this.
+
+Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes precedence). Override the Keychain service name — or disable the lookup — with `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` in `~/.config/aidc/config.env`. Alternate API targets (Z.ai, OpenRouter, local models) use profiles instead — see [`docs/claude-profiles.md`](docs/claude-profiles.md).
+
 ## What aidc actually does
 
 - creates local-only `.devcontainer/`, `.ai-container/`, `CLAUDE.md`, `AGENTS.md`, and `.cursor/rules/00-core-logics.mdc`

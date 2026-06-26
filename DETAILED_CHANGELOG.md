@@ -59,9 +59,13 @@ on `PATH` (non-macOS hosts). The token value is never logged.
   `security` on `PATH` and covers all seven branches (preset wins; resolve +
   no-leak; empty result; failed lookup; disabled service; passthrough opt-out;
   missing `security`).
-- Docs: `docs/claude-profiles.md` Option A rewritten (the `~/.zshrc` export is
-  now optional); `docs/security.md` documents the on-demand lookup and the
-  per-container passthrough override.
+- Docs: a new **Claude authentication** section in `README.md` documents the
+  recommended flow (`claude setup-token` → store under the `claude-code-oauth-token`
+  Keychain item → aidc reads it at runtime), with an explicit warning against
+  using the short-lived `accessToken` from Claude Code's own
+  `Claude Code-credentials` Keychain item. `docs/claude-profiles.md` Option A
+  rewritten (the `~/.zshrc` export is now optional); `docs/security.md` documents
+  the on-demand lookup and the per-container passthrough override.
 
 **Commands / verification:**
 ```bash
@@ -80,6 +84,16 @@ CLAUDE_CODE_OAUTH_TOKEN` in the parent shell stays empty.
 assume Mac" stance); other hosts fall through to the existing env/profile/login
 paths unchanged. A future resolver hook could generalise this to 1Password /
 `pass` / Vault, but that was intentionally out of scope here.
+
+Decision — raw setup-token, not the subscription `accessToken`. Claude Code on
+macOS keeps its own Keychain item (`Claude Code-credentials`) holding a JSON blob
+with `claudeAiOauth.accessToken` + `refreshToken`. That `accessToken` is
+short-lived (hours) and only refreshed when Claude Code runs on the host, so it
+goes stale for container-only use. Rather than parse/extract it (and depend on
+host refresh), aidc reads the long-lived token from `claude setup-token`, stored
+as a raw value under `claude-code-oauth-token`. The resolver therefore stays a
+plain raw-string read — no JSON parsing, no `refreshToken` persisted into a
+volume.
 
 ---
 
