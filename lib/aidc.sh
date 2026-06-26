@@ -14,6 +14,10 @@ AIDC_EMPTY_ROOT="${AIDC_EMPTY_ROOT:-$AIDC_HOST_CONFIG_ROOT/empty}"
 AIDC_PROVIDER_ROOT="${AIDC_PROVIDER_ROOT:-$AIDC_HOST_CONFIG_ROOT/providers/claude}"
 AIDC_CLAUDE_PROFILE_ROOT="${AIDC_CLAUDE_PROFILE_ROOT:-$AIDC_PROVIDER_ROOT}"
 AIDC_BIN_DIR="${AIDC_BIN_DIR:-${AIDC_INSTALL_DIR:-$HOME/.local/bin}}"
+# macOS Keychain service that holds the Claude OAuth token. When set (the
+# default), aidc reads the token from the Keychain on demand instead of
+# requiring it to be exported into every shell. Set empty to disable.
+AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE="${AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE:-claude-code-oauth-token}"
 AIDC_CORE_ROOT_DEFAULT="${AIDC_CORE_ROOT_DEFAULT:-$HOME/CORE_LOGICS}"
 AIDC_CORE_WORKTREE_ROOT="${AIDC_CORE_WORKTREE_ROOT:-$HOME/.local/share/aidc/core-worktrees}"
 AIDC_MANAGED_CLAUDE_ALIAS_MARKER="# aidc-managed claude-alias"
@@ -877,6 +881,10 @@ aidc::run_tool() {
   workspace="$(aidc::default_workspace)"
   aidc::ensure_container_running "$workspace"
 
+  if [[ "$tool" == "claude" ]]; then
+    aidc::resolve_claude_oauth_token
+  fi
+
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_passthrough_env_args
   if [[ "$tool" == "claude" && -n "$profile" ]]; then
@@ -1656,6 +1664,13 @@ aidc::ensure_global_config() {
 # Auto-pull in-container agent transcripts to the host on container start, agent
 # exit, 'down', and 'destroy'. Set to 0 to disable everywhere by default.
 # AIDC_AUTO_SYNC_SESSIONS=1
+
+# macOS Keychain service holding the Claude OAuth token. aidc reads it on demand
+# for 'aidc claude' (no need to export CLAUDE_CODE_OAUTH_TOKEN in your shell).
+# Store the token once with:
+#   security add-generic-password -U -a "$USER" -s claude-code-oauth-token -w 'sk-ant-oat01-...'
+# Override the service name below, or set it empty to disable the lookup.
+# AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE=claude-code-oauth-token
 EOF
 }
 
@@ -1898,6 +1913,35 @@ aidc::append_passthrough_env_args() {
       AIDC_EXEC_ENV_ARGS+=("-e" "$key")
     fi
   done
+}
+
+# Populate CLAUDE_CODE_OAUTH_TOKEN from the macOS Keychain so the token only
+# lives in this process for the duration of the exec, instead of being exported
+# into every shell via ~/.zshrc. No-op when the token is already set, when the
+# key has been dropped from the passthrough list (per-project opt-out via
+# AIDC_PASSTHROUGH_ENV_KEYS), when the Keychain lookup is disabled, or when the
+# `security` tool is unavailable (e.g. non-macOS hosts). Never logs the token.
+aidc::resolve_claude_oauth_token() {
+  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && return 0
+  [[ -n "${AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE:-}" ]] || return 0
+
+  local key forwarded=0
+  for key in "${AIDC_PASSTHROUGH_ENV_KEYS[@]}"; do
+    if [[ "$key" == "CLAUDE_CODE_OAUTH_TOKEN" ]]; then
+      forwarded=1
+      break
+    fi
+  done
+  [[ "$forwarded" -eq 1 ]] || return 0
+
+  command -v security >/dev/null 2>&1 || return 0
+
+  local account token
+  account="${USER:-$(id -un 2>/dev/null || true)}"
+  token="$(security find-generic-password -a "$account" -s "$AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE" -w 2>/dev/null || true)"
+  if [[ -n "$token" ]]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$token"
+  fi
 }
 
 aidc::validate_claude_profile_name() {

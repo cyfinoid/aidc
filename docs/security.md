@@ -80,6 +80,37 @@ the same host credentials. For xAI specifically, either log in interactively
 (persisted in `~/.grok`) or export the xAI key on the host and add it to the
 passthrough list in `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc.sh`) before launching.
 
+Only env vars actually set in `aidc`'s own process are forwarded — the value is
+read at exec time and lives only for the duration of that `docker compose exec`,
+never written into the container image or compose file.
+
+**Narrowing the passthrough per container.** `AIDC_PASSTHROUGH_ENV_KEYS` is a
+plain shell array sourced *before* it is consumed, so a host-wide
+`~/.config/aidc/config.env` or a single repo's `.ai-container/project.env` can
+reassign it to forward fewer keys (or none) into that container:
+
+```bash
+# .ai-container/project.env — forward nothing into THIS container
+AIDC_PASSTHROUGH_ENV_KEYS=()
+
+# …or a narrowed subset (drop the Claude OAuth token here)
+AIDC_PASSTHROUGH_ENV_KEYS=("OPENAI_API_KEY")
+```
+
+This also gates the Keychain lookup below — dropping `CLAUDE_CODE_OAUTH_TOKEN`
+from the array disables resolving it for that container. The one exception is the
+`aidc claude` one-time-login bootstrap (`aidc-bootstrap-claude`), which reads
+`CLAUDE_CODE_OAUTH_TOKEN` directly when it is already present.
+
+**On-demand Claude OAuth token (macOS Keychain).** For `aidc claude`, if
+`CLAUDE_CODE_OAUTH_TOKEN` is not already in the environment, `aidc` reads it from
+the macOS Keychain on demand (service `claude-code-oauth-token`, your `$USER`
+account) so the token never has to be exported into every shell via `~/.zshrc`.
+Override the service name or disable the lookup with
+`AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` (set it empty to disable). The lookup is a
+no-op on hosts without the `security` tool. See `docs/claude-profiles.md` for
+setup.
+
 ## Agent guardrails: rtk
 
 The image ships [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — a token-saving CLI proxy that rewrites commands like `git status` → `rtk git status` via the Claude Code `PreToolUse`/`Bash` hook, typically cutting 60–90% of the tokens dev operations cost).

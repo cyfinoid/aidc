@@ -8,6 +8,81 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-06-26 — Resolve Claude OAuth token from the macOS Keychain on demand
+
+**Summary:** `aidc claude` now fetches `CLAUDE_CODE_OAUTH_TOKEN` from the macOS
+Keychain at exec time when it isn't already exported, removing the need for the
+`~/.zshrc` line that broadcast the token to every shell process.
+
+**Why:** The documented setup put
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN="$(security find-generic-password -a "$USER" -s claude-code-oauth-token -w 2>/dev/null)"
+```
+
+in `~/.zshrc`. That works, but it exports the plaintext token into the
+environment of *every* process the shell spawns, for the whole session — far
+wider exposure than needed. The token only has to exist for the brief
+`docker compose exec` that launches Claude inside the container. Moving the
+Keychain read into `aidc` shrinks the token's lifetime to that single call and
+keeps it out of unrelated processes' environments.
+
+**How it works:** `aidc::run_tool` calls a new `aidc::resolve_claude_oauth_token`
+on the `claude` path, before the existing env passthrough
+(`aidc::append_passthrough_env_args`) and the `aidc-bootstrap-claude` one-time
+login step — both of which already read `CLAUDE_CODE_OAUTH_TOKEN` from `aidc`'s
+own process env, so populating it there is all that's needed. Resolution order:
+
+1. `CLAUDE_CODE_OAUTH_TOKEN` already set → used as-is (back-compat with the old
+   `~/.zshrc` export and with CI secrets).
+2. Else `security find-generic-password -a "$USER" -s "$service" -w` →
+   exported into `aidc`'s env only.
+3. Else unchanged (interactive login / profile auth).
+
+It is a deliberate no-op when: the var is already set; `CLAUDE_CODE_OAUTH_TOKEN`
+has been removed from `AIDC_PASSTHROUGH_ENV_KEYS` (per-project opt-out); the
+service name `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` is empty; or `security` is not
+on `PATH` (non-macOS hosts). The token value is never logged.
+
+**What changed:**
+- `lib/aidc.sh`:
+  - New `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` default (`claude-code-oauth-token`),
+    overridable/disable-able via `~/.config/aidc/config.env`.
+  - New `aidc::resolve_claude_oauth_token` (account falls back to `id -un` when
+    `$USER` is unset, so it is safe under `set -u`).
+  - Wired into `aidc::run_tool` ahead of the passthrough/bootstrap, gated to the
+    `claude` tool so codex/opencode/grok containers don't receive an unused
+    credential.
+  - Seeded a commented `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` entry in the
+    generated global config (`aidc::ensure_global_config`).
+- `tests/resolve-oauth-token.test.sh`: new self-contained test that stubs
+  `security` on `PATH` and covers all seven branches (preset wins; resolve +
+  no-leak; empty result; failed lookup; disabled service; passthrough opt-out;
+  missing `security`).
+- Docs: `docs/claude-profiles.md` Option A rewritten (the `~/.zshrc` export is
+  now optional); `docs/security.md` documents the on-demand lookup and the
+  per-container passthrough override.
+
+**Commands / verification:**
+```bash
+bash tests/resolve-oauth-token.test.sh   # 7 passed, 0 failed
+shellcheck lib/aidc.sh tests/resolve-oauth-token.test.sh
+semgrep scan --config auto lib/aidc.sh tests/
+gitleaks detect --no-banner
+```
+
+End-to-end on a Mac (token in Keychain, `CLAUDE_CODE_OAUTH_TOKEN` unset):
+`aidc claude` authenticates with no interactive login, `aidc exec -- printenv
+CLAUDE_CODE_OAUTH_TOKEN` shows the token reached the container, and `printenv
+CLAUDE_CODE_OAUTH_TOKEN` in the parent shell stays empty.
+
+**Notes:** macOS-only by design (matches the project's documented "host-side bits
+assume Mac" stance); other hosts fall through to the existing env/profile/login
+paths unchanged. A future resolver hook could generalise this to 1Password /
+`pass` / Vault, but that was intentionally out of scope here.
+
+---
+
 ## 2026-06-25 — rtk-only VM hooks; drop gryph/cot from the container
 
 **Summary:** The container's Claude Code `settings.json` now carries only the
