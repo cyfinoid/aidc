@@ -44,16 +44,15 @@ Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `cursor-agent`) a
 `aidc claude` needs a Claude credential inside the container. The recommended, durable setup is a **long-lived OAuth token kept in your macOS Keychain** — aidc reads it on demand at runtime, so the token is never exported into every shell and never written to a dotfile.
 
 ```bash
-# 1. Mint a long-lived token (one time; survives across repos and `aidc destroy`)
-claude setup-token                 # prints sk-ant-oat01-...
-
-# 2. Store it in the Keychain under the service aidc looks up
-security add-generic-password -U \
-  -a "$USER" -s claude-code-oauth-token \
-  -w 'sk-ant-oat01-...'
+# Mint a long-lived token and store it in the Keychain in one step.
+# `tr -d '[:space:]'` strips the surrounding whitespace/newline so only the token is stored.
+security add-generic-password -U -a "$USER" -s claude-code-oauth-token \
+  -w "$(claude setup-token | rg sk-ant | tr -d '[:space:]')"
 ```
 
-That's it — `aidc claude` resolves `CLAUDE_CODE_OAUTH_TOKEN` from the Keychain on every run (no per-repo login, no `~/.zshrc` export). The first run prompts macOS to allow `security` to read the item — click **Always Allow**.
+No ripgrep? Swap `rg sk-ant` for `grep sk-ant`. You can also run the two steps separately — `claude setup-token` prints the `sk-ant-oat01-…` value, then pass it to `security add-generic-password … -w '<token>'`.
+
+That's it — this is a one-time setup that survives across repos and `aidc destroy`. `aidc claude` resolves `CLAUDE_CODE_OAUTH_TOKEN` from the Keychain on every run (no per-repo login, no `~/.zshrc` export). The first run prompts macOS to allow `security` to read the item — click **Always Allow**.
 
 > **Don't** use the short-lived `accessToken` from Claude Code's own `Claude Code-credentials` Keychain item. That token expires within hours and is only refreshed when you run Claude Code *on the host*, so it goes stale for container-only use. The `claude setup-token` value above is long-lived and built for exactly this.
 
