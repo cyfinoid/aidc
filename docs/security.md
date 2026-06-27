@@ -80,18 +80,51 @@ the same host credentials. For xAI specifically, either log in interactively
 (persisted in `~/.grok`) or export the xAI key on the host and add it to the
 passthrough list in `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc.sh`) before launching.
 
-## Agent guardrails: gryph + rtk
+Only env vars actually set in `aidc`'s own process are forwarded — the value is
+read at exec time and lives only for the duration of that `docker compose exec`,
+never written into the container image or compose file.
 
-The image also ships [`gryph`](https://github.com/safedep/gryph) (SafeDep's agent security layer — patches hook entries into the detected agents' settings) and [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — token-saving CLI proxy that rewrites commands like `git status` → `rtk git status` via the Claude Code hook).
+**Narrowing the passthrough per container.** `AIDC_PASSTHROUGH_ENV_KEYS` is a
+plain shell array sourced *before* it is consumed, so a host-wide
+`~/.config/aidc/config.env` or a single repo's `.ai-container/project.env` can
+reassign it to forward fewer keys (or none) into that container:
 
-Both are auto-initialised the first time a fresh `claude_home` volume is created: `bootstrap-state.sh init` runs `gryph install` and `rtk init --global`, then drops a marker at `~/.claude/.aidc-agent-hooks-installed` so it's not rerun on every container restart. `aidc destroy -f` wipes the volume and the marker, so the next `aidc up` re-applies hooks cleanly.
+```bash
+# .ai-container/project.env — forward nothing into THIS container
+AIDC_PASSTHROUGH_ENV_KEYS=()
+
+# …or a narrowed subset (drop the Claude OAuth token here)
+AIDC_PASSTHROUGH_ENV_KEYS=("OPENAI_API_KEY")
+```
+
+This also gates the Keychain lookup below — dropping `CLAUDE_CODE_OAUTH_TOKEN`
+from the array disables resolving it for that container. The one exception is the
+`aidc claude` one-time-login bootstrap (`aidc-bootstrap-claude`), which reads
+`CLAUDE_CODE_OAUTH_TOKEN` directly when it is already present.
+
+**On-demand Claude OAuth token (macOS Keychain).** For `aidc claude`, if
+`CLAUDE_CODE_OAUTH_TOKEN` is not already in the environment, `aidc` reads it from
+the macOS Keychain on demand (service `claude-code-oauth-token`, your `$USER`
+account) so the token never has to be exported into every shell via `~/.zshrc`.
+Override the service name or disable the lookup with
+`AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` (set it empty to disable). The lookup is a
+no-op on hosts without the `security` tool. See `docs/claude-profiles.md` for
+setup.
+
+## Agent guardrails: rtk
+
+The image ships [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — a token-saving CLI proxy that rewrites commands like `git status` → `rtk git status` via the Claude Code `PreToolUse`/`Bash` hook, typically cutting 60–90% of the tokens dev operations cost).
+
+rtk is auto-initialised the first time a fresh `claude_home` volume is created: `bootstrap-state.sh init` runs `rtk init --global --auto-patch --hook-only` (non-interactive; installs just the hook, no `RTK.md`/`CLAUDE.md` rewrite since both are seeded from the host), then drops a marker at `~/.claude/.aidc-agent-hooks-installed` so it isn't rerun on every container restart. `aidc destroy -f` wipes the volume and the marker, so the next `aidc up` re-applies the hook cleanly.
+
+The host's own agent hooks — SafeDep's `gryph` audit layer, and `cot` (whose command is a macOS-only binary path) — are host-side concerns: in-container transcripts auto-sync back to the host on container start and exit, so observability happens there rather than in the VM. `bootstrap-state.sh` strips those host-only hook entries from the seeded `settings.json` on every sync (preserving rtk and any user hooks), so the VM never carries hooks that can't run inside it.
 
 Verify:
 
 ```bash
-aidc exec -- gryph status
 aidc exec -- rtk --version
-aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # hook entries from both
+aidc exec -- rtk gain                                                     # token savings so far
+aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # just the rtk PreToolUse/Bash hook
 ```
 
 ## Optional: egress firewall

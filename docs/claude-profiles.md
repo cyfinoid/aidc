@@ -53,19 +53,25 @@ Each repo has its own `claude_home` named volume, so by default you re-login on 
 
    ### Option A — macOS Keychain (recommended)
 
-   Plaintext token never touches a dotfile.
+   Plaintext token never touches a dotfile. `aidc` reads it from the Keychain on
+   demand for `aidc claude`, so **no `~/.zshrc` export is needed** — the token
+   never gets broadcast into every shell process.
 
    ```bash
-   # one-time
+   # one-time — store the token under the service aidc looks up
    security add-generic-password -U \
      -a "$USER" -s claude-code-oauth-token \
      -w 'sk-ant-oat01-...'
-
-   # in ~/.zshrc — this line references the keychain, not the secret
-   export CLAUDE_CODE_OAUTH_TOKEN="$(security find-generic-password -a "$USER" -s claude-code-oauth-token -w 2>/dev/null)"
    ```
 
-   First time a shell starts, macOS asks whether to allow `security` to read the item — click "Always Allow".
+   That's it. The first time `aidc claude` runs, macOS asks whether to allow
+   `security` to read the item — click "Always Allow".
+
+   Override the service name (or disable the lookup) with
+   `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` in `~/.config/aidc/config.env`; set it
+   empty to turn the Keychain lookup off. If `CLAUDE_CODE_OAUTH_TOKEN` is already
+   in the environment it always wins, so an existing `~/.zshrc` export still
+   works unchanged.
 
    Rotate later: `security add-generic-password -U -a "$USER" -s claude-code-oauth-token -w 'NEW_TOKEN'`. Delete: `security delete-generic-password -a "$USER" -s claude-code-oauth-token`.
 
@@ -85,11 +91,16 @@ Each repo has its own `claude_home` named volume, so by default you re-login on 
    [ -f ~/.config/aidc/secrets.env ] && source ~/.config/aidc/secrets.env
    ```
 
-3. Re-open your terminal (or `source ~/.zshrc`). `aidc claude` now forwards `CLAUDE_CODE_OAUTH_TOKEN` into the container, and Claude Code uses it directly — no per-repo login.
+3. With Option A you're done — `aidc claude` resolves the token from the Keychain
+   each run and Claude Code uses it directly, no per-repo login. With Option B,
+   re-open your terminal (or `source ~/.zshrc`) so the export is in your shell;
+   `aidc claude` then forwards it into the container.
 
-Verify:
+Verify (Keychain path — the token is intentionally *not* in your shell):
 ```bash
-[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] && echo "set" || echo "MISSING"
+# Option A: confirm the Keychain item exists; aidc reads it on demand.
+security find-generic-password -a "$USER" -s claude-code-oauth-token -w | head -c 12 && echo "..."
+# The token reaches the container even though your shell never exported it:
 aidc exec -- printenv CLAUDE_CODE_OAUTH_TOKEN | head -c 12 && echo "..."
 ```
 

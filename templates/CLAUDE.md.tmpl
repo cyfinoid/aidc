@@ -20,7 +20,37 @@ All scanners are pre-installed in the aidc container.
 - **Rust** (when `Cargo.toml` present): `cargo audit`
 - **Ruby** (when `Gemfile` present): `bundle-audit check --update`
 - **Node** (when `package.json` present): `npm audit --omit=dev` (or `pnpm audit` / `yarn npm audit`).
+- **Shell** (when shell scripts present): `shellcheck <files>` on changed `*.sh` and shebang scripts.
 - **Dependency vetting** (any language): `vet scan -D .` for SCA against the OSV database.
 
 When findings exist, the work is not done. Fix them, re-run the scan, and only then report the task as complete.
+
+## Testing & coverage
+
+Every code change ships with tests. Aim for full coverage of the lines you add or change — cover the happy path, edge cases, and error handling, not just the obvious case. If a line is genuinely untestable, say why in the change.
+
+Run the project's coverage tool and confirm the changed code is exercised before declaring work complete:
+
+- **Go**: `go test -cover ./...`
+- **Python**: `pytest --cov` (`coverage run -m pytest` + `coverage report`)
+- **Rust**: `cargo llvm-cov` (or `cargo tarpaulin`)
+- **Node**: `npm test -- --coverage` (`jest --coverage` / `vitest run --coverage`)
+- **Ruby**: SimpleCov via `bundle exec rspec`
+
+Coverage tools that aren't pre-installed can be added per project in `.devcontainer/project-setup.sh`.
+
+## Documentation & changelog
+
+Every meaningful change updates **both** changelog files:
+
+- `CHANGELOG.md` — one high-level bullet under the right heading, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+- `DETAILED_CHANGELOG.md` — a dated long-form entry (what / why / how / commands / verification / notes), newest first.
+
+## Documentation requirements
+
+**Meticulously document all activities performed in this project.** Every action — commands run, configuration changed, files transferred, troubleshooting steps, observations — gets recorded: the exact commands and their output, the reasoning behind each action, any errors and how they were resolved, and the design choices made. Treat every session as something that may need to be audited, reproduced, or rolled back. If it was done, write it down.
+
+## Session log convention
+
+Every working session writes a log to `logs/YYYY-MM-DD-<slug>.md` (date is the session date, slug is a short kebab-case description of the change). Existing entries are the template — match their structure: symptom → diagnosis → change (with diff) → commands → verification → notes. See `logs/README.md`.
 <!-- aidc:core-logics:end -->

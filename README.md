@@ -33,11 +33,30 @@ Make sure `~/.local/bin` is on your `PATH`.
 
 ```bash
 cd /path/to/cloned/repo
-aidc init          # one-time scaffold; writes .devcontainer/, .ai-container/, CLAUDE.md, AGENTS.md
+aidc init          # one-time scaffold; writes .devcontainer/, .ai-container/, CLAUDE.md, AGENTS.md, CHANGELOG.md, DETAILED_CHANGELOG.md, logs/
 aidc claude        # auto-runs `aidc up` if needed, then drops you into Claude Code in the container
 ```
 
 Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `cursor-agent`) auto-bootstrap the container on first run.
+
+## Claude authentication
+
+`aidc claude` needs a Claude credential inside the container. The recommended, durable setup is a **long-lived OAuth token kept in your macOS Keychain** — aidc reads it on demand at runtime, so the token is never exported into every shell and never written to a dotfile.
+
+```bash
+# Mint a long-lived token and store it in the Keychain in one step.
+# `tr -d '[:space:]'` strips the surrounding whitespace/newline so only the token is stored.
+security add-generic-password -U -a "$USER" -s claude-code-oauth-token \
+  -w "$(claude setup-token | rg sk-ant | tr -d '[:space:]')"
+```
+
+No ripgrep? Swap `rg sk-ant` for `grep sk-ant`. You can also run the two steps separately — `claude setup-token` prints the `sk-ant-oat01-…` value, then pass it to `security add-generic-password … -w '<token>'`.
+
+That's it — this is a one-time setup that survives across repos and `aidc destroy`. `aidc claude` resolves `CLAUDE_CODE_OAUTH_TOKEN` from the Keychain on every run (no per-repo login, no `~/.zshrc` export). The first run prompts macOS to allow `security` to read the item — click **Always Allow**.
+
+> **Don't** use the short-lived `accessToken` from Claude Code's own `Claude Code-credentials` Keychain item. That token expires within hours and is only refreshed when you run Claude Code *on the host*, so it goes stale for container-only use. The `claude setup-token` value above is long-lived and built for exactly this.
+
+Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes precedence). Override the Keychain service name — or disable the lookup — with `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` in `~/.config/aidc/config.env`. Alternate API targets (Z.ai, OpenRouter, local models) use profiles instead — see [`docs/claude-profiles.md`](docs/claude-profiles.md).
 
 ## What aidc actually does
 
@@ -47,19 +66,21 @@ Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `cursor-agent`) a
 - persists tool state in per-repo Docker volumes instead of mounting whole host homes
 - seeds selected config from host read-only mounts on first startup
 - creates one `CORE_LOGICS` git worktree per repo and mounts it at `/opt/CORE_LOGICS` for shared cross-repo notes
-- detects the project's language toolchains (Go, Rust, Ruby, Java, PHP, Node, Python) and installs them automatically
-- bakes always-on security scanners (`semgrep`, `gitleaks`, `trufflehog`) plus per-toolchain linters (`gosec`, `bandit`, `cargo-audit`, `bundler-audit`) into the image
-- seeds a non-negotiable "Security guardrails" block into `CLAUDE.md` / `AGENTS.md` for every project
-- ships SafeDep's `pmg` / `vet` / `gryph` for supply-chain interception and `rtk` for token-saving CLI proxying
+- detects the project's toolchains (Go, Rust, Ruby, Java, PHP, Node, Python — plus shell scripts) and installs them automatically; `aidc rescan` re-detects later for a repo that started empty
+- bakes always-on security scanners (`semgrep`, `gitleaks`, `trufflehog`) plus per-toolchain linters (`gosec`, `bandit`, `cargo-audit`, `bundler-audit`, `shellcheck`) into the image
+- seeds non-negotiable guidance into `CLAUDE.md` / `AGENTS.md` for every project — security guardrails, test-coverage discipline, and changelog/session-log conventions
+- seeds committed project docs once, never overwriting your edits — `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and a `logs/` session journal
+- auto-syncs in-container agent session transcripts back to the host on container start and exit, so the host's `/insights` stays current
+- ships SafeDep's `pmg` / `vet` for supply-chain interception and `rtk` for token-saving CLI proxying
 - offers an opt-in default-deny egress firewall with a sane allowlist
 
 ## Documentation
 
 - [`docs/install.md`](docs/install.md) — prereqs, install, daily commands, what lives where, per-project customisation, cleanup
 - [`docs/claude-profiles.md`](docs/claude-profiles.md) — alternate Claude API targets, local-model profiles, one-time OAuth login, session sync
-- [`docs/security.md`](docs/security.md) — scanners, supply-chain guardrails, agent guardrails (gryph + rtk), opt-in egress firewall
+- [`docs/security.md`](docs/security.md) — scanners, supply-chain guardrails, agent guardrails (rtk), opt-in egress firewall
 - [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md) — host-clipboard → container PNG paste bridge
-- [`CHANGELOG.md`](CHANGELOG.md)
+- [`CHANGELOG.md`](CHANGELOG.md) — high-level release notes; [`DETAILED_CHANGELOG.md`](DETAILED_CHANGELOG.md) — long-form per-change rationale
 - [`SECURITY.md`](SECURITY.md) — how to report vulnerabilities in aidc itself
 
 ## Commands
@@ -69,6 +90,7 @@ aidc init [path]
 aidc up [--clipboard] [--isolate-vm]
 aidc down
 aidc rebuild [--clipboard] [--isolate-vm]
+aidc rescan
 aidc status [--global]
 aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
 aidc shell
@@ -85,6 +107,12 @@ aidc sync-sessions [claude|codex|opencode|grok|all]
 ```
 
 `aidc status` shows the container + mounts/config for the current folder. `--global` lists every aidc container on the host with disk/CPU/memory and a totals line.
+
+`aidc rescan` re-detects the project's languages and rebuilds, so a repo that started empty (or single-language) picks up the matching toolchains and security scanners once code lands. `shellcheck` installs automatically when shell scripts are present.
+
+Session transcripts auto-sync from the container to the host on container start, agent exit, `aidc down`, and `aidc destroy` (before its volumes are removed), so `/insights` on the host stays current without a manual `aidc sync-sessions`. The start sync is the safety net for ungraceful exits (crash / `docker kill`) that the on-exit hooks miss — it catches up anything left in the volume.
+
+Toggle it with `AIDC_AUTO_SYNC_SESSIONS`: set it host-wide in `~/.config/aidc/config.env` (universal default for every project) or per project in `.ai-container/project.env` (overrides the global default). `0` disables auto-sync; manual `aidc sync-sessions` always works regardless.
 
 `--provider` remains as a compatibility alias for `--profile`.
 
@@ -137,7 +165,8 @@ echo "AIDC_ISOLATE_VM=1" >> .ai-container/project.env
 
 ## Notes
 
-- Generated files are added to `.git/info/exclude` when the target directory is a git repo, so your project stays clean.
+- Generated files are added to `.git/info/exclude` when the target directory is a git repo, so your project stays clean. The seeded project docs (`CHANGELOG.md`, `DETAILED_CHANGELOG.md`, `logs/`) are *not* excluded — they belong to your repo and are meant to be committed.
+- Settings can be set host-wide in `~/.config/aidc/config.env` (universal defaults for every project) or per project in `.ai-container/project.env`, which overrides the global default. Both files are sourced for env vars like `AIDC_AUTO_SYNC_SESSIONS`, `AIDC_ENABLE_EGRESS_FIREWALL`, and `AIDC_ISOLATE_VM`.
 - Container egress is open by default; set `AIDC_ENABLE_EGRESS_FIREWALL=1` in `.ai-container/project.env` for a default-deny allowlist. See [`docs/security.md`](docs/security.md#optional-egress-firewall).
 - The host-clipboard bridge is **off by default** — no host clipboard socket is mounted into the container. Opt in per (re)create with `aidc up --clipboard` / `aidc rebuild --clipboard`, or persist `AIDC_ENABLE_CLIPBOARD=1` in `.ai-container/project.env`. See [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md).
 - Per-project VM isolation (`--isolate-vm`) is **off by default** due to resource cost. Opt in per (re)create with `aidc up --isolate-vm` / `aidc rebuild --isolate-vm`, or persist `AIDC_ISOLATE_VM=1` in `.ai-container/project.env`. See [Isolation modes](#isolation-modes) above.

@@ -19,7 +19,7 @@ references/
 # the source of truth; the generated copies at the repo root are local-only.
 /CLAUDE.md
 /AGENTS.md
-
+/logs
 # Editor / OS noise
 .DS_Store
 *.swp

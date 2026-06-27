@@ -9,7 +9,7 @@
 - container hardening defaults (egress firewall, supply-chain shims, scanner pre-installs)
 - the Claude-profile alias generation in `~/.local/bin`
 
-Bugs in `claude`, `codex`, `opencode`, `cursor-agent`, `pmg`, `vet`, `gryph`, `rtk`, or the upstream devcontainer base image are out of scope — report those to their respective projects.
+Bugs in `claude`, `codex`, `opencode`, `cursor-agent`, `pmg`, `vet`, `rtk`, or the upstream devcontainer base image are out of scope — report those to their respective projects.
 
 ## Supported versions
 

@@ -9,10 +9,15 @@ AIDC_VERSION="${AIDC_VERSION:-0.1.0}"
 AIDC_CONTAINER_USER="${AIDC_CONTAINER_USER:-vscode}"
 AIDC_CONTAINER_HOME="${AIDC_CONTAINER_HOME:-/home/vscode}"
 AIDC_HOST_CONFIG_ROOT="${AIDC_HOST_CONFIG_ROOT:-$HOME/.config/aidc}"
+AIDC_GLOBAL_CONFIG="${AIDC_GLOBAL_CONFIG:-$AIDC_HOST_CONFIG_ROOT/config.env}"
 AIDC_EMPTY_ROOT="${AIDC_EMPTY_ROOT:-$AIDC_HOST_CONFIG_ROOT/empty}"
 AIDC_PROVIDER_ROOT="${AIDC_PROVIDER_ROOT:-$AIDC_HOST_CONFIG_ROOT/providers/claude}"
 AIDC_CLAUDE_PROFILE_ROOT="${AIDC_CLAUDE_PROFILE_ROOT:-$AIDC_PROVIDER_ROOT}"
 AIDC_BIN_DIR="${AIDC_BIN_DIR:-${AIDC_INSTALL_DIR:-$HOME/.local/bin}}"
+# macOS Keychain service that holds the Claude OAuth token. When set (the
+# default), aidc reads the token from the Keychain on demand instead of
+# requiring it to be exported into every shell. Set empty to disable.
+AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE="${AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE:-claude-code-oauth-token}"
 AIDC_CORE_ROOT_DEFAULT="${AIDC_CORE_ROOT_DEFAULT:-$HOME/CORE_LOGICS}"
 AIDC_CORE_WORKTREE_ROOT="${AIDC_CORE_WORKTREE_ROOT:-$HOME/.local/share/aidc/core-worktrees}"
 AIDC_MANAGED_CLAUDE_ALIAS_MARKER="# aidc-managed claude-alias"
@@ -59,6 +64,9 @@ aidc::main() {
       ;;
     rebuild)
       aidc::cmd_rebuild "$@"
+      ;;
+    rescan)
+      aidc::cmd_rescan "$@"
       ;;
     status)
       aidc::cmd_status "$@"
@@ -117,6 +125,7 @@ Usage:
   aidc up [--clipboard] [--isolate-vm]
   aidc down
   aidc rebuild [--clipboard] [--isolate-vm]
+  aidc rescan
   aidc status [--global]
   aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
   aidc shell
@@ -138,8 +147,12 @@ Notes:
   - aidc cursor opens the host Cursor app; reopen the repo in the devcontainer.
   - aidc destroy removes the container, named volumes, and image by default.
     Worktree and scaffold removal are opt-in via the listed flags.
+  - aidc rescan re-detects project languages (handy once a repo that started
+    empty gains code) and rebuilds so the matching toolchains/scanners install.
   - aidc sync-sessions pulls in-container session logs back to host
-    ~/.claude/projects so '/insights' on the host can see them.
+    ~/.claude/projects so '/insights' on the host can see them. Sessions also
+    auto-sync on container start, agent exit, 'down', and 'destroy' unless
+    AIDC_AUTO_SYNC_SESSIONS=0.
   - The host-clipboard bridge is off by default. Enable it at (re)create time
     with 'aidc up --clipboard' or 'aidc rebuild --clipboard'.
   - Per-project VM isolation is off by default due to resource cost. Enable it
@@ -197,6 +210,12 @@ aidc::refresh_scaffold() {
   aidc::copy_template "templates/devcontainer/scripts/init-firewall.sh.tmpl" "$workspace/.devcontainer/scripts/init-firewall.sh" "0755"
   # User-owned. Created once, never refreshed; edits drive per-project image layers.
   aidc::copy_template_once "templates/devcontainer/project-setup.sh.tmpl" "$workspace/.devcontainer/project-setup.sh" "0755"
+  # Project documentation seeds. Created once and never overwritten so the
+  # project's own history is never clobbered. Intentionally NOT git-excluded —
+  # these belong to the repo and should be committed.
+  aidc::copy_template_once "templates/CHANGELOG.md.tmpl" "$workspace/CHANGELOG.md" "0644"
+  aidc::copy_template_once "templates/DETAILED_CHANGELOG.md.tmpl" "$workspace/DETAILED_CHANGELOG.md" "0644"
+  aidc::copy_template_once "templates/logs/README.md.tmpl" "$workspace/logs/README.md" "0644"
   aidc::merge_template "templates/CLAUDE.md.tmpl" "$workspace/CLAUDE.md"
   aidc::merge_template "templates/AGENTS.md.tmpl" "$workspace/AGENTS.md"
   aidc::copy_template "templates/cursor-rules/00-core-logics.mdc.tmpl" "$workspace/.cursor/rules/00-core-logics.mdc" "0644"
@@ -219,6 +238,9 @@ aidc::cmd_up() {
   fi
 
   aidc::compose "$workspace" up -d --build workspace
+  # Catch up the host with any transcripts a prior (possibly ungraceful) session
+  # left in the volume — the recovery case the on-exit hooks can't cover.
+  aidc::auto_sync_sessions "$workspace" all
   aidc::log "container is ready for $(basename "$workspace")"
 }
 
@@ -233,7 +255,35 @@ aidc::cmd_rebuild() {
   fi
 
   aidc::compose "$workspace" up -d --build --force-recreate workspace
+  aidc::auto_sync_sessions "$workspace" all
   aidc::log "container rebuilt for $(basename "$workspace")"
+}
+
+# Re-detect project languages and rebuild so newly-applicable toolchains and
+# their security scanners get installed. Useful when a repo that started empty
+# (or single-language) later gains code aidc didn't see at first build.
+aidc::cmd_rescan() {
+  local workspace
+  workspace="$(aidc::default_workspace)"
+  aidc::ensure_workspace_ready "$workspace"
+
+  local detected effective
+  detected="$(aidc::detect_toolchains "$workspace")"
+  effective="$(aidc::compute_toolchains "$workspace")"
+
+  aidc::log "detected toolchains: ${detected:-none}"
+  if [[ "$effective" != "$detected" ]]; then
+    # project.env pins AIDC_TOOLCHAINS, so detection is informational only.
+    aidc::log "effective toolchains (AIDC_TOOLCHAINS override): ${effective:-none}"
+  fi
+
+  if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
+    aidc::vm_ensure "$workspace"
+  fi
+
+  # --build picks up the changed AIDC_TOOLCHAINS build arg and reinstalls.
+  aidc::compose "$workspace" up -d --build workspace
+  aidc::log "rescan complete for $(basename "$workspace")"
 }
 
 # Parse flags shared by 'up' and 'rebuild'.
@@ -260,6 +310,8 @@ aidc::cmd_down() {
     aidc::die "no aidc project in $workspace (run 'aidc init' first)"
   fi
   aidc::load_project_env "$workspace"
+  # Pull session transcripts to the host while the container is still up.
+  aidc::auto_sync_sessions "$workspace" all
   aidc::compose "$workspace" down
 
   if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
@@ -549,6 +601,8 @@ aidc::cmd_destroy() {
     esac
   fi
 
+  # Last chance to pull session transcripts before '-v' wipes the volumes.
+  aidc::auto_sync_sessions "$workspace" all
   aidc::compose "$workspace" down -v --rmi local --remove-orphans
 
   if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
@@ -787,6 +841,37 @@ aidc::sync_session_tool() {
   aidc::log "synced $tool sessions to $host_dst"
 }
 
+# Best-effort session sync wired into the agent/lifecycle paths so transcripts
+# land on the host without a manual 'aidc sync-sessions'. Opt out by setting
+# AIDC_AUTO_SYNC_SESSIONS=0 in .ai-container/project.env. 'tool' is a single
+# tool name or 'all'; tools without a session mapping (e.g. cursor-agent) are
+# skipped. Never aborts the caller — sync failures are logged, not fatal.
+aidc::auto_sync_sessions() {
+  local workspace="$1"
+  local tool="$2"
+  [[ "${AIDC_AUTO_SYNC_SESSIONS:-1}" == "0" ]] && return 0
+
+  # No container, nothing to pull (e.g. auto-sync after a failed start).
+  [[ -n "$(aidc::compose_capture "$workspace" ps -q workspace 2>/dev/null)" ]] || return 0
+
+  if [[ "$tool" == "all" ]]; then
+    local t
+    for t in claude codex opencode grok; do
+      aidc::sync_session_tool "$workspace" "$t" || true
+    done
+    return 0
+  fi
+
+  case "$tool" in
+    claude|codex|opencode|grok)
+      aidc::sync_session_tool "$workspace" "$tool" || true
+      ;;
+    *)
+      # cursor-agent and unknowns have no session volume to sync.
+      ;;
+  esac
+}
+
 aidc::run_tool() {
   local tool="$1"
   local profile="$2"
@@ -795,6 +880,10 @@ aidc::run_tool() {
   local workspace
   workspace="$(aidc::default_workspace)"
   aidc::ensure_container_running "$workspace"
+
+  if [[ "$tool" == "claude" ]]; then
+    aidc::resolve_claude_oauth_token
+  fi
 
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_passthrough_env_args
@@ -836,7 +925,12 @@ aidc::run_tool() {
     command+=("$@")
   fi
 
-  aidc::compose_exec "$workspace" "${command[@]}"
+  # Run the agent in the foreground; once it exits, pull its session transcripts
+  # back to the host. Preserve the agent's exit code as our own.
+  local rc=0
+  aidc::compose_exec "$workspace" "${command[@]}" || rc=$?
+  aidc::auto_sync_sessions "$workspace" "$tool"
+  return "$rc"
 }
 
 aidc::need_cmd() {
@@ -1358,6 +1452,12 @@ AIDC_REPO_SLUG=$repo_slug
 AIDC_CORE_ROOT=$(aidc::shell_escape "$core_root")
 AIDC_CORE_BRANCH=$core_branch
 AIDC_CORE_WORKTREE=$(aidc::shell_escape "$core_worktree")
+
+# Auto-pull in-container agent transcripts to the host on container start, agent
+# exit, 'down', and 'destroy'. Set to 0 to disable and sync manually with
+# 'aidc sync-sessions'. Overrides the host-wide default in
+# ~/.config/aidc/config.env for this project only.
+# AIDC_AUTO_SYNC_SESSIONS=1
 EOF
 }
 
@@ -1430,13 +1530,28 @@ aidc::ensure_container_running() {
 
   if [[ -z "$(aidc::compose_capture "$workspace" ps -q workspace)" ]]; then
     aidc::compose "$workspace" up -d --build workspace
+    # Only on the down→up transition (not every exec), so we recover prior
+    # transcripts without adding a sync to each command.
+    aidc::auto_sync_sessions "$workspace" all
   fi
+}
+
+# Source host-wide aidc defaults (~/.config/aidc/config.env) if present. These
+# are universal settings shared by every project on this host. A project's
+# .ai-container/project.env is sourced afterwards and overrides them, so a
+# per-folder setting always wins over the global default.
+aidc::load_global_config() {
+  [[ -f "$AIDC_GLOBAL_CONFIG" ]] || return 0
+  # shellcheck disable=SC1090
+  . "$AIDC_GLOBAL_CONFIG"
 }
 
 aidc::load_project_env() {
   local workspace="$1"
   local env_file="$workspace/.ai-container/project.env"
   [[ -f "$env_file" ]] || aidc::die "missing project env: $env_file"
+  # Global defaults first; per-folder project.env overrides them.
+  aidc::load_global_config
   # shellcheck disable=SC1090
   . "$env_file"
 }
@@ -1532,6 +1647,31 @@ aidc::ensure_host_config_dirs() {
   mkdir -p "$AIDC_HOST_CONFIG_ROOT" "$AIDC_EMPTY_ROOT" "$AIDC_CLAUDE_PROFILE_ROOT"
   mkdir -p "$AIDC_EMPTY_ROOT/claude" "$AIDC_EMPTY_ROOT/codex" "$AIDC_EMPTY_ROOT/opencode" "$AIDC_EMPTY_ROOT/grok" "$AIDC_EMPTY_ROOT/clipboard"
   touch "$AIDC_EMPTY_ROOT/gitconfig"
+  aidc::ensure_global_config
+}
+
+# Seed the host-wide config file once, fully commented so sourcing it is a no-op
+# until the user edits it. Lists the settings that make sense as global defaults.
+aidc::ensure_global_config() {
+  [[ -f "$AIDC_GLOBAL_CONFIG" ]] && return 0
+  mkdir -p "$(dirname "$AIDC_GLOBAL_CONFIG")"
+  cat >"$AIDC_GLOBAL_CONFIG" <<'EOF'
+# aidc global config — universal defaults for every project on this host.
+# A project's .ai-container/project.env is sourced AFTER this file and overrides
+# anything set here, so per-folder settings win. Uncomment a line to change a
+# host-wide default.
+
+# Auto-pull in-container agent transcripts to the host on container start, agent
+# exit, 'down', and 'destroy'. Set to 0 to disable everywhere by default.
+# AIDC_AUTO_SYNC_SESSIONS=1
+
+# macOS Keychain service holding the Claude OAuth token. aidc reads it on demand
+# for 'aidc claude' (no need to export CLAUDE_CODE_OAUTH_TOKEN in your shell).
+# Store the token once with:
+#   security add-generic-password -U -a "$USER" -s claude-code-oauth-token -w 'sk-ant-oat01-...'
+# Override the service name below, or set it empty to disable the lookup.
+# AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE=claude-code-oauth-token
+EOF
 }
 
 aidc::ensure_claude_profile_examples() {
@@ -1672,6 +1812,33 @@ aidc::export_compose_env() {
   fi
 }
 
+# True when the workspace contains shell scripts worth linting with shellcheck.
+# Fast path is the name-based '*.sh' check; the shebang probe is bounded to
+# executable, extensionless files (capped) so big repos stay cheap. Uses only
+# POSIX find/head so it works with macOS (BSD) find under bash 3.2.
+aidc::has_shell_scripts() {
+  local workspace="$1"
+
+  # Fast path: any *.sh file, skipping VCS/vendor dirs.
+  if [[ -n "$(find "$workspace" \
+        \( -type d \( -name .git -o -name node_modules -o -name vendor \) -prune \) -o \
+        \( -type f -name '*.sh' -print \) 2>/dev/null | head -n1)" ]]; then
+    return 0
+  fi
+
+  # Extensionless executables with a shell shebang (e.g. bin/aidc).
+  local f first
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    first="$(head -n1 "$f" 2>/dev/null)"
+    [[ "$first" == '#!'*sh* ]] && return 0
+  done < <(find "$workspace" \
+        \( -type d \( -name .git -o -name node_modules -o -name vendor \) -prune \) -o \
+        \( -type f -perm -u+x ! -name '*.*' -print \) 2>/dev/null | head -n 200)
+
+  return 1
+}
+
 aidc::detect_toolchains() {
   local workspace="$1"
   local -a detected=()
@@ -1689,6 +1856,12 @@ aidc::detect_toolchains() {
   fi
   if [[ -f "$workspace/requirements.txt" || -f "$workspace/uv.lock" || -f "$workspace/pyproject.toml" || -f "$workspace/Pipfile" || -f "$workspace/Pipfile.lock" || -f "$workspace/poetry.lock" ]]; then
     detected+=("python")
+  fi
+  # Shell has no manifest file, so detect it from content: any *.sh file or an
+  # extensionless executable with a shell shebang (e.g. bin/aidc). The 'shell'
+  # toolchain arm installs the shellcheck linter.
+  if aidc::has_shell_scripts "$workspace"; then
+    detected+=("shell")
   fi
   # Join with commas without touching the global IFS.
   local out="" item
@@ -1740,6 +1913,35 @@ aidc::append_passthrough_env_args() {
       AIDC_EXEC_ENV_ARGS+=("-e" "$key")
     fi
   done
+}
+
+# Populate CLAUDE_CODE_OAUTH_TOKEN from the macOS Keychain so the token only
+# lives in this process for the duration of the exec, instead of being exported
+# into every shell via ~/.zshrc. No-op when the token is already set, when the
+# key has been dropped from the passthrough list (per-project opt-out via
+# AIDC_PASSTHROUGH_ENV_KEYS), when the Keychain lookup is disabled, or when the
+# `security` tool is unavailable (e.g. non-macOS hosts). Never logs the token.
+aidc::resolve_claude_oauth_token() {
+  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && return 0
+  [[ -n "${AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE:-}" ]] || return 0
+
+  local key forwarded=0
+  for key in "${AIDC_PASSTHROUGH_ENV_KEYS[@]}"; do
+    if [[ "$key" == "CLAUDE_CODE_OAUTH_TOKEN" ]]; then
+      forwarded=1
+      break
+    fi
+  done
+  [[ "$forwarded" -eq 1 ]] || return 0
+
+  command -v security >/dev/null 2>&1 || return 0
+
+  local account token
+  account="${USER:-$(id -un 2>/dev/null || true)}"
+  token="$(security find-generic-password -a "$account" -s "$AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE" -w 2>/dev/null || true)"
+  if [[ -n "$token" ]]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$token"
+  fi
 }
 
 aidc::validate_claude_profile_name() {
