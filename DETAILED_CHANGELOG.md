@@ -8,6 +8,92 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-07-01 — SBOM generation, license-conflict checks, and CI-agnostic automation
+
+**Summary:** aidc now generates SBOMs in both CycloneDX and SPDX (at code level
+and, when a Docker image is available, at build time), diffs the two to show
+what the image build adds over the source, and gates dependency licenses that
+conflict with the project's own license — all through a set of CI-agnostic bash
+scripts under `scripts/ci/` that any CI (GitHub, Jenkins, GitLab, …) calls the
+same way. `syft` and `grype` moved from opt-in to always-on in the image.
+
+**Why:** The container already shipped SCA (`vet`/`pmg`) and SAST/secret
+scanners, but had no SBOM, no license-compatibility gate, and no scripted,
+provider-neutral way to run supply-chain steps in CI. The request was to make
+SBOMs (both formats) and an early license-conflict warning first-class, and to
+move build/scan steps into reusable scripts so the CI config is a thin caller.
+
+**Design decisions (confirmed with the requester):**
+- **syft + grype always-on** (previously opt-in via `AIDC_SECURITY_TOOLS`) so
+  SBOMs "just work" in every project and CI without extra config.
+- **License engine = existing `vet` + a syft-derived matrix** — no new binary.
+  The syft-SPDX + `license-matrix.tsv` check is the always-on, offline,
+  deterministic gate; `vet` license enrichment is opt-in (`AIDC_LICENSE_USE_VET=1`,
+  needs network) since its Insights-backed license data requires connectivity.
+- **Warn locally / fail in CI** via `AIDC_LICENSE_MODE` (default `warn`).
+- **Early hook** = `aidc licenses` + an agent guardrail bullet + a *documented,
+  opt-in* pre-commit snippet (git hooks are not auto-installed).
+
+**How it works:** `scripts/ci/` holds standalone bash (`set -euo pipefail`,
+bash-3.2-safe, shellcheck-clean) that sources only its own `lib-common.sh`,
+never `lib/aidc.sh`, so it runs on a bare CI runner. Config is via env vars
+(`AIDC_SBOM_DIR`, `AIDC_SBOM_SRC`, `AIDC_IMAGE_REF`, `AIDC_LICENSE_MODE`,
+`AIDC_LICENSE_MATRIX`, …); exit codes are `0` ok / `1` policy violation in fail
+mode / `2` tool-missing. `syft` generates both formats from a single catalog in
+one invocation so the CycloneDX and SPDX outputs stay consistent. `sbom-diff.sh`
+keys CycloneDX components by `group/name` (version-independent) so a version
+bump reads as a change, not add+remove. `license-check.sh` resolves the
+project's own license (`AIDC_PROJECT_LICENSE` override → manifest `license`
+field → `LICENSE` text heuristics), extracts the dependency license inventory
+from the SPDX SBOM, splits dual-license expressions into atoms, and flags any
+that match a matrix row for the project license (or a `*` wildcard row).
+
+**What changed:**
+- `scripts/ci/`: `lib-common.sh`, `sbom-code.sh`, `sbom-image.sh`,
+  `sbom-diff.sh`, `license-check.sh`, `sbom-all.sh`, `license-matrix.tsv`.
+- `.devcontainer/Dockerfile` + `templates/devcontainer/Dockerfile.tmpl`: `syft`
+  + `grype` promoted to a pinned always-on layer (`SYFT_VERSION`/`GRYPE_VERSION`);
+  the opt-in `AIDC_SECURITY_TOOLS` arms for both became no-ops (back-compat).
+  NOTE: `.devcontainer/` is bind-mounted read-only inside the aidc container, so
+  the Dockerfile edit could not be written from within this session — the
+  identical change is provided as `sbom-dockerfile.patch` at the repo root to
+  `git apply` on the host (then delete the patch). The template carries the
+  change directly.
+- `lib/aidc.sh`: `sbom` / `licenses` dispatch + `aidc::cmd_sbom` /
+  `aidc::cmd_licenses` (with `aidc::append_sbom_env_args` forwarding the SBOM env
+  knobs into the container exec); help text; `AIDC_MANAGED_PATHS` gains the six
+  `scripts/ci/` scripts; `aidc::refresh_scaffold` copies `templates/ci/` into
+  `<project>/scripts/ci/` (scripts managed/refreshed, `license-matrix.tsv` and
+  the reference workflow copied once / user-owned).
+- `templates/ci/`: `.tmpl` mirrors of the scripts + matrix + `github-sbom.yml.tmpl`.
+- `.github/workflows/sbom.yml`: reference CI caller on aidc's own tree.
+- `.github/workflows/shellcheck.yml`: runs the three new unit tests (the `*.sh`
+  glob already lints `scripts/ci/`).
+- `tests/`: `license-resolve.test.sh`, `license-check.test.sh`,
+  `sbom-diff.test.sh` (offline; SPDX/CycloneDX fixtures under
+  `tests/fixtures/`, no syft/network needed).
+- Docs/guardrails: new "SBOM & license compliance" section in `docs/security.md`
+  (+ always-on/opt-in updates); an "SBOM & licenses" bullet in the security
+  guardrails of `CLAUDE.md`/`AGENTS.md` and their templates.
+
+**Commands / verification:**
+```bash
+shellcheck --severity=warning scripts/ci/*.sh lib/aidc.sh tests/*.test.sh
+bash tests/license-resolve.test.sh   # 6 passed
+bash tests/license-check.test.sh     # 5 passed
+bash tests/sbom-diff.test.sh         # 3 passed
+# In a built container: aidc sbom / aidc licenses --fail
+```
+
+**Notes / trade-offs:** The license check is intentionally conservative — a dual
+`(MIT OR GPL-2.0-only)` dependency is flagged even though a consumer could pick
+MIT, because the goal is to *surface* concerns early; review those by hand. The
+matrix is user-owned and ships a conservative default (permissive projects vs.
+strong copyleft; AGPL flagged everywhere) and is explicitly not legal advice.
+`vet` license enrichment is opt-in because it needs network for Insights data.
+
+---
+
 ## 2026-06-26 — Resolve Claude OAuth token from the macOS Keychain on demand
 
 **Summary:** `aidc claude` now fetches `CLAUDE_CODE_OAUTH_TOKEN` from the macOS

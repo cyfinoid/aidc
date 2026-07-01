@@ -126,6 +126,20 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && chmod 0755 /usr/local/bin/gitleaks \
     && rm /tmp/gitleaks.tar.gz
 
+# SBOM + vulnerability tooling, always-on. syft catalogs source trees and
+# container images into CycloneDX + SPDX SBOMs; grype scans those SBOMs/images
+# for known vulnerabilities. Both back the scripts/ci/ automation and the
+# `aidc sbom` / `aidc licenses` subcommands. Installed system-wide so image
+# build steps and every user share them.
+# Pinned. To bump: check https://github.com/anchore/syft/releases and
+# https://github.com/anchore/grype/releases, update the ARG, rebuild, commit.
+ARG SYFT_VERSION=v1.18.1
+ARG GRYPE_VERSION=v0.87.0
+RUN curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
+      | sh -s -- -b /usr/local/bin "$SYFT_VERSION" \
+    && curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+      | sh -s -- -b /usr/local/bin "$GRYPE_VERSION"
+
 # Rust Token Killer: CLI proxy that cuts token usage on dev operations.
 # Env var goes on the sh side of the pipe so the installer (not curl) sees it.
 RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh \
@@ -273,11 +287,9 @@ RUN if [ -n "$AIDC_SECURITY_TOOLS" ]; then \
       for tool in $(echo "$AIDC_SECURITY_TOOLS" | tr ',' ' '); do \
         case "$tool" in \
           grype) \
-            curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-              | sh -s -- -b "$HOME/.local/bin" ;; \
+            echo "aidc: grype is always-on in the base image; skipping" ;; \
           syft) \
-            curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-              | sh -s -- -b "$HOME/.local/bin" ;; \
+            echo "aidc: syft is always-on in the base image; skipping" ;; \
           checkov) \
             UV_TOOL_BIN_DIR="$HOME/.local/bin" \
             UV_TOOL_DIR="$HOME/.local/share/uv-tools" \

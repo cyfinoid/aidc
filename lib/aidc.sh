@@ -29,6 +29,12 @@ AIDC_MANAGED_PATHS=(
   ".devcontainer/scripts/init-firewall.sh"
   ".ai-container/project.env"
   ".cursor/rules/00-core-logics.mdc"
+  "scripts/ci/lib-common.sh"
+  "scripts/ci/sbom-code.sh"
+  "scripts/ci/sbom-image.sh"
+  "scripts/ci/sbom-diff.sh"
+  "scripts/ci/license-check.sh"
+  "scripts/ci/sbom-all.sh"
 )
 AIDC_MERGE_PATHS=(
   "CLAUDE.md"
@@ -107,6 +113,12 @@ aidc::main() {
     sync-sessions)
       aidc::cmd_sync_sessions "$@"
       ;;
+    sbom)
+      aidc::cmd_sbom "$@"
+      ;;
+    licenses)
+      aidc::cmd_licenses "$@"
+      ;;
     help|-h|--help)
       aidc::cmd_help
       ;;
@@ -139,8 +151,16 @@ Usage:
   aidc sync-claude-aliases
   aidc sync-config <claude|codex|opencode|grok|all>
   aidc sync-sessions [claude|codex|opencode|grok|all]
+  aidc sbom [-- ...]
+  aidc licenses [--fail] [-- ...]
 
 Notes:
+  - aidc sbom generates code-level + build-time SBOMs (CycloneDX + SPDX), diffs
+    them, and runs the license check. It calls scripts/ci/sbom-all.sh in the
+    container; any CI can call the same scripts directly. Set AIDC_IMAGE_REF to
+    scan a built image for the build-time SBOM.
+  - aidc licenses runs the license-conflict check (scripts/ci/license-check.sh).
+    Defaults to warn; pass --fail to exit non-zero on a conflict (CI gate).
   - Run commands from the repo root you want to isolate.
   - Tool commands auto-bootstrap the repo and container if needed.
   - Plain 'aidc claude' keeps the default Anthropic path.
@@ -219,6 +239,21 @@ aidc::refresh_scaffold() {
   aidc::merge_template "templates/CLAUDE.md.tmpl" "$workspace/CLAUDE.md"
   aidc::merge_template "templates/AGENTS.md.tmpl" "$workspace/AGENTS.md"
   aidc::copy_template "templates/cursor-rules/00-core-logics.mdc.tmpl" "$workspace/.cursor/rules/00-core-logics.mdc" "0644"
+
+  # CI-agnostic SBOM + license automation (scripts/ci/). Managed scripts are
+  # refreshed on every scaffold so upstream fixes propagate; the compatibility
+  # matrix is user-owned policy (copied once, never clobbered). Intentionally
+  # NOT git-excluded — these belong to the repo and should be committed so any
+  # CI (GitHub, Jenkins, GitLab, ...) can call them.
+  aidc::copy_template "templates/ci/lib-common.sh.tmpl" "$workspace/scripts/ci/lib-common.sh" "0755"
+  aidc::copy_template "templates/ci/sbom-code.sh.tmpl" "$workspace/scripts/ci/sbom-code.sh" "0755"
+  aidc::copy_template "templates/ci/sbom-image.sh.tmpl" "$workspace/scripts/ci/sbom-image.sh" "0755"
+  aidc::copy_template "templates/ci/sbom-diff.sh.tmpl" "$workspace/scripts/ci/sbom-diff.sh" "0755"
+  aidc::copy_template "templates/ci/license-check.sh.tmpl" "$workspace/scripts/ci/license-check.sh" "0755"
+  aidc::copy_template "templates/ci/sbom-all.sh.tmpl" "$workspace/scripts/ci/sbom-all.sh" "0755"
+  aidc::copy_template_once "templates/ci/license-matrix.tsv.tmpl" "$workspace/scripts/ci/license-matrix.tsv" "0644"
+  # Reference CI caller. User-owned (copied once) since CI configs get tailored.
+  aidc::copy_template_once "templates/ci/github-sbom.yml.tmpl" "$workspace/.github/workflows/sbom.yml" "0644"
 
   # project.env is preserved if it already exists, so user-added settings
   # (e.g. AIDC_ENABLE_EGRESS_FIREWALL=1) survive scaffold refreshes.
@@ -697,6 +732,67 @@ aidc::cmd_exec() {
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_passthrough_env_args
   aidc::compose_exec "$workspace" "$@"
+}
+
+# Host-set knobs forwarded into the container for `aidc sbom` / `aidc licenses`
+# so overrides like AIDC_IMAGE_REF or AIDC_LICENSE_MODE reach scripts/ci/.
+AIDC_SBOM_ENV_KEYS=(
+  "AIDC_SBOM_DIR"
+  "AIDC_SBOM_SRC"
+  "AIDC_IMAGE_REF"
+  "AIDC_LICENSE_MODE"
+  "AIDC_LICENSE_MATRIX"
+  "AIDC_LICENSE_SBOM"
+  "AIDC_PROJECT_LICENSE"
+  "AIDC_LICENSE_USE_VET"
+)
+
+aidc::append_sbom_env_args() {
+  local key
+  for key in "${AIDC_SBOM_ENV_KEYS[@]}"; do
+    if [[ -n "${!key:-}" ]]; then
+      AIDC_EXEC_ENV_ARGS+=("-e" "$key")
+    fi
+  done
+}
+
+# Generate the full SBOM pipeline (code + build-time + diff + license check)
+# inside the container by running the same CI-agnostic scripts any CI calls.
+aidc::cmd_sbom() {
+  local workspace
+  workspace="$(aidc::default_workspace)"
+  aidc::ensure_container_running "$workspace"
+  if [[ $# -gt 0 && "$1" == "--" ]]; then
+    shift
+  fi
+  AIDC_EXEC_ENV_ARGS=()
+  aidc::append_sbom_env_args
+  aidc::compose_exec "$workspace" bash /workspace/scripts/ci/sbom-all.sh "$@"
+}
+
+# Run just the license-conflict check. Defaults to warn; --fail gates (exit 1).
+aidc::cmd_licenses() {
+  local workspace
+  workspace="$(aidc::default_workspace)"
+  aidc::ensure_container_running "$workspace"
+
+  local mode=""
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --fail) mode="fail"; shift ;;
+      --warn) mode="warn"; shift ;;
+      --) shift; args+=("$@"); break ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+
+  AIDC_EXEC_ENV_ARGS=()
+  aidc::append_sbom_env_args
+  if [[ -n "$mode" ]]; then
+    AIDC_EXEC_ENV_ARGS+=("-e" "AIDC_LICENSE_MODE=$mode")
+  fi
+  aidc::compose_exec "$workspace" bash /workspace/scripts/ci/license-check.sh ${args[@]+"${args[@]}"}
 }
 
 aidc::cmd_claude() {

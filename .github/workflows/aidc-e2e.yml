@@ -34,7 +34,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       # Make `#!/usr/bin/env bash` resolve to the system bash 3.2 on macOS so
       # the install/sync paths are exercised under the interpreter real macOS

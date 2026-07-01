@@ -13,7 +13,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
@@ -36,3 +36,10 @@ jobs:
 
       - name: Run bootstrap unit tests
         run: .github/scripts/test-bootstrap-state.sh
+
+      - name: Run SBOM + license unit tests
+        run: |
+          set -euo pipefail
+          bash tests/license-resolve.test.sh
+          bash tests/license-check.test.sh
+          bash tests/sbom-diff.test.sh

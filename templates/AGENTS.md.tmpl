@@ -22,6 +22,7 @@ All scanners are pre-installed in the aidc container.
 - **Node** (when `package.json` present): `npm audit --omit=dev` (or `pnpm audit` / `yarn npm audit`).
 - **Shell** (when shell scripts present): `shellcheck <files>` on changed `*.sh` and shebang scripts.
 - **Dependency vetting** (any language): `vet scan -D .` for SCA against the OSV database.
+- **SBOM & licenses** (when dependencies or the project license change): regenerate the SBOM and run the license-conflict check — `scripts/ci/license-check.sh` (or `aidc licenses`). Resolve any flagged conflict between the project license and a dependency license before completing. Full pipeline: `scripts/ci/sbom-all.sh` (or `aidc sbom`).
 
 When findings exist, the work is not done. Fix them, re-run the scan, and only then report the task as complete.
 

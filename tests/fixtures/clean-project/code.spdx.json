@@ -1,0 +1,26 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "name": "aidc-clean-fixture",
+  "packages": [
+    {
+      "name": "aidc-clean-fixture",
+      "versionInfo": "1.0.0",
+      "licenseDeclared": "MIT"
+    },
+    {
+      "name": "left-pad",
+      "versionInfo": "1.3.0",
+      "licenseConcluded": "MIT"
+    },
+    {
+      "name": "libpermissive",
+      "versionInfo": "0.9.0",
+      "licenseConcluded": "Apache-2.0"
+    },
+    {
+      "name": "libbsd",
+      "versionInfo": "3.0.0",
+      "licenseConcluded": "BSD-3-Clause"
+    }
+  ]
+}

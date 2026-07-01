@@ -1,0 +1,46 @@
+name: sbom
+
+# Reference CI caller that exercises the aidc SBOM + license automation on
+# aidc's own tree. All logic lives in scripts/ci/, so this workflow is a thin
+# wrapper; the same scripts run unchanged under Jenkins, GitLab CI, or any other
+# runner (env-in / exit-code-out contract — see docs/security.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    env:
+      # aidc ships under GPL-3.0-only with no third-party package manifests, so
+      # the license gate is clean here — fail mode doubles as a regression guard.
+      AIDC_LICENSE_MODE: fail
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install syft + grype
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          # Download-then-run (not curl|sh) so the installer can be inspected/cached.
+          curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh -o /tmp/syft-install.sh
+          curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh -o /tmp/grype-install.sh
+          sh /tmp/syft-install.sh -b "$HOME/.local/bin"
+          sh /tmp/grype-install.sh -b "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Generate SBOMs + license check
+        run: ./scripts/ci/sbom-all.sh
+
+      - name: Upload SBOM artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom
+          path: sbom/

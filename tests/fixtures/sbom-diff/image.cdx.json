@@ -1,0 +1,9 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "components": [
+    { "name": "libfoo", "version": "1.2.0" },
+    { "group": "org.example", "name": "libgrouped", "version": "3.0.0" },
+    { "name": "openssl", "version": "3.1.0" }
+  ]
+}
