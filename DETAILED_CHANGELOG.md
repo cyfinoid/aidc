@@ -8,6 +8,49 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-07-06 — Usability & security roadmap: 12-step plan series
+
+**Summary:** Added `plans/roadmap-00-overview.md` (master plan) and twelve step
+plans `plans/roadmap-01-…` through `plans/roadmap-12-…`. Documentation only —
+no code or template changes.
+
+**Why:** A full-project review (three parallel deep-dives: core CLI, container/
+template layer, and docs/tests/CI/plans) found the security model sound but
+identified concrete gaps: nine unpinned `curl | bash` installers in the
+Dockerfile (several fetching install scripts from floating `main`/`master`),
+an egress firewall with zero IPv6 rules plus init-time-only DNS resolution and
+off-by-default silence, missing compose hardening (`no-new-privileges`,
+resource limits, unconditional NET_ADMIN/NET_RAW), no versioning/doctor/update/
+upgrade lifecycle, guardrail prose heavy enough to invite agent
+rationalization, ~4% unit-test coverage of `lib/aidc.sh`, and no template
+validation in CI. Key findings were re-verified directly against the tree
+before planning (installer lines in `.devcontainer/Dockerfile:79,105,138–145,
+225–230`; no `ip6tables`/`inet6` in `init-firewall.sh`; no `security_opt`/
+limits in `compose.yaml`). One subagent finding (a missing `destroy -f` flag)
+was disproved during verification and excluded.
+
+**How:** Each step is a PR-sized plan matching the repo's existing plan format
+(context → concrete changes with file/function anchors → testing → security
+scans → verification → notes). The master plan sequences them in four phases —
+A: safety net & hardening (01–05), B: lifecycle (06–08), C: developer
+experience (09–10), D: foundation & frontier (11–12) — with explicit
+dependencies (versioning before doctor/upgrade; `aidc-scan` before hook
+enforcement; lib split last to avoid diff conflicts, doubling as Phase 0 of the
+pre-existing Apple-container plan `have-a-look-at-lucky-whale.md`).
+
+**Commands:** review used read-only exploration plus verification greps; files
+created with the editor. Scanners run on the changed files (`semgrep`,
+`gitleaks`) — see session log.
+
+**Verification:** all 13 plan files present under `plans/`; changelog entries
+in both files; session log `logs/2026-07-06-roadmap-plan-series.md`.
+
+**Notes:** Deliberate deferrals recorded inside the plans: firewall default-on,
+strict seccomp, and read-only rootfs are postponed until `aidc upgrade`
+(step 8) makes rollout to existing scaffolds cheap and visible.
+
+---
+
 ## 2026-07-01 — SBOM generation, license-conflict checks, and CI-agnostic automation
 
 **Summary:** aidc now generates SBOMs in both CycloneDX and SPDX (at code level
