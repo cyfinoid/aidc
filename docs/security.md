@@ -2,6 +2,34 @@
 
 For aidc's own vulnerability-disclosure policy, see [`/SECURITY.md`](../SECURITY.md). This page documents the scanners and guardrails baked into every aidc container.
 
+## `aidc scan` — one command, the right scanners
+
+`aidc scan` (host) / `aidc-scan` (inside the container, on PATH) runs the
+right scanners for what actually changed, so a one-line fix costs seconds and
+a dependency bump gets the full treatment:
+
+```bash
+aidc scan                 # files changed vs HEAD + untracked (the default)
+aidc scan --staged        # the git index
+aidc scan --all           # whole repo
+aidc scan src/thing.py    # exactly these paths
+aidc scan --json          # machine-readable (used by tooling/hooks)
+```
+
+Selection rules: **semgrep** (WARNING+ERROR) and **gitleaks** always;
+**shellcheck** when shell files are in scope; **bandit** (medium+) for Python
+files; **gosec** when Go code changed; **cargo-audit** / **bundle-audit** /
+**npm audit** when the matching dependency files changed; **vet** and the
+**SBOM/license gate** only when manifests or the LICENSE changed. Missing
+scanners are reported as skipped, never fatal. Exit 0 = clean, 1 = findings
+above LOW, 2 = usage error.
+
+The implementation is the scaffolded `.devcontainer/scripts/aidc-scan.sh`
+(aidc-managed, updated by `aidc upgrade`); the container bootstrap symlinks
+it to `~/.local/bin/aidc-scan`. The seeded agent guardrails
+(CLAUDE.md/AGENTS.md) instruct agents to run it before declaring work done.
+The per-scanner commands below remain valid for manual use.
+
 ## Always-on scanners
 
 Every aidc image ships with:
@@ -90,6 +118,41 @@ aidc licenses --fail            # exit non-zero on a conflict (as CI would)
 
 **Tuning the policy.** `license-matrix.tsv` is TAB-separated `project-license <TAB> conflicting-dep-license` rows; `*` in the project column matches any project. The shipped default is conservative (permissive projects pulling in strong copyleft; AGPL flagged everywhere) and is **not legal advice** — edit it for your project. Note the check is deliberately conservative with dual-license expressions like `(MIT OR GPL-2.0-only)`: it flags the row if *any* branch conflicts, so review those by hand.
 
+## Scan-hook enforcement (Claude Code)
+
+The "run `aidc-scan` before declaring done" guardrail is enforced
+**mechanically** for Claude Code: the container bootstrap seeds a Stop hook
+(`.devcontainer/scripts/aidc-scan-hook.sh`) into the agent's
+`settings.json`. When the agent tries to finish with findings above LOW in
+the changed files, the stop is blocked and the findings are fed back to the
+agent to fix.
+
+Designed to be invisible when things are fine:
+
+- **Fails open.** A missing scanner, a broken script, or any infrastructure
+  error lets the agent finish — the hook must never make the agent unusable.
+  Errors are logged, not enforced.
+- **Debounced.** A tree already scanned clean is not re-scanned; no changes,
+  no scan.
+- **Loop-guarded.** A stop that is already continuing from a blocked stop is
+  never blocked again (`stop_hook_active`).
+- **Opt-out**: `AIDC_ENFORCE_SCAN_HOOK=0` (project.env or config.env) removes
+  the hook on the next container start.
+
+Outcomes log to `.ai-container/scan-hook.log`; `aidc insights` summarizes
+them (clean passes / blocked / infra errors). Coverage matrix: Claude Code —
+enforced via hook; codex/opencode/grok — prose guardrail in AGENTS.md only
+(their runtimes lack an equivalent hook point today).
+
+## MCP servers
+
+Treat third-party MCP servers as supply chain: they run inside the container
+with full workspace access. aidc pins `enableAllProjectMcpServers: false` in
+the seeded Claude settings (when the key is absent), so servers declared in a
+project's `.mcp.json` require explicit approval instead of auto-starting.
+When using any external MCP server, consider enabling the egress firewall
+and allowlisting only the hosts it needs.
+
 ## Agent-enforced guardrails
 
 The scaffold writes a "Security guardrails (non-negotiable)" block into `CLAUDE.md` and `AGENTS.md` inside the aidc-managed marker. It instructs agents to run the relevant scanners on every code change and fix findings above LOW before declaring work complete. User-edited content outside the markers is preserved on scaffold refresh.
@@ -98,11 +161,77 @@ The scaffold writes a "Security guardrails (non-negotiable)" block into `CLAUDE.
 
 The container ships with SafeDep's [`pmg`](https://github.com/safedep/pmg) and [`vet`](https://github.com/safedep/vet) baked in. `pmg setup install` runs at image build **before any user-level package install**, and interception rides on the `~/.pmg/bin` PATH shims — which are first on the image `ENV PATH` for both build and runtime. It is deliberately **not** dependent on the shell aliases pmg also writes to `~/.zshrc`/`~/.bashrc`: Docker build `RUN` steps and exec'd agent subprocesses never source rc files, so only the PATH shims reliably gate package managers. The shims intercept `npm`, `pnpm`, `yarn`, `bun`, `npx`, `pnpx`, `pip`, `pip3`, `uv`, and `poetry` — including subprocess calls from agents (Claude, Codex, OpenCode, Grok, Cursor Agent). Malicious packages are blocked before install.
 
-The coding agents themselves are installed as **native prebuilt binaries** (via each vendor's `curl | sh` installer), not `npm install -g`, so there is no agent-install step for pmg to vet and no Node runtime dependency for the agents. The `NPM_CONFIG_*` hardening in the image still governs any npm the agents or project toolchains invoke at runtime, which the pmg shims gate.
+The coding agents themselves are installed as **native prebuilt binaries**, not `npm install -g`, so there is no agent-install step for pmg to vet and no Node runtime dependency for the agents. The `NPM_CONFIG_*` hardening in the image still governs any npm the agents or project toolchains invoke at runtime, which the pmg shims gate.
 
 Run scans by hand with `aidc exec -- vet scan -D /workspace`. Re-run `pmg setup doctor` inside the container to verify wiring (`aidc exec -- pmg setup doctor`). To confirm interception is alias-independent, check that the shim wins without sourcing rc files: `aidc exec -- bash -c 'command -v npm'` should resolve under `~/.pmg/bin`.
 
 If the egress firewall is enabled, the allowlist already includes `api.safedep.io`, `vetpkg.dev`, `osv.dev`, and `semgrep.dev`.
+
+## Container hardening
+
+The default container is deliberately **unrestricted for normal development**
+— sudo works, ping works, no capability surprises. Hardening beyond that is
+layered and conditional:
+
+- **Capabilities**: the base compose file adds none (Docker's default set
+  only). `NET_ADMIN`/`NET_RAW` — needed solely by the egress firewall's
+  iptables/ipset init — are granted through `compose.firewall.yaml`, which
+  aidc adds to the compose invocation only when
+  `AIDC_ENABLE_EGRESS_FIREWALL=1`.
+- **Fork-bomb guard**: `pids_limit` defaults to 4096 (invisible in normal
+  use). Override with `AIDC_PIDS_LIMIT`.
+- **Memory / CPU**: unlimited by default; cap per project or host-wide with
+  `AIDC_MEM_LIMIT` (e.g. `8g`) and `AIDC_CPU_LIMIT` (e.g. `4`).
+- **no-new-privileges** (opt-in, `AIDC_NO_NEW_PRIVILEGES=1`): blocks all
+  privilege escalation inside the container via `compose.hardened.yaml`.
+  Trade-off: setuid stops working, so interactive `sudo` inside the container
+  is gone, and it cannot be combined with the egress firewall (whose init
+  needs runtime sudo) — aidc warns and skips it when both are set.
+
+All knobs live host-wide in `~/.config/aidc/config.env` or per project in
+`.ai-container/project.env` (per-project wins). Note for VS Code users: the
+`devcontainer.json` flow uses the base compose file only — the conditional
+overrides apply on the `aidc` CLI path.
+
+## Image supply chain
+
+Everything fetched during the image build is pinned; nothing installs from a
+floating branch or unpinned `latest`:
+
+- **Base images** are pinned by multi-arch digest (`FROM …@sha256:…`).
+- **CLI tools** — `git-delta`, `pmg`, `vet`, `trufflehog`, `gitleaks`, `syft`,
+  `grype`, `rtk` — are downloaded as **versioned release artifacts and verified
+  against a SHA256 recorded in the Dockerfile** (per-arch `ARG *_SHA256_AMD64` /
+  `*_SHA256_ARM64`). A checksum mismatch fails the build. The shared
+  `aidc-fetch-verified` helper in the Dockerfile implements the
+  download-and-verify step.
+- **Coding agents** are version-pinned through each vendor's installer, which
+  is fetched to a file and executed (never piped): `claude` (positional
+  version; the installer verifies the binary against its manifest SHA256),
+  `codex` (`--release`, artifacts from the vendor's GitHub releases),
+  `opencode` (`VERSION` env, GitHub releases), `grok` (positional version).
+
+**Documented exceptions** (no pinnable artifact offered by the vendor):
+
+- `cursor-agent` — the `cursor.com/install` script offers no version pin; the
+  installed version is logged during the build (`cursor-agent --version`).
+- `grok` — version-pinned, but the vendor publishes no artifact checksums
+  (TLS + version pin only).
+- `rustup` (only when the Rust toolchain is auto-detected) — installed via the
+  official `sh.rustup.rs` bootstrap, which self-verifies its downloads.
+- Debian/NodeSource packages — verified by apt's GPG signature chain instead.
+
+**Bumping pins:** run `scripts/update-pins.sh` (prints fresh `ARG` lines from
+the vendors' latest releases and checksum files; `--write` applies them to
+`templates/devcontainer/Dockerfile.tmpl`), rebuild, and commit. Ad-hoc
+`latest` overrides (e.g. `VET_VERSION=latest` as a build arg) still work but
+**skip checksum verification with a loud build-log warning** — never commit
+one.
+
+CI cross-checks the supply chain from both ends: the e2e workflow lints the
+scaffolded Dockerfile (`docker build --check`), and the `image-scan` job in
+`sbom.yml` builds the image, asserts each pinned tool reports its pinned
+version, and scans the result with grype.
 
 ## Sharing credentials with the agents
 
@@ -166,6 +295,25 @@ Override the service name or disable the lookup with
 no-op on hosts without the `security` tool. See `docs/claude-profiles.md` for
 setup.
 
+**How the token reaches the agent (file delivery).** The full path is:
+Keychain → aidc's process (only for the duration of the run) → the exec's
+**stdin** → a `0600` tmpfs file (`/dev/shm/aidc-oauth-token`) inside the
+container → imported into the agent process's environment and the file
+deleted at launch. The token therefore never appears on any command line, in
+`docker inspect` exec metadata, or in the forwarded `-e` env args. A process
+inside the container running as the same user *can* still read the agent
+process's environment (`/proc/<pid>/environ`) — that is inherent to the agent
+consuming an env var — but the exposure window and surface are much smaller
+than env passthrough. Set `AIDC_TOKEN_DELIVERY=env` to restore the legacy
+`-e` passthrough (aidc also falls back to it automatically, with a warning,
+if file delivery fails).
+
+**Claude profile files are required to be `0600`.** `aidc claude --profile X`
+refuses to load a profile env file with looser permissions (these files carry
+API keys); the error names the exact `chmod` to run. Profile-sourced
+variables are scrubbed from aidc's own environment as soon as the agent
+exits.
+
 ## Agent guardrails: rtk
 
 The image ships [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — a token-saving CLI proxy that rewrites commands like `git status` → `rtk git status` via the Claude Code `PreToolUse`/`Bash` hook, typically cutting 60–90% of the tokens dev operations cost).
@@ -186,9 +334,40 @@ aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # just
 
 Default-deny outbound with an allowlist (Anthropic, OpenAI, Z.ai, OpenRouter, GitHub, npm, PyPI, SafeDep, OSV, semgrep.dev). All ports are open to the Tailscale CGNAT range (`100.64.0.0/10`) so tailnet peers stay reachable.
 
+The firewall is **opt-in by design and stays that way** — the default aidc
+container runs with an open network. `aidc status` shows the current posture
+(`firewall: off (open network, default)` / `on (default-deny allowlist)`)
+without nagging either way.
+
 ```bash
 echo 'AIDC_ENABLE_EGRESS_FIREWALL=1' >> .ai-container/project.env
 aidc rebuild
 ```
 
-Extend the allowlist via `.ai-container/firewall-allowlist.txt` (one hostname per line). Hostnames resolve at container start; restart to refresh.
+What "on" enforces:
+
+- **IPv4**: only ports 443/80 to allowlisted hosts (plus the Tailscale range).
+- **IPv6**: dropped entirely (loopback + established excepted). The allowlist
+  is IPv4-only, so without this a v6-capable network would bypass it.
+- **DNS**: port-53 egress is restricted to the resolvers in
+  `/etc/resolv.conf` (Docker's embedded `127.0.0.11` rides the loopback
+  accept). DNS-over-HTTPS to a non-allowlisted IP is blocked like any other
+  443 traffic; DoH via an *allowlisted* host can hide which names you
+  resolve, but cannot reach non-allowlisted addresses.
+- **Capabilities**: `NET_ADMIN`/`NET_RAW` are granted to the container only
+  when the firewall is enabled (see § Container hardening).
+
+**Allowlist file** — `.ai-container/firewall-allowlist.txt`, one hostname per
+line; `#` starts a comment, blank lines are ignored:
+
+```text
+# internal package mirror
+artifacts.example.com
+sentry.example.com   # error reporting
+```
+
+**DNS refresh**: allowlisted names are re-resolved every
+`AIDC_FIREWALL_REFRESH_SECONDS` (default 300; `0` disables) and swapped in
+atomically, so CDN/IP rotation doesn't strand allowed hosts. Refresh events
+log to `/var/log/aidc-firewall.log` inside the container. A manual refresh:
+`aidc exec -- sudo /workspace/.devcontainer/scripts/init-firewall.sh refresh`.

@@ -12,9 +12,16 @@ services:
     tty: true
     user: vscode
     working_dir: /workspace
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
+    # No cap_add here: Docker's default capability set is enough for normal
+    # development (ping, sudo, chown all work). NET_ADMIN/NET_RAW are granted
+    # only when the egress firewall is enabled, via compose.firewall.yaml —
+    # aidc adds that file to the compose invocation automatically.
+    # Resource knobs (host-wide in ~/.config/aidc/config.env or per project in
+    # .ai-container/project.env). Defaults: pids capped (fork-bomb guard,
+    # invisible in normal use), memory/CPU unlimited.
+    pids_limit: ${AIDC_PIDS_LIMIT:-4096}
+    mem_limit: ${AIDC_MEM_LIMIT:-0}
+    cpus: ${AIDC_CPU_LIMIT:-0}
     environment:
       HOME: /home/vscode
       HISTFILE: /commandhistory/.zsh_history

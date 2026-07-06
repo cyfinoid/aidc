@@ -95,6 +95,17 @@ jobs:
 
           aidc help >/dev/null || fail "aidc help failed"
 
+          out="$(aidc version)" || fail "aidc version exited non-zero"
+          echo "$out" | grep -Eq '^aidc [0-9]+\.[0-9]+\.[0-9]+' \
+            || fail "unexpected aidc version output: $out"
+
+          # doctor must always produce a well-formed report; exit 1 is
+          # legitimate when the runner lacks docker (macOS) — a crash is not.
+          rc=0
+          out="$(aidc doctor)" || rc=$?
+          [ "$rc" -le 1 ] || fail "aidc doctor crashed (rc=$rc): $out"
+          echo "$out" | grep -q '^host' || fail "doctor output malformed: $out"
+
           # No profiles yet -> must exit 0 (empty-array path again).
           out="$(aidc claude --list-profiles)" || fail "--list-profiles exited non-zero"
           echo "$out" | grep -q "no Claude profiles found" \
@@ -185,6 +196,8 @@ jobs:
           for f in \
             .devcontainer/Dockerfile \
             .devcontainer/compose.yaml \
+            .devcontainer/compose.firewall.yaml \
+            .devcontainer/compose.hardened.yaml \
             .devcontainer/devcontainer.json \
             .devcontainer/scripts/bootstrap-state.sh \
             .devcontainer/scripts/init-firewall.sh \
@@ -210,3 +223,148 @@ jobs:
           # Re-running init over an initialized repo must be a clean no-op.
           ( cd "$work" && aidc init ) || fail "second aidc init was not idempotent"
           echo "init scaffold OK"
+
+      # Syntax/structure validation of everything init scaffolded: shell
+      # parses + shellcheck, project.env sources under set -u, JSON is valid,
+      # compose renders, Dockerfile lints. Docker-dependent checks skip where
+      # no docker is available (macOS runners).
+      - name: Validate scaffold output
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/scaffold-proj"
+          if [ ! -d "$work" ]; then
+            echo "scaffold dir absent (init skipped on this runner) — skipping"
+            exit 0
+          fi
+          .github/scripts/validate-scaffold.sh "$work"
+
+      # Upgrade round-trip: a local edit to a managed file is preserved by the
+      # implicit scaffold path, shown by `upgrade --dry-run`, and restored by
+      # `upgrade -y` with a backup.
+      - name: aidc upgrade round-trip (requires docker CLI)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          work="$RUNNER_TEMP/scaffold-proj"
+          if [ ! -d "$work" ]; then
+            echo "scaffold dir absent — skipping"
+            exit 0
+          fi
+          cd "$work"
+          printf '\n# E2E-LOCAL-EDIT\n' >> .devcontainer/Dockerfile
+
+          out="$(aidc upgrade --dry-run)" || fail "upgrade --dry-run failed"
+          echo "$out" | grep -q 'update: .devcontainer/Dockerfile' \
+            || fail "dry-run did not list the edited Dockerfile"
+          grep -q 'E2E-LOCAL-EDIT' .devcontainer/Dockerfile \
+            || fail "dry-run modified the Dockerfile"
+
+          aidc upgrade -y || fail "upgrade -y failed"
+          if grep -q 'E2E-LOCAL-EDIT' .devcontainer/Dockerfile; then
+            fail "upgrade -y did not restore the Dockerfile"
+          fi
+          backup="$(find .ai-container/backup -name Dockerfile | head -1)"
+          [ -n "$backup" ] && grep -q 'E2E-LOCAL-EDIT' "$backup" \
+            || fail "backup with the local edit missing"
+
+          out="$(aidc upgrade)" || fail "post-upgrade check failed"
+          echo "$out" | grep -q 'already current' \
+            || fail "upgrade not idempotent: $out"
+          echo "upgrade round-trip OK"
+
+      # The security posture of the rendered compose config must match the
+      # knobs: default = docker-default caps + pids cap, no extra grants;
+      # firewall override = NET_ADMIN/NET_RAW; hardened override =
+      # no-new-privileges.
+      - name: Compose hardening posture (requires docker compose)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          work="$RUNNER_TEMP/scaffold-proj"
+          if [ ! -d "$work" ] || ! docker compose version >/dev/null 2>&1; then
+            echo "docker compose not available — skipping"
+            exit 0
+          fi
+          cd "$work"
+          stub="$RUNNER_TEMP/compose-stub"
+          mkdir -p "$stub"
+          for v in $(grep -o '\${AIDC_[A-Z_]*' .devcontainer/compose.yaml | sed 's/^\${//' | sort -u); do
+            export "$v=$stub"
+          done
+          export COMPOSE_PROJECT_NAME=aidc_posture
+          base=.devcontainer/compose.yaml
+
+          cfg="$(docker compose -f "$base" config)"
+          if printf '%s' "$cfg" | grep -q 'NET_ADMIN'; then
+            fail "default config grants NET_ADMIN"
+          fi
+          if printf '%s' "$cfg" | grep -q 'no-new-privileges'; then
+            fail "default config sets no-new-privileges"
+          fi
+          if ! printf '%s' "$cfg" | grep -q 'pids_limit'; then
+            fail "default config is missing the pids_limit fork-bomb guard"
+          fi
+
+          cfg="$(docker compose -f "$base" -f .devcontainer/compose.firewall.yaml config)"
+          if ! printf '%s' "$cfg" | grep -q 'NET_ADMIN'; then
+            fail "firewall override does not grant NET_ADMIN"
+          fi
+
+          cfg="$(docker compose -f "$base" -f .devcontainer/compose.hardened.yaml config)"
+          if ! printf '%s' "$cfg" | grep -q 'no-new-privileges'; then
+            fail "hardened override does not set no-new-privileges"
+          fi
+          echo "hardening posture OK"
+
+      # Destructive lifecycle: destroy with both purge flags must remove every
+      # managed path (and nothing user-owned), leave no docker volumes behind,
+      # and a re-init must reproduce the managed scaffold byte-for-byte.
+      - name: Destroy → re-init lifecycle (requires docker daemon)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          work="$RUNNER_TEMP/scaffold-proj"
+          if [ ! -d "$work" ] || ! docker info >/dev/null 2>&1; then
+            echo "docker daemon not available — skipping lifecycle test"
+            exit 0
+          fi
+
+          # Snapshot the managed scaffold for the re-init comparison.
+          snapshot="$RUNNER_TEMP/scaffold-before"
+          rm -rf "$snapshot"
+          mkdir -p "$snapshot"
+          ( cd "$work" && tar -cf - .devcontainer .ai-container scripts/ci .cursor ) \
+            | tar -xf - -C "$snapshot"
+
+          ( cd "$work" && aidc destroy -f --purge-scaffold --purge-worktree ) \
+            || fail "aidc destroy failed"
+
+          # Managed paths must be gone...
+          for f in \
+            .devcontainer \
+            .ai-container \
+            .cursor/rules/00-core-logics.mdc \
+            scripts/ci/sbom-all.sh \
+            scripts/ci/license-check.sh; do
+            [ ! -e "$work/$f" ] || fail "destroy --purge-scaffold left $f behind"
+          done
+          # ...user-owned seeded docs must survive...
+          for f in CHANGELOG.md DETAILED_CHANGELOG.md logs/README.md; do
+            [ -f "$work/$f" ] || fail "destroy removed user-owned $f"
+          done
+          # ...and the aidc-managed block must be stripped from merged files.
+          if grep -q 'aidc:core-logics:start' "$work/CLAUDE.md" 2>/dev/null; then
+            fail "CLAUDE.md still contains the aidc-managed block after destroy"
+          fi
+          # No leftover named volumes for this project.
+          if docker volume ls -q | grep -q '^aidc_scaffold-proj'; then
+            fail "leftover docker volumes after destroy"
+          fi
+
+          # Re-init must reproduce the managed scaffold identically.
+          ( cd "$work" && aidc init ) || fail "re-init after destroy failed"
+          for d in .devcontainer .ai-container scripts/ci .cursor; do
+            diff -r "$snapshot/$d" "$work/$d" \
+              || fail "re-init produced a different $d than the first init"
+          done
+          echo "lifecycle OK"

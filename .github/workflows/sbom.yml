@@ -24,15 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Install syft + grype
+      - name: Install syft + grype (same pins as the image)
         run: |
           set -euo pipefail
+          # Reuse the exact versions + checksums pinned in the Dockerfile
+          # template — one source of truth, no unpinned installer scripts.
+          df=templates/devcontainer/Dockerfile.tmpl
           mkdir -p "$HOME/.local/bin"
-          # Download-then-run (not curl|sh) so the installer can be inspected/cached.
-          curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh -o /tmp/syft-install.sh
-          curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh -o /tmp/grype-install.sh
-          sh /tmp/syft-install.sh -b "$HOME/.local/bin"
-          sh /tmp/grype-install.sh -b "$HOME/.local/bin"
+          for tool in syft grype; do
+            up="$(echo "$tool" | tr '[:lower:]' '[:upper:]')"
+            ver="$(sed -n "s/^ARG ${up}_VERSION=\(.*\)$/\1/p" "$df")"
+            sha="$(sed -n "s/^ARG ${up}_SHA256_AMD64=\(.*\)$/\1/p" "$df")"
+            curl -fsSL "https://github.com/anchore/${tool}/releases/download/${ver}/${tool}_${ver#v}_linux_amd64.tar.gz" -o "/tmp/${tool}.tar.gz"
+            echo "$sha  /tmp/${tool}.tar.gz" | sha256sum -c -
+            tar -xzf "/tmp/${tool}.tar.gz" -C "$HOME/.local/bin" "$tool"
+          done
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Generate SBOMs + license check
@@ -44,3 +50,63 @@ jobs:
         with:
           name: sbom
           path: sbom/
+
+  # Build aidc's own devcontainer image and scan it for vulnerabilities.
+  # Doubles as a Dockerfile build regression test: a broken install step fails
+  # here before it reaches users. Report-only for now — tighten to
+  # `--fail-on high` once a clean baseline is established (see
+  # plans/roadmap-01-ci-safety-net.md).
+  image-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
+
+      - name: Restore buildx layer cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: /tmp/.buildx-cache
+          key: aidc-image-buildx-${{ hashFiles('.devcontainer/Dockerfile') }}
+          restore-keys: |
+            aidc-image-buildx-
+
+      - name: Build devcontainer image
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --cache-from type=local,src=/tmp/.buildx-cache \
+            --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
+            --load -t aidc-image-scan:ci .devcontainer
+          # Swap instead of appending so the cache does not grow unboundedly.
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Assert pinned tool versions in the image
+        run: .github/scripts/check-image-pins.sh aidc-image-scan:ci
+
+      - name: Install grype (same pin as the image)
+        run: |
+          set -euo pipefail
+          # Reuse the exact version + checksum pinned in the Dockerfile
+          # template — one source of truth, no unpinned installer scripts.
+          df=templates/devcontainer/Dockerfile.tmpl
+          ver="$(sed -n 's/^ARG GRYPE_VERSION=\(.*\)$/\1/p' "$df")"
+          sha="$(sed -n 's/^ARG GRYPE_SHA256_AMD64=\(.*\)$/\1/p' "$df")"
+          curl -fsSL "https://github.com/anchore/grype/releases/download/${ver}/grype_${ver#v}_linux_amd64.tar.gz" -o /tmp/grype.tar.gz
+          echo "$sha  /tmp/grype.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/grype.tar.gz -C "$HOME/.local/bin" grype
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Scan image with grype
+        run: |
+          set -euo pipefail
+          grype docker:aidc-image-scan:ci -o table | tee grype-report.txt
+
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: grype-image-report
+          path: grype-report.txt

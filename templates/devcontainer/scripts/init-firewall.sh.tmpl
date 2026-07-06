@@ -2,20 +2,34 @@
 # aidc-managed
 # Default-deny egress firewall. Run as root (sudo). Idempotent.
 # Triggered by bootstrap-state.sh when AIDC_ENABLE_EGRESS_FIREWALL=1.
+# The firewall is OPT-IN BY DESIGN: the default aidc container runs with an
+# open network; everything in this script applies only to projects that set
+# the knob.
+#
+# Modes:
+#   init-firewall.sh [init]     apply rules, build allowlist, start refresh loop
+#   init-firewall.sh refresh    re-resolve the allowlist, atomic ipset swap
 #
 # Allowlist sources, in order:
 #   1. Built-in defaults below
-#   2. /workspace/.ai-container/firewall-allowlist.txt (one host per line)
+#   2. /workspace/.ai-container/firewall-allowlist.txt
+#      (one hostname per line; '#' starts a comment; blank lines ignored)
 #
-# Names are resolved at firewall-init time. If a host's IPs change later,
-# rerun the entrypoint or restart the container.
+# Names are re-resolved every AIDC_FIREWALL_REFRESH_SECONDS (default 300;
+# 0 disables the loop) so CDN/IP rotation doesn't strand allowed hosts.
+# Refresh events are logged to /var/log/aidc-firewall.log.
+#
+# IPv6 policy: the allowlist is IPv4-only, so ALL IPv6 egress is dropped
+# (loopback + established excepted) — otherwise v6 would silently bypass the
+# allowlist. DNS policy: port-53 egress is restricted to the resolvers in
+# /etc/resolv.conf (Docker's embedded 127.0.0.11 rides the loopback accept).
 
 set -euo pipefail
 
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "init-firewall.sh: must run as root" >&2
-  exit 1
-fi
+ALLOWLIST_FILE="/workspace/.ai-container/firewall-allowlist.txt"
+LOG_FILE="/var/log/aidc-firewall.log"
+PID_FILE="/run/aidc-firewall-refresh.pid"
+REFRESH_SECONDS="${AIDC_FIREWALL_REFRESH_SECONDS:-300}"
 
 DEFAULT_HOSTS=(
   api.anthropic.com
@@ -38,45 +52,171 @@ DEFAULT_HOSTS=(
   semgrep.dev
 )
 
-allowlist_file="/workspace/.ai-container/firewall-allowlist.txt"
-extra_hosts=()
-if [[ -f "$allowlist_file" ]]; then
-  while IFS= read -r line; do
-    line="${line%%#*}"
-    line="${line//[[:space:]]/}"
-    [[ -n "$line" ]] || continue
-    extra_hosts+=("$line")
-  done <"$allowlist_file"
+log() {
+  printf '[firewall] %s\n' "$1"
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >>"$LOG_FILE" 2>/dev/null || true
+}
+
+# All allowlisted hostnames, one per line (defaults + user file).
+collect_hosts() {
+  local host line
+  for host in "${DEFAULT_HOSTS[@]}"; do
+    printf '%s\n' "$host"
+  done
+  if [[ -f "$ALLOWLIST_FILE" ]]; then
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      line="${line//[[:space:]]/}"
+      [[ -n "$line" ]] || continue
+      printf '%s\n' "$line"
+    done <"$ALLOWLIST_FILE"
+  fi
+}
+
+# Resolve every allowlisted host's IPv4 addresses into the given ipset.
+resolve_into_set() {
+  local set_name="$1" host ip
+  while IFS= read -r host; do
+    while IFS= read -r ip; do
+      [[ -n "$ip" ]] || continue
+      ipset add "$set_name" "$ip" 2>/dev/null || true
+    done < <(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u)
+  done < <(collect_hosts)
+}
+
+count_set() {
+  ipset list "$1" 2>/dev/null | grep -c '^[0-9]' || true
+}
+
+build_allow_set() {
+  ipset destroy aidc-allow 2>/dev/null || true
+  ipset create aidc-allow hash:ip family inet hashsize 1024 maxelem 65536
+  resolve_into_set aidc-allow
+}
+
+# Re-resolve into a staging set and atomically swap it in, so there is no
+# window where the allowlist is empty.
+refresh_allow_set() {
+  local before after
+  ipset destroy aidc-allow-next 2>/dev/null || true
+  ipset create aidc-allow-next hash:ip family inet hashsize 1024 maxelem 65536
+  resolve_into_set aidc-allow-next
+  before="$(count_set aidc-allow)"
+  ipset swap aidc-allow-next aidc-allow
+  ipset destroy aidc-allow-next
+  after="$(count_set aidc-allow)"
+  log "allowlist refreshed: ${before:-0} -> ${after:-0} entries"
+}
+
+# Restrict port-53 egress to the container's configured resolvers. Docker's
+# embedded DNS (127.0.0.11) is loopback and already accepted. If no IPv4
+# nameserver can be parsed, fall back to open port 53 — never break DNS.
+dns_rules() {
+  local ns found4=0
+  while IFS= read -r ns; do
+    [[ -n "$ns" ]] || continue
+    case "$ns" in
+      *:*) continue ;; # IPv6 resolver — v6 egress is dropped wholesale below
+      *)
+        iptables -A OUTPUT -d "$ns" -p udp --dport 53 -j ACCEPT
+        iptables -A OUTPUT -d "$ns" -p tcp --dport 53 -j ACCEPT
+        found4=1
+        ;;
+    esac
+  done < <(awk '/^nameserver[ \t]/ {print $2}' /etc/resolv.conf 2>/dev/null)
+  if [[ "$found4" -eq 0 ]]; then
+    iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+    log "no IPv4 nameserver parsed from /etc/resolv.conf — port 53 left open"
+  fi
+}
+
+apply_ipv4_rules() {
+  iptables -F
+  iptables -X
+  iptables -P INPUT DROP
+  iptables -P FORWARD DROP
+  iptables -P OUTPUT DROP
+
+  iptables -A INPUT -i lo -j ACCEPT
+  iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+  iptables -A OUTPUT -o lo -j ACCEPT
+  iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  dns_rules
+  iptables -A OUTPUT -m set --match-set aidc-allow dst -p tcp --dport 443 -j ACCEPT
+  iptables -A OUTPUT -m set --match-set aidc-allow dst -p tcp --dport 80 -j ACCEPT
+  # Tailscale CGNAT — all ports allowed (overlay is itself authenticated/encrypted).
+  iptables -A OUTPUT -d 100.64.0.0/10 -j ACCEPT
+}
+
+# The allowlist is IPv4-only: without these rules, IPv6 egress bypasses the
+# firewall entirely. Default-deny everything v6 except loopback + established
+# (which covers replies to v4-mapped flows handled above).
+apply_ipv6_rules() {
+  if ! command -v ip6tables >/dev/null 2>&1; then
+    log "ip6tables not available — IPv6 egress NOT filtered"
+    return 0
+  fi
+  if ! ip6tables -L >/dev/null 2>&1; then
+    log "ip6tables not functional (no IPv6 stack?) — skipping v6 rules"
+    return 0
+  fi
+  ip6tables -F
+  ip6tables -X
+  ip6tables -P INPUT DROP
+  ip6tables -P FORWARD DROP
+  ip6tables -P OUTPUT DROP
+  ip6tables -A INPUT -i lo -j ACCEPT
+  ip6tables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  ip6tables -A OUTPUT -o lo -j ACCEPT
+  ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+}
+
+# Periodic allowlist re-resolution. Survives this script's exit (reparented,
+# reaped by the container's init); idempotent across re-inits via pidfile.
+start_refresh_loop() {
+  if ! [[ "$REFRESH_SECONDS" =~ ^[0-9]+$ ]] || [[ "$REFRESH_SECONDS" -eq 0 ]]; then
+    log "allowlist refresh loop disabled (AIDC_FIREWALL_REFRESH_SECONDS=$REFRESH_SECONDS)"
+    return 0
+  fi
+  if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    return 0
+  fi
+  (
+    while sleep "$REFRESH_SECONDS"; do
+      "$0" refresh >/dev/null 2>&1 || log "scheduled refresh failed"
+    done
+  ) &
+  echo "$!" >"$PID_FILE" 2>/dev/null || true
+  log "allowlist refresh loop started (every ${REFRESH_SECONDS}s)"
+}
+
+main() {
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "init-firewall.sh: must run as root" >&2
+    exit 1
+  fi
+  case "${1:-init}" in
+    init)
+      build_allow_set
+      apply_ipv4_rules
+      apply_ipv6_rules
+      log "egress restricted; allowlist size: $(count_set aidc-allow)"
+      start_refresh_loop
+      ;;
+    refresh)
+      refresh_allow_set
+      ;;
+    *)
+      echo "usage: init-firewall.sh [init|refresh]" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Sourced by tests to exercise individual functions; executed normally by
+# bootstrap-state.sh via sudo.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-hosts=("${DEFAULT_HOSTS[@]}" ${extra_hosts[@]+"${extra_hosts[@]}"})
-
-ipset destroy aidc-allow 2>/dev/null || true
-ipset create aidc-allow hash:ip family inet hashsize 1024 maxelem 65536
-
-for host in "${hosts[@]}"; do
-  while IFS= read -r ip; do
-    [[ -n "$ip" ]] || continue
-    ipset add aidc-allow "$ip" 2>/dev/null || true
-  done < <(getent ahostsv4 "$host" | awk '{print $1}' | sort -u)
-done
-
-iptables -F
-iptables -X
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT DROP
-
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
-iptables -A OUTPUT -o lo -j ACCEPT
-iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-iptables -A OUTPUT -m set --match-set aidc-allow dst -p tcp --dport 443 -j ACCEPT
-iptables -A OUTPUT -m set --match-set aidc-allow dst -p tcp --dport 80 -j ACCEPT
-# Tailscale CGNAT — all ports allowed (overlay is itself authenticated/encrypted).
-iptables -A OUTPUT -d 100.64.0.0/10 -j ACCEPT
-
-echo "[firewall] egress restricted; allowlist size: $(ipset list aidc-allow | grep -c '^[0-9]')"

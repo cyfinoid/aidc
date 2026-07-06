@@ -26,15 +26,24 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Install syft + grype
+      - name: Install syft + grype (pinned + checksum-verified)
         run: |
           set -euo pipefail
+          # Direct release artifacts, verified against pinned checksums —
+          # no unpinned installer scripts. To bump: pick the new version from
+          # the tool's GitHub releases page, take the linux_amd64 sha256 from
+          # its checksums.txt asset, and update the four values below.
+          SYFT_VERSION=v1.18.1
+          SYFT_SHA256=066c251652221e4d44fcc4d115ce3df33a91769da38c830a8533199db2f65aab
+          GRYPE_VERSION=v0.87.0
+          GRYPE_SHA256=be710d15f5477e5c77ce03d14e480263415d7ab135e04b8483663f688823087d
           mkdir -p "$HOME/.local/bin"
-          # Download-then-run (not curl|sh) so the installer can be inspected/cached.
-          curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh -o /tmp/syft-install.sh
-          curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh -o /tmp/grype-install.sh
-          sh /tmp/syft-install.sh -b "$HOME/.local/bin"
-          sh /tmp/grype-install.sh -b "$HOME/.local/bin"
+          curl -fsSL "https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/syft_${SYFT_VERSION#v}_linux_amd64.tar.gz" -o /tmp/syft.tar.gz
+          echo "$SYFT_SHA256  /tmp/syft.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/syft.tar.gz -C "$HOME/.local/bin" syft
+          curl -fsSL "https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}/grype_${GRYPE_VERSION#v}_linux_amd64.tar.gz" -o /tmp/grype.tar.gz
+          echo "$GRYPE_SHA256  /tmp/grype.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/grype.tar.gz -C "$HOME/.local/bin" grype
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       # - name: Build image (uncomment to enable build-time SBOM + diff)

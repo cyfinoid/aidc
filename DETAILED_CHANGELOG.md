@@ -8,6 +8,681 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-07-06 — Agent-native guardrails: scan hook, MCP posture, insights
+
+**Summary:** Implemented `plans/roadmap-12-agent-native.md` — the final
+roadmap step. The scan guardrail moves from prose to mechanism for Claude
+Code; MCP approval posture is pinned; `aidc insights` reports what the
+machinery is doing.
+
+**Why:** Prose guardrails degrade — agents rationalize, models weigh
+instructions differently, non-Claude agents may ignore CLAUDE.md entirely.
+Mechanical enforcement is simultaneously more reliable and less annoying:
+the agent spends no tokens remembering to scan.
+
+**How:**
+- **Slice 1 — Stop hook** (`aidc-scan-hook.sh`, scaffolded + managed like its
+  sibling scripts; the bind-mounted overlay means no image rebuild): reads
+  the hook payload, honors `stop_hook_active` (loop guard), sources
+  project.env for `AIDC_ENFORCE_SCAN_HOOK` (default 1), exits 0 on clean
+  trees, debounces via a tree hash cached after the last clean pass, runs
+  `aidc-scan --json`, and on findings exits 2 with the findings on stderr
+  (Claude Code feeds that back to the agent). **Every abnormal path fails
+  open** — missing scanner, infra error (rc≥2), missing git: allow and log.
+  Outcomes append to `.ai-container/scan-hook.log` (bind-mounted → host
+  readable). Bootstrap's new `ensure_agent_guardrail_settings` seeds the
+  Stop hook into `~/.claude/settings.json` (creating the file if the host
+  seeded none), idempotently, preserving rtk/user hooks, and removes exactly
+  the aidc hook when the knob is 0.
+- **Slice 2 — MCP posture**: the same seeding pins
+  `enableAllProjectMcpServers: false` **only when the key is absent** — an
+  explicit user choice is never overridden. `docs/security.md` gains the
+  MCP-as-supply-chain section.
+- **Slice 3 — `aidc insights`** (`lib/aidc/status.sh`): sessions count + top
+  projects from `~/.claude/projects` (v1 is Claude-only; other agents'
+  formats vary), scan-hook outcome tallies, `--since DATE` (find -newermt
+  for files; lexical ISO compare for the log). Deterministic, offline, no
+  LLM calls.
+- Guardrail templates gain one line telling agents the hook exists and not
+  to fight it; repo's own CLAUDE.md/AGENTS.md re-merged. Knob documented in
+  the global config seed. insights added to dispatcher/help/README/
+  completions/suggestions (the step-10 drift guard would have failed CI
+  otherwise — by design).
+
+**Dogfood moment:** the final full-tree `aidc-scan` run *blocked on real
+findings* — the lib split had broken shellcheck's ability to follow sourced
+globals, surfacing SC2034 in five test files. Exactly the failure mode the
+hook exists to catch, found by the tool itself before CI. Fixed with scoped
+directives; final scan fully clean (semgrep/gitleaks/shellcheck ok).
+
+**Commands:** `bash tests/scan-hook.test.sh` (14/14 — clean-tree skip,
+scan-once + debounce, block with stderr findings + logging, loop guard,
+fail-open on infra error and on missing scanner, knob off, settings seeding:
+create/idempotent/preserve-user-hooks/remove-on-off/respect-explicit-MCP),
+`bash tests/insights.test.sh` (6/6), full suite 17/17 files, repo-wide
+shellcheck clean, semgrep 0 findings, gitleaks clean.
+
+**Verification:** hook exercised end-to-end against a fixture git workspace
+with a stubbed scanner in all outcome classes; live block requires a Claude
+Code session in a rebuilt container (the seeding + hook are unit-proven).
+
+**Notes:** coverage matrix is honest — codex/opencode/grok stay prose-only
+until their runtimes grow an equivalent hook point. This completes the
+12-step roadmap.
+
+---
+
+## 2026-07-06 — lib/aidc.sh split into modules
+
+**Summary:** Implemented `plans/roadmap-11-lib-split.md` — the ~2,900-line
+monolith became a thin dispatcher over eight modules under `lib/aidc/`.
+Mechanical move; zero behavior change.
+
+**Why:** One file mixed dispatch, scaffolding, container lifecycle, two VM
+backends, profiles, sync, and reporting; tests had to source the world, and
+the Apple-`container` runtime plan needs a clean seam around the compose
+invocation.
+
+**How:** A one-off Python splitter parsed the monolith into the guard block,
+top-level constant chunks (→ `common.sh`, original order preserved), and 131
+function blocks with their attached comments, distributed by an exhaustive
+name→module map (any unmapped name aborted the split):
+`common` (constants + log/paths/perms helpers), `config`, `profiles`,
+`scaffold`, `vm` (Lima + Firecracker), `runtime` (compose + lifecycle +
+agent exec), `sync`, `status` (status/doctor/version/update). The new
+`lib/aidc.sh` keeps the `AIDC_LIB_LOADED` guard, sources the modules from
+`$AIDC_LIB_DIR`, and holds only `main`/`suggest_command`/`cmd_help`.
+`bin/aidc` and `install.sh` unchanged (lib resolved relative to the checkout
+as before). Only post-move touch: two `# shellcheck disable=SC2034`
+directives for cross-module globals (comments only).
+
+**Safety harness (all executed):**
+- `declare -F` inventory before/after: 131/131 identical.
+- Every function body byte-compared against the monolith backup: identical.
+- Full test suite (15 files) green unchanged — tests still source
+  `lib/aidc.sh` exactly as before.
+- Live `aidc version` / `help` / `doctor` behave identically.
+- New `.github/scripts/check-module-deps.sh` (in the shellcheck workflow):
+  modules never source shell code (runtime sourcing of `.env` *data* files is
+  expected and allowed), no duplicate function definitions, the entry point
+  loads each module exactly once.
+- `bash-compat.yml` and the repo-wide shellcheck job pick the new module
+  files up automatically (`*.sh` globs).
+
+**Notes:** `plans/have-a-look-at-lucky-whale.md` (Apple `container` runtime)
+updated — its Phase-0 groundwork is delivered; the `aidc::rt_*` dispatch seam
+remains its own future change.
+
+---
+
+## 2026-07-06 — CLI polish, docs completeness, Linux clarity
+
+**Summary:** Implemented `plans/roadmap-10-cli-polish.md`.
+
+**Why:** Assorted verified friction: bare `unknown command: X` errors, one
+error message for two different project.env failure modes, no completions,
+no troubleshooting/uninstall docs, README/docs claiming "macOS-only" while
+the e2e suite runs on ubuntu, `sync-sessions` silently syncing only claude.
+
+**How:**
+- **Errors** (`lib/aidc.sh`): `aidc::suggest_command` (prefix/substring/
+  2-char-prefix matching over the command list) with `aidc help` +
+  `aidc doctor` pointers; `load_project_env` distinguishes *not an aidc
+  project → run init* from *corrupt project.env → restore from
+  .ai-container/backup/ or purge-and-reinit (settings lost)*, pre-validating
+  with a `set -u` subshell before sourcing; `up`/`status`/`destroy` flag
+  errors name their valid flags.
+- **Completions**: `completions/aidc.bash` (commands, per-command flags,
+  `--profile` values discovered from `~/.config/aidc/providers/claude/*.env`,
+  tool names for `sync-*`); `completions/aidc.zsh` = bashcompinit wrapper.
+  `install.sh` links the bash one into
+  `~/.local/share/bash-completion/completions/` when that tree exists and
+  prints source-lines otherwise (no rc-file edits behind the user's back).
+  Drift guard: `tests/cli-errors.test.sh` extracts the dispatcher's command
+  list from `aidc::main` and asserts both the completion table and the
+  suggestion list cover every command — adding a command without updating
+  them fails CI.
+- **`sync-sessions` default → `all`** (was `claude`): partial syncs were
+  surprising; README already implied parity.
+- **Docs**: `docs/troubleshooting.md` (docker, PATH, Keychain, checksum
+  mismatch, scaffold staleness/corruption, firewall allowlist + NNP
+  conflict, clipboard, sessions — each symptom → cause → fix, with doctor as
+  the front door); `docs/uninstall.md` (per-project + full host removal incl.
+  aliases, completions, config, Keychain item, leftover docker state);
+  platform matrix in `docs/install.md` + README docs index updated
+  (troubleshooting/uninstall/releasing added).
+- **Tests**: `tests/cli-errors.test.sh` (8 cases: suggestions ×2,
+  missing-vs-corrupt ×2, drift guard, completion candidates ×2, dead-link
+  check over README + docs/*.md).
+
+**Commands:** suite 15/15 files green; shellcheck clean (SC2207 disabled in
+the completion file with justification — compgen word-splitting is the
+completion idiom); semgrep 0 findings; gitleaks clean.
+
+**Verification:** typo'd commands produce useful suggestions (exercised in
+tests via `bin/aidc statu`); completion candidates asserted for command and
+flag positions; the link checker found (and I fixed) its own parsing bug
+before finding zero real dead links.
+
+---
+
+## 2026-07-06 — `aidc scan` + right-sized guardrails
+
+**Summary:** Implemented `plans/roadmap-09-guardrails-scan.md`: a single
+changed-file-scoped scanner command plus proportionate guardrail text in the
+seeded templates.
+
+**Why:** The seeded guardrails mandated five-plus manual scanner invocations
+and three documents for *every* change — a one-line fix cost the same
+ceremony as a dependency bump. Agents facing that either burn time or start
+rationalizing skips. The scanners were right; the packaging was the problem.
+
+**How:**
+- `templates/devcontainer/scripts/aidc-scan.sh.tmpl` (scaffolded, managed,
+  in the template map → delivered by `aidc upgrade`): scope resolution
+  (changed vs HEAD + untracked / `--staged` via the index + `gitleaks
+  protect` / `--all` / explicit paths), scanner selection per the matrix in
+  CHANGELOG, `--json` output, deliberate `set -u`-only (scanners exit
+  non-zero on findings by design), per-scanner summary lines with findings
+  printed in full, skips never fatal. **Deviation from the plan:** not baked
+  into the image — the script rides the read-only `/workspace/.devcontainer`
+  overlay and bootstrap symlinks it to `~/.local/bin/aidc-scan`, so it works
+  with every already-built image (no rebuild coupling) and tracks scaffold
+  upgrades automatically.
+- `lib/aidc.sh`: `aidc scan` subcommand (compose-execs the scaffolded
+  script), dispatch + help; bootstrap gains `install_aidc_scan_link`.
+- Guardrail rewrite in `templates/CLAUDE.md.tmpl` + `AGENTS.md.tmpl`
+  (marker-merged → existing projects get it via `aidc upgrade`): scanning is
+  now "run `aidc-scan`, fix everything above LOW"; changelog/session-log
+  requirements scale to change size (trivial = typo/comment/formatting with
+  no logic, dependency, or security-surface change → exempt); the
+  non-negotiables stay (never dismiss findings without user confirmation,
+  trufflehog on anything live-looking). This repo's own CLAUDE.md/AGENTS.md
+  re-merged from the new templates via `aidc::merge_template` — dogfooding
+  the merge path.
+- `docs/security.md`: new "`aidc scan`" section at the top; per-scanner
+  commands remain documented below it.
+
+**Commands:** `bash tests/aidc-scan.test.sh` (14/14: scoping, per-type
+selection, manifest gating, finding propagation, valid `--json`, `--all`,
+missing-scanner skip, `--staged` + gitleaks protect, usage errors) with all
+scanners stubbed on a restricted PATH; full suite 14/14 files;
+`shellcheck` clean (after fixing a comment that parsed as a shellcheck
+*directive* — SC1072); semgrep 0 findings; gitleaks clean.
+
+**Verification:** dogfooded — `aidc-scan` run against this session's real
+working-tree diff selected semgrep + gitleaks + shellcheck (all clean) and
+correctly skipped bandit/gosec/cargo/bundle/npm/vet/license as out of scope.
+
+**Notes:** roadmap step 12 will wire `aidc-scan --json` into a Stop hook so
+the guardrail becomes mechanical rather than prose.
+
+---
+
+## 2026-07-06 — `aidc upgrade` + conservative implicit scaffolding
+
+**Summary:** Implemented `plans/roadmap-08-scaffold-upgrade.md`. Two coupled
+changes: a new `aidc upgrade` command (diff → confirm → backup → apply), and
+the plan's key design decision — implicit commands stop rewriting scaffold
+files.
+
+**Why:** Template fixes previously reached existing projects by `up` silently
+re-copying every managed file on every run — which also silently clobbered
+any local edit to the Dockerfile/compose files (the clobber risk flagged in
+the roadmap review). There was no way to see what a newer aidc would change
+before it changed it.
+
+**File classes (now encoded once, in `AIDC_OVERWRITE_TEMPLATE_MAP`):**
+- *template-tracking* (14 files: Dockerfile, 3 compose files,
+  devcontainer.json, 2 bootstrap scripts, cursor rules, 6 scripts/ci
+  scripts) — owned by aidc, rewritten only by `upgrade`/`init`;
+- *marker-merged* (`CLAUDE.md`, `AGENTS.md`) — only the aidc block is
+  replaced, user content preserved (unchanged);
+- *seed-once/user-owned* (`project-setup.sh`, `license-matrix.tsv`,
+  `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, `logs/`, `github-sbom.yml`,
+  `project.env` contents) — never rewritten.
+
+**How (`lib/aidc.sh`):**
+- `refresh_scaffold` refactored to iterate the map (single source of truth
+  for scaffold + upgrade + staleness check).
+- `AIDC_SCAFFOLD_MODE` (`overwrite` default / `create`): `copy_template`
+  skips existing targets in create mode; `merge_template` skips files that
+  already carry the managed block. `ensure_workspace_ready` (the implicit
+  path) runs in create mode and prints
+  `scaffold is out of date … run 'aidc upgrade'` when
+  `aidc::scaffold_is_stale` (stamp differs OR any mapped file
+  missing/differing). `cmd_init` keeps overwrite mode — an explicit init is
+  an explicit refresh (e2e's init-idempotency contract unchanged).
+- `aidc::cmd_upgrade [--dry-run|--diff] [-y]`: classify each mapped file as
+  create/update; `already current` short-circuit requires stamp match AND
+  zero drift; unified diffs labeled `current/…` vs `aidc-<ver>/…` (`diff -L`,
+  portable to BSD); interactive y/N confirm, `-y` for scripts, hard refusal
+  on non-tty stdin without `-y`; backups of every rewritten file under
+  `.ai-container/backup/<timestamp>/` (git-excluded via `.ai-container/`);
+  apply = overwrite-mode `refresh_scaffold` + in-place stamp update
+  (`update_project_env_stamp` rewrites only the `AIDC_VERSION=` line, user
+  settings survive).
+- **Bug found by the tests:** sourcing `project.env` clobbered the live
+  `AIDC_VERSION` with the stamp, so every stamp-vs-current comparison
+  compared the stamp to itself. `load_project_env` now restores the live
+  version after sourcing. (CHANGELOG → Fixed.)
+
+**Commands:** `bash tests/upgrade.test.sh` (16/16: fresh-scaffold
+idempotence, dry-run diff + no-op, apply restore + backup, stale-stamp path +
+user project.env settings survive, missing-file create, non-interactive
+refusal, user-owned files untouched, CLAUDE.md content survives, implicit
+path preserves edits / creates missing / byte-identical merges / notice);
+full suite 13/13 files; shellcheck clean; YAML + `bash -n` on workflows;
+semgrep 0; gitleaks clean.
+
+**Verification:** e2e gains an upgrade round-trip on the ubuntu leg (edit →
+dry-run lists it → `-y` restores + backup exists → second upgrade reports
+already current). README documents the new update/upgrade flow.
+
+**Notes:** behavior change recorded under Changed in CHANGELOG: template
+fixes now reach existing projects via explicit `aidc upgrade` (surfaced by
+the staleness notice and doctor) instead of invisibly on the next `up`.
+
+---
+
+## 2026-07-06 — `aidc doctor` + `aidc update`
+
+**Summary:** Implemented `plans/roadmap-07-doctor-update.md`: one command that
+answers "why isn't this working" and one that answers "how do I update".
+
+**Why:** Failures previously surfaced as whatever error the failing layer
+emitted (docker down, PATH missing, Keychain empty, stale scaffold), and the
+update path was an undocumented `git pull && ./install.sh`.
+
+**How (`lib/aidc.sh`):**
+- Composable `aidc::doctor_check_*` functions + `aidc::doctor_report`
+  (OK/WARN/FAIL counters) so tests exercise each check in isolation and later
+  steps can add posture lines. Checks and their remedies are listed in the
+  CHANGELOG entry. Design points: informational states (no Keychain on
+  Linux, firewall off) are OK not WARN — matching the no-nagging directive;
+  a broken `project.env` gates the deeper project checks (they'd die
+  sourcing it); freshness uses `rev-list HEAD..origin/main` against the
+  last-fetched state — no network, no hangs, phrased "as of last fetch";
+  the Keychain check reuses the `${USER:-$(id -un)}` account fallback and
+  never prints token material (asserted in tests).
+- `aidc::cmd_update`: refuse non-checkout installs; `git pull --ff-only`
+  (never merge a user-modified checkout — divergence gets a manual-resolution
+  message and install.sh does NOT run); re-run `install.sh`; report
+  `old (sha) -> new (sha)`; hint `aidc upgrade` + `aidc rebuild` when inside
+  a project.
+- Fixed in passing: `aidc::cmd_version` no longer trips `set -u` when the
+  lib is sourced without `AIDC_ROOT` (defensive `${AIDC_ROOT:-}`).
+
+**Commands:** `bash tests/doctor.test.sh` (15/15), `bash tests/update.test.sh`
+(6/6), full suite green (12 files), `bash bin/aidc doctor` live in this
+container — correctly FAILs on the (absent) docker CLI and flags nothing
+else; `shellcheck` clean; `semgrep` 0 findings; `gitleaks` clean.
+
+**Verification:** doctor run against this real environment produced the
+expected report (docker FAIL with install hint, keychain informational on
+Linux, scaffold stamp OK, firewall off-by-design line). e2e asserts a
+well-formed report on both runner OSes (exit ≤ 1, `^host` present).
+
+**Notes:** the `doctor` scaffold-version check references `aidc upgrade`,
+which lands in the next roadmap step (same branch) — the hint is accurate by
+merge time.
+
+---
+
+## 2026-07-06 — Versioning: `aidc version` + tag-driven release workflow
+
+**Summary:** Implemented `plans/roadmap-06-versioning-releases.md`:
+`aidc version` subcommand, `release.yml` workflow (tag → verified GitHub
+Release), `docs/releasing.md` procedure.
+
+**Why:** `AIDC_VERSION` was hardcoded `0.1.0`, never surfaced, never compared;
+no tags, no releases — users couldn't report what they run, and the upcoming
+`doctor`/`update`/`upgrade` commands need a reference point.
+
+**How:**
+- `aidc::cmd_version` prints `aidc <version> (<short-sha>)` (sha only when
+  running from a git checkout with git present); dispatched as
+  `version|--version|-V`; help + README updated.
+- `release.yml` on `v*` tag push: (1) parses `AIDC_VERSION` out of
+  `lib/aidc.sh` and fails on mismatch with the tag; (2) extracts the
+  `## [X.Y.Z]` section from CHANGELOG.md via awk **to a file** (no shell
+  interpolation of changelog content into commands — script-injection safe)
+  and fails if absent; (3) `gh release create --notes-file`. Zero third-party
+  actions beyond the SHA-pinned checkout.
+- `docs/releasing.md`: bump → cut changelog section → tag → push; failure
+  recovery; 0.x semver policy; the `project.env` stamp is the
+  scaffolded-by version (`aidc upgrade`'s comparison point — it is seed-once
+  by design, user settings survive refreshes).
+- e2e: `aidc version` smoke assertion (exit 0, `^aidc \d+\.\d+\.\d+`).
+
+**Commands:** `bash bin/aidc version` → `aidc 0.1.0 (2d24d38)`; workflow
+assertion logic executed locally against the real tree (version parse OK,
+tag-match OK, missing-section detection OK); YAML + `bash -n` on the
+workflow; `shellcheck` clean; `semgrep` 0 findings.
+
+**Verification:** first real exercise happens on the first tag push
+(recommended: `v0.2.0` once this roadmap lands, per docs/releasing.md).
+
+---
+
+## 2026-07-06 — Token handling: tmpfs file delivery, strict profile perms, temp hygiene
+
+**Summary:** Implemented `plans/roadmap-05-token-handling.md`, plus one real
+bug found along the way (Linux permission checks never worked — see Fixed in
+CHANGELOG).
+
+**Why:** The Claude OAuth token travelled as `docker compose exec -e
+CLAUDE_CODE_OAUTH_TOKEN`, making it visible in the exec instance's metadata
+and inherited environments; profile env files with API keys only *warned* on
+loose permissions and their values lingered in aidc's environment after the
+run; `mktemp` temp files in the merge helpers landed in /tmp with no cleanup
+on failure.
+
+**How (`lib/aidc.sh`):**
+- **File delivery (default).** `aidc::deliver_claude_token` pipes the token
+  over the exec's stdin into `/dev/shm/aidc-oauth-token` (`umask 077`).
+  Both the one-time-login bootstrap and the agent launch run through an
+  inline `bash -c` prelude (`AIDC_CLAUDE_TOKEN_SNIPPET`) that imports the
+  token from the file into the process environment; the launch path deletes
+  the file before `exec claude`. Deliberately implemented as an inline
+  snippet rather than an image-baked wrapper so it works against ANY
+  already-built container image — no rebuild required, no version skew
+  between lib and image. `-e CLAUDE_CODE_OAUTH_TOKEN` is skipped in the
+  passthrough when file delivery is active
+  (`AIDC_PASSTHROUGH_SKIP_KEY` consumed by `append_passthrough_env_args`).
+  `AIDC_TOKEN_DELIVERY=env` restores the legacy path; a failed file delivery
+  falls back to env with a warning. Profile-based runs (API-key `-e`
+  forwarding) are unchanged — documented as future work.
+- **Strict profile perms.** New `aidc::require_strict_permissions` (die with
+  the exact `chmod 600` command) called in `load_claude_profile_env` — the
+  moment secrets are exported. Read-only paths (`--list-profiles`, alias
+  sync via `claude_profile_metadata`) keep the warning so one bad file can't
+  break listing. Generated `*.env.example` files are seeded 0600.
+- **Scrubbing.** `load_claude_profile_env` records exported keys in
+  `AIDC_PROFILE_LOADED_KEYS`; `aidc::scrub_profile_env` unsets them right
+  after the agent exec returns.
+- **Temp hygiene.** `merge_template` / `strip_merge_block` now mktemp
+  **next to the target** (same-fs atomic `mv`, nothing lingers in /tmp) and
+  remove the temp file on every failure path before dying.
+- **Bug fix.** `aidc::file_permissions` probed BSD `stat -f` first; on GNU
+  stat that means "filesystem status", exits 0, and returns multi-line junk —
+  so the `-c` fallback never ran and permission checks were no-ops on Linux
+  (visible the moment the new hard check ran in this container). GNU form
+  now probed first; output validated as octal on both platforms.
+
+**Commands:** `bash tests/token-delivery.test.sh` (15/15 — file delivery
+drops `-e`, token in no argv, token on stdin, umask'd tmpfs write, wrapped
+bootstrap, launch-time file deletion, env-mode restore, no-token path, hard
+perm error + chmod hint, 0600 loads, scrub before/after, merge-failure temp
+cleanup); full suite green; `shellcheck` clean; `semgrep` 0 findings;
+`gitleaks` clean.
+
+**Verification:** unit-level with a stubbed compose layer recording argv +
+stdin. Live check on a host: `aidc claude -- -p ok` authenticates;
+`docker inspect` of the exec shows no token; `/dev/shm/aidc-oauth-token`
+absent after launch.
+
+**Notes:** in-container same-user reads of the agent's `/proc/<pid>/environ`
+remain possible — inherent to the agent consuming an env var; documented in
+`docs/security.md` § How the token reaches the agent.
+
+---
+
+## 2026-07-06 — Egress firewall: IPv6 deny, DNS refresh + pinning (opt-in only)
+
+**Summary:** Implemented `plans/roadmap-04-firewall-hardening.md`. All changes
+apply **only** to projects that opt into the firewall — the default container
+keeps its open network permanently (maintainer decision, this session).
+
+**Why:** With the firewall "on", three bypasses existed: (1) zero IPv6 rules —
+on any v6-capable Docker network an agent could exfiltrate freely over IPv6;
+(2) hostnames resolved once at container start — CDN/IP rotation either
+stranded legitimate hosts or left stale IPs allowed; (3) port 53 was open to
+any destination, allowing DNS to arbitrary resolvers.
+
+**How (template: `templates/devcontainer/scripts/init-firewall.sh.tmpl`,
+restructured into sourceable functions with a `main()` guard for testability):**
+- `apply_ipv6_rules`: `ip6tables` default-deny INPUT/FORWARD/OUTPUT with
+  loopback + established excepted; no v6 allowlist (the allowlist is
+  IPv4-only — a follow-up can add `family inet6` resolution if an allowlisted
+  endpoint ever goes v6-only). Degrades with a logged note when ip6tables is
+  absent or the kernel has no v6 stack.
+- `refresh_allow_set`: resolves into a staging ipset and `ipset swap`s it in
+  atomically (no empty-allowlist window). `init-firewall.sh refresh` runs one
+  cycle; `start_refresh_loop` backgrounds a `sleep`-loop (pidfile-idempotent,
+  reparented to the container's init, `AIDC_FIREWALL_REFRESH_SECONDS`
+  default 300, 0/non-numeric disables). Refresh diffs log to
+  `/var/log/aidc-firewall.log`.
+- `dns_rules`: port-53 egress restricted to `/etc/resolv.conf` nameservers
+  (Docker's embedded 127.0.0.11 is loopback, already accepted). Falls back to
+  open 53 with a logged note if no IPv4 nameserver parses — never break DNS.
+- `bootstrap-state.sh.tmpl`: forwards `AIDC_FIREWALL_REFRESH_SECONDS` through
+  `sudo -n env …` (sudo resets the environment).
+- `lib/aidc.sh`: `aidc status` shows a passive posture line
+  (`firewall: off (open network, default)` / `on (default-deny allowlist)`).
+  Explicitly NOT a boot-time warning — the open default is the product
+  experience, not a degraded mode. Global config seeds the refresh knob.
+- `docs/security.md`: rewritten egress-firewall section — enforcement
+  semantics (IPv4 allowlist, IPv6 drop, DNS pinning, what DoH can and cannot
+  do under the model), allowlist-file format with examples, refresh knob,
+  manual refresh command, opt-in-by-design statement.
+
+**Commands:** `bash tests/init-firewall.test.sh` (11/11 — allowlist parsing,
+resolution into ipset, rotation pickup via atomic swap, staging cleanup,
+IPv4 rule emission, DNS pinning to v4 resolver only, IPv6 default-deny,
+refresh-loop disable paths) with stub `iptables`/`ip6tables`/`ipset`/`getent`
+binaries recording argv; full test suite green; `shellcheck` clean;
+`semgrep` 0 findings; `gitleaks` clean.
+
+**Verification:** unit-level only in this environment (no Docker daemon in
+the aidc container). Live end-to-end check on a host, firewall enabled:
+`curl https://api.anthropic.com` (allowed), `curl https://example.com`
+(blocked), `curl -6` anywhere (blocked), `sudo ipset list aidc-allow` gains
+rotated IPs within the refresh interval. The e2e/image CI exercises the
+script's syntax + shellcheck via validate-scaffold on every push.
+
+**Notes:** DEFAULT_HOSTS unchanged. Tailscale CGNAT pass-through unchanged
+and now documented. Firewall default remains off permanently.
+
+---
+
+## 2026-07-06 — Compose hardening with freedom-preserving defaults
+
+**Summary:** Implemented `plans/roadmap-03-compose-hardening.md`, adjusted to
+the maintainer's directive that the default container stay unrestricted:
+capabilities become conditional (granted only with the firewall), a pids
+fork-bomb guard lands by default (invisible in normal use), memory/CPU are
+cappable but unlimited by default, and `no-new-privileges` is opt-in.
+
+**Why:** `compose.yaml` granted `NET_ADMIN`/`NET_RAW` to every container even
+though only the (opt-in, off-by-default) egress firewall's iptables/ipset init
+needs them — default containers carried raw-network capabilities they never
+used. There were no resource limits at all (a fork bomb could starve the
+shared Docker VM), and no privilege-escalation guard even as an option.
+
+**Design decisions:**
+- `no-new-privileges` is **not** applied by default, deviating from the
+  original plan sketch: the devcontainers base image ships passwordless sudo
+  as a usability feature (`sudo apt-get install …` inside the container), and
+  NNP kills setuid entirely. Freedom-by-default won; the knob exists
+  (`AIDC_NO_NEW_PRIVILEGES=1`) with the trade-off documented.
+- NNP + firewall is a hard conflict (firewall init runs `sudo -n` at
+  container start — verified in `bootstrap-state.sh.tmpl:180-190`), so
+  `aidc::compose_file_args` warns and skips the hardened override when both
+  are set. Firewall wins because it was requested explicitly per-project.
+- No `cap_drop: ALL`: it would break sudo (SETUID/SETGID), ping, and
+  bootstrap's chown. Docker's default capability set stays.
+- Overrides are separate compose files (`compose.firewall.yaml`,
+  `compose.hardened.yaml`) merged via `-f` — compose has no conditional
+  syntax, and aidc already owns the invocation. Old scaffolds without the
+  override files degrade gracefully to base-only.
+
+**How:**
+- `templates/devcontainer/compose.yaml.tmpl`: `cap_add` removed;
+  `pids_limit: ${AIDC_PIDS_LIMIT:-4096}`, `mem_limit: ${AIDC_MEM_LIMIT:-0}`,
+  `cpus: ${AIDC_CPU_LIMIT:-0}` added (0 = unlimited).
+- New `compose.firewall.yaml.tmpl` / `compose.hardened.yaml.tmpl` (managed,
+  scaffolded, in `AIDC_MANAGED_PATHS`).
+- `lib/aidc.sh`: new `aidc::compose_file_args` builds the `-f` chain from the
+  knobs; `aidc::compose` + `aidc::compose_capture` use it; global config seed
+  documents the new knobs.
+- `.github/scripts/validate-scaffold.sh`: override files required + each must
+  merge cleanly onto the base (`docker compose config` per combination).
+- `aidc-e2e.yml`: scaffold assertion list extended; new "Compose hardening
+  posture" step renders the config default/firewall/hardened and asserts
+  NET_ADMIN and no-new-privileges appear exactly when they should.
+- `docs/security.md`: new "Container hardening" section.
+
+**Commands:** `bash tests/compose-file-args.test.sh` (6/6 — default chain,
+firewall chain, hardened chain, conflict warn+skip, old-scaffold
+degradation); full suite re-run (all pass after re-pointing the
+validate-scaffold fixtures at `templates/` — the in-container rendered
+`.devcontainer` is read-only + stale by design, and templates are the source
+of truth); `shellcheck` clean; YAML parses; `semgrep` 0 findings; `gitleaks`
+clean.
+
+**Verification:** compose render assertions run in CI on push (no docker in
+the aidc container); the unit test proves the file-chain logic including the
+conflict and degradation paths.
+
+**Notes:** the repo's own rendered `.devcontainer/` will pick up the new
+override files on the next host-side `aidc up`/`rebuild`. VS Code's
+`devcontainer.json` flow uses the base file only (documented).
+
+---
+
+## 2026-07-06 — Supply chain: every image installer pinned + checksum-verified
+
+**Summary:** Implemented `plans/roadmap-02-pin-installers.md`. The devcontainer
+image build no longer executes anything fetched from a floating branch:
+every tool is a version-pinned artifact, and everything that publishes
+checksums is verified against a SHA256 recorded in the Dockerfile.
+
+**Why:** aidc's pitch is supply-chain safety, yet the image build piped nine
+unpinned installers into a shell — several from `main`/`master`
+(`pmg`, `trufflehog`, `rtk`, the syft/grype installer scripts) and all four
+agent CLIs unversioned. Rebuilds were non-reproducible and a compromised
+installer endpoint would have executed arbitrary code in every build.
+
+**How (all in `templates/devcontainer/Dockerfile.tmpl` — the rendered
+`.devcontainer/Dockerfile` is git-excluded, mounted read-only in-container,
+and refreshes from the template on the next host-side `aidc up`):**
+- New `aidc-fetch-verified <url> <dest> <sha256|SKIP>` helper (COPY heredoc,
+  `/bin/sh`): downloads, verifies, deletes the artifact and fails the build on
+  mismatch. `SKIP` (used automatically by `<TOOL>_VERSION=latest` ad-hoc
+  overrides) prints a loud warning.
+- Tier 1 — direct release artifacts + per-arch `ARG *_SHA256_{AMD64,ARM64}`:
+  pmg v0.21.3, trufflehog v3.95.8, rtk v0.43.0 (vendor targets:
+  x86_64-musl / aarch64-gnu), syft v1.18.1, grype v0.87.0 (both previously
+  installed via unpinned installer scripts from `main` that could have ignored
+  the version arg), plus checksums added to the already-pinned git-delta
+  0.18.2, vet v1.17.3, gitleaks v8.30.1.
+- Tier 2 — agents version-pinned through their installers (each verified
+  against the vendor's actual contract by reading the installer source):
+  claude 2.1.201 (positional arg; installer self-verifies against its
+  manifest SHA256), codex 0.142.5 (`--release`), opencode 1.17.13 (`VERSION`
+  env), grok 0.2.87 (positional arg). Installers are fetched to a file and
+  executed, never piped.
+- Tier 3 — documented exceptions in `docs/security.md` § Image supply chain:
+  cursor-agent (vendor offers no pin; version logged at build), grok (no
+  vendor checksums), rustup (self-verifying official bootstrap), apt/
+  NodeSource (GPG chain).
+- `scripts/update-pins.sh`: resolves each vendor's latest tag
+  (`git ls-remote`-free — release-redirect probe), pulls the checksums file
+  (or hashes the artifacts locally for git-delta, which publishes none) and
+  prints fresh `ARG` lines; `--write` rewrites them in place. Live-run
+  verified: current pins match latest for pmg/trufflehog/gitleaks/rtk/agents;
+  newer syft/grype/vet/delta exist but were deliberately NOT bumped here —
+  this change is about verification, version bumps ride their own commit.
+- CI: `.github/scripts/check-image-pins.sh` (new) asserts every pinned tool
+  inside the built image reports its pinned version (runs in the `image-scan`
+  job); both `sbom.yml` jobs and the scaffolded `github-sbom.yml.tmpl` now
+  install syft/grype from the pinned artifacts (the aidc-repo jobs read the
+  pins straight from the Dockerfile template — one source of truth; the
+  scaffolded template embeds them since user repos git-exclude
+  `.devcontainer/`).
+
+**Commands:** `bash tests/update-pins.test.sh` (23/23),
+`bash tests/check-image-pins.test.sh` (5/5), live `scripts/update-pins.sh`
+run against real endpoints (all asset patterns resolve),
+`shellcheck --severity=warning` on all new scripts (clean), helper extracted
+and functionally tested (good sha → pass, bad sha → exit 1 + artifact
+removed, SKIP → warning), YAML + `bash -n` validation of changed workflows,
+`semgrep` 0 findings, `gitleaks` clean.
+
+**Verification:** the full image build with these pins runs in the `image-scan`
+CI job on the next push (no Docker daemon in the aidc container itself);
+`check-image-pins.sh` will fail the job if any artifact/installer contract was
+misread. Checksum values were fetched from the vendors' published checksums
+files and cross-checked against locally-downloaded artifacts for delta.
+
+**Notes:** amd64 + arm64 both covered for every checksum-pinned tool.
+`docs/security.md` gains the "Image supply chain" section describing tiers,
+exceptions, and the bump procedure.
+
+---
+
+## 2026-07-06 — CI safety net: scaffold validation, lifecycle e2e, image scan, Scorecard
+
+**Summary:** Implemented `plans/roadmap-01-ci-safety-net.md` — the foundation
+step of the roadmap. Four additions: (1) a standalone scaffold validator
+(`.github/scripts/validate-scaffold.sh`) wired into the e2e workflow, (2) a
+destructive-lifecycle e2e step (destroy → assert clean → re-init → assert
+identical), (3) an image vulnerability-scan job in `sbom.yml`, (4) an OpenSSF
+Scorecard workflow.
+
+**Why:** The `.tmpl` files under `templates/` are scaffolded into every user
+project but were never validated in CI — a broken `compose.yaml.tmpl` or a
+syntax error in a bootstrap script would ship silently. The destructive
+lifecycle (`destroy --purge-*`) had zero coverage. Roadmap steps 2–4 change the
+Dockerfile/compose/firewall templates; this step makes those changes
+regression-testable before they land.
+
+**How:**
+- `validate-scaffold.sh` takes a scaffolded project dir and checks: required
+  files present; `bash -n` + `shellcheck --severity=warning` (matches the
+  shellcheck workflow) on every scaffolded `*.sh`; `project.env` sources in a
+  clean env under `set -u`; `devcontainer.json` parses as JSON (jq, python3
+  fallback); `docker compose config -q` renders with every `${AIDC_*}` var
+  auto-derived from the compose file and stubbed; `docker build --check`
+  BuildKit lint. Docker checks skip with a note when no CLI/daemon (macOS
+  runners, local container use). Bash-3.2-safe (no `sort -z`, guarded empty
+  arrays) since the macOS e2e leg runs under system bash.
+- e2e workflow: "Validate scaffold output" step after init; "Destroy →
+  re-init lifecycle" step (ubuntu leg only, guarded by `docker info`)
+  snapshots the managed scaffold, destroys with both purge flags, asserts
+  managed paths gone / seeded docs survive / CLAUDE.md merge block stripped /
+  no `aidc_scaffold-proj*` volumes remain, re-inits and `diff -r`s the
+  scaffold against the snapshot. Safe on a never-started container:
+  `aidc::auto_sync_sessions` returns early when `compose ps -q` is empty.
+- `sbom.yml` `image-scan` job: buildx build of `.devcontainer/` with a local
+  layer cache (`actions/cache`, keyed on the Dockerfile hash, swap-not-append
+  so it doesn't grow), then grype in report-only mode (`-o table`, artifact
+  uploaded). Doubles as a Dockerfile build regression test. Tighten to
+  `--fail-on high` after a baseline week.
+- `scorecard.yml`: standard OSSF setup, `publish_results: true`, SARIF to the
+  Security tab; weekly cron + push to main; all actions pinned by commit SHA
+  (resolved via `git ls-remote --tags`): scorecard-action v2.4.3, actions/cache
+  v4.3.0, setup-buildx-action v3.9.0, codeql-action v3.36.3.
+
+**Commands:** `bash tests/validate-scaffold.test.sh` (6/6),
+all pre-existing test files re-run (pass), `shellcheck --severity=warning` on
+both new scripts (clean), YAML parse + `bash -n` of every workflow `run:`
+block via a pyyaml one-off, `semgrep scan --config auto .github/ tests/…`
+(0 findings), `gitleaks detect` (clean).
+
+**Verification:** validator run against this repo's own rendered scaffold —
+all checks pass, docker checks skip (no daemon in the aidc container). Unit
+tests prove each failure mode fires: broken shell, broken JSON, missing file,
+broken project.env, usage error.
+
+**Notes:** The lifecycle test's re-init comparison is valid because
+`project.env` generation is deterministic for a fixed workspace path (slug =
+basename + path hash; no timestamps). `bash-compat.yml` parse-checks the new
+scripts across bash 3.2/4.2/4.4/5.2 automatically since it globs all `*.sh`.
+
+---
+
 ## 2026-07-06 — Usability & security roadmap: 12-step plan series
 
 **Summary:** Added `plans/roadmap-00-overview.md` (master plan) and twelve step
@@ -45,9 +720,11 @@ created with the editor. Scanners run on the changed files (`semgrep`,
 **Verification:** all 13 plan files present under `plans/`; changelog entries
 in both files; session log `logs/2026-07-06-roadmap-plan-series.md`.
 
-**Notes:** Deliberate deferrals recorded inside the plans: firewall default-on,
-strict seccomp, and read-only rootfs are postponed until `aidc upgrade`
-(step 8) makes rollout to existing scaffolds cheap and visible.
+**Notes:** Deliberate deferrals recorded inside the plans: strict seccomp and
+read-only rootfs are postponed until `aidc upgrade` (step 8) makes rollout to
+existing scaffolds cheap and visible. The egress firewall stays **off by
+default permanently** (maintainer decision, 2026-07-06): the default container
+is intentionally unrestricted; firewall hardening applies to opt-in users only.
 
 ---
 

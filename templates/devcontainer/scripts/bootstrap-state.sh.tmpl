@@ -97,6 +97,60 @@ if changed:
 PY
 }
 
+# Seed the aidc guardrail posture into Claude Code's settings.json:
+#   - a Stop hook running aidc-scan-hook.sh (mechanical enforcement of the
+#     "scan before done" guardrail) — added when AIDC_ENFORCE_SCAN_HOOK=1
+#     (default), removed when 0, other hooks always preserved;
+#   - enableAllProjectMcpServers pinned to false when absent, so project
+#     .mcp.json servers keep requiring explicit approval.
+# Idempotent; creates the file if the host seeded none.
+ensure_agent_guardrail_settings() {
+  local f="$1"
+  command -v python3 >/dev/null 2>&1 || return 0
+  local enforce="${AIDC_ENFORCE_SCAN_HOOK:-1}"
+  AIDC_HOOK_ENFORCE="$enforce" python3 - "$f" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+enforce = os.environ.get("AIDC_HOOK_ENFORCE", "1") == "1"
+cmd = "/workspace/.devcontainer/scripts/aidc-scan-hook.sh"
+try:
+    cfg = json.load(open(p))
+except (FileNotFoundError, ValueError):
+    cfg = {}
+changed = False
+hooks = cfg.setdefault("hooks", {})
+stops = hooks.setdefault("Stop", [])
+have = any(
+    isinstance(e, dict)
+    and any(h.get("command") == cmd for h in e.get("hooks", []) if isinstance(h, dict))
+    for e in stops if isinstance(e, dict)
+)
+if enforce and not have:
+    stops.append({"hooks": [{"type": "command", "command": cmd}]})
+    changed = True
+elif not enforce and have:
+    for e in stops:
+        if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+            kept = [h for h in e["hooks"] if not (isinstance(h, dict) and h.get("command") == cmd)]
+            if len(kept) != len(e["hooks"]):
+                e["hooks"] = kept
+                changed = True
+    hooks["Stop"] = [e for e in stops if not (isinstance(e, dict) and e.get("hooks") == [])]
+if not hooks.get("Stop"):
+    hooks.pop("Stop", None)
+if not cfg.get("hooks"):
+    cfg.pop("hooks", None)
+if "enableAllProjectMcpServers" not in cfg:
+    cfg["enableAllProjectMcpServers"] = False
+    changed = True
+if changed:
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+PY
+  chmod 0600 "$f" 2>/dev/null || true
+}
+
 sync_claude() {
   ensure_dir "$home_dir/.claude"
   copy_file_from_seed "/host-seed/claude/settings.json" "$home_dir/.claude/settings.json" "0600"
@@ -105,6 +159,7 @@ sync_claude() {
   # they're pointless in the VM and cot would error on every fire. Strip just
   # those — rtk installs its own hook below and any user hooks are preserved.
   strip_host_hooks "$home_dir/.claude/settings.json"
+  ensure_agent_guardrail_settings "$home_dir/.claude/settings.json"
 }
 
 sync_codex() {
@@ -138,6 +193,17 @@ sync_gitconfig_overlay() {
     cp /host-seed/gitconfig "$overlay"
     chmod 0644 "$overlay"
   fi
+}
+
+# Make aidc-scan callable by name inside the container (agents run it before
+# declaring work done — see the seeded CLAUDE.md/AGENTS.md guardrails). The
+# script itself lives in the read-only /workspace/.devcontainer overlay, so a
+# symlink is all that's needed and it tracks scaffold upgrades automatically.
+install_aidc_scan_link() {
+  local script="/workspace/.devcontainer/scripts/aidc-scan.sh"
+  [[ -f "$script" ]] || return 0
+  ensure_dir "$home_dir/.local/bin"
+  ln -sf "$script" "$home_dir/.local/bin/aidc-scan"
 }
 
 install_agent_hooks() {
@@ -182,10 +248,15 @@ run_firewall_if_enabled() {
   local script="/workspace/.devcontainer/scripts/init-firewall.sh"
   [[ -x "$script" ]] || return 0
 
+  # sudo resets the environment, so the refresh-interval knob is forwarded
+  # explicitly (project.env was sourced above).
+  local refresh="${AIDC_FIREWALL_REFRESH_SECONDS:-300}"
   if [[ "$(id -u)" -eq 0 ]]; then
-    "$script" || echo "[bootstrap] firewall init failed" >&2
+    AIDC_FIREWALL_REFRESH_SECONDS="$refresh" "$script" \
+      || echo "[bootstrap] firewall init failed" >&2
   else
-    sudo -n "$script" || echo "[bootstrap] firewall init failed (sudo required)" >&2
+    sudo -n env AIDC_FIREWALL_REFRESH_SECONDS="$refresh" "$script" \
+      || echo "[bootstrap] firewall init failed (sudo required)" >&2
   fi
 }
 
@@ -227,6 +298,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
       sync_tool "all"
       sync_gitconfig_overlay
       install_agent_hooks
+      install_aidc_scan_link
       run_firewall_if_enabled
       ;;
     sync)

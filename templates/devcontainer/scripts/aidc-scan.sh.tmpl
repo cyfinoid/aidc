@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# aidc-managed
+# aidc-scan — run the right security scanners for what changed, in one command.
+#
+# Usage: aidc-scan [--all | --staged | <paths…>] [--json]
+#
+# Scope (default): files changed vs HEAD (working tree) plus untracked files.
+#   --staged   the git index instead of the working tree
+#   --all      the whole repo
+#   <paths…>   exactly these paths
+#
+# Scanner selection: semgrep + secrets always; shellcheck when shell files are
+# in scope; bandit/gosec/cargo-audit/bundle-audit/npm-audit when the matching
+# toolchain marker exists AND matching files (or manifests) are in scope;
+# vet + the SBOM/license gate only when dependency manifests or the LICENSE
+# changed. Missing scanners are reported as skipped, never fatal.
+#
+# Output: one summary line per scanner; findings printed in full.
+# --json emits a machine-readable result (consumed by the aidc scan hook).
+# Exit codes: 0 clean, 1 findings above LOW, 2 usage error.
+#
+# NOT `set -e`: scanners exit non-zero on findings by design.
+set -uo pipefail
+
+MODE="changed"
+JSON=0
+EXPLICIT_PATHS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --all)    MODE="all" ;;
+    --staged) MODE="staged" ;;
+    --json)   JSON=1 ;;
+    -h|--help)
+      sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*)
+      echo "aidc-scan: unknown flag $1" >&2
+      exit 2
+      ;;
+    *)
+      MODE="paths"
+      EXPLICIT_PATHS+=("$1")
+      ;;
+  esac
+  shift
+done
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$repo_root" || exit 2
+
+# ── scope ─────────────────────────────────────────────────────────────────────
+FILES=()
+collect_changed() {
+  local f
+  while IFS= read -r f; do
+    [[ -f "$f" ]] && FILES+=("$f")
+  done < <(
+    case "$MODE" in
+      changed)
+        git diff --name-only HEAD -- 2>/dev/null
+        git ls-files --others --exclude-standard 2>/dev/null
+        ;;
+      staged)
+        git diff --cached --name-only 2>/dev/null
+        ;;
+    esac | sort -u
+  )
+}
+case "$MODE" in
+  changed|staged) collect_changed ;;
+  paths) FILES=(${EXPLICIT_PATHS[@]+"${EXPLICIT_PATHS[@]}"}) ;;
+  all) ;;
+esac
+
+in_scope_matching() { # <ere> — any in-scope file matches (always true in --all)
+  [[ "$MODE" == "all" ]] && return 0
+  local f
+  for f in ${FILES[@]+"${FILES[@]}"}; do
+    [[ "$f" =~ $1 ]] && return 0
+  done
+  return 1
+}
+
+files_matching() { # <ere> — print in-scope files matching
+  local f
+  for f in ${FILES[@]+"${FILES[@]}"}; do
+    [[ "$f" =~ $1 ]] && printf '%s\n' "$f"
+  done
+}
+
+MANIFEST_ERE='(^|/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|requirements[^/]*\.txt|pyproject\.toml|poetry\.lock|go\.(mod|sum)|Cargo\.(toml|lock)|Gemfile(\.lock)?|LICENSE[^/]*)$'
+
+# ── result bookkeeping ────────────────────────────────────────────────────────
+R_NAMES=()
+R_STATUSES=()
+R_INFOS=()
+failures=0
+record() {
+  R_NAMES+=("$1")
+  R_STATUSES+=("$2")
+  R_INFOS+=("$3")
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+run_scanner() { # <name> <binary> <cmd…>
+  local name="$1" binary="$2"
+  shift 2
+  if ! have "$binary"; then
+    record "$name" skipped "$binary not installed"
+    return 0
+  fi
+  local out rc=0
+  out="$("$@" 2>&1)" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    record "$name" ok "clean"
+  else
+    failures=$((failures + 1))
+    record "$name" findings "exit $rc"
+    printf '── %s ──\n%s\n\n' "$name" "$out" >&2
+  fi
+}
+
+# ── scanners ──────────────────────────────────────────────────────────────────
+
+# semgrep: everything in scope, findings above LOW (WARNING+ERROR).
+if [[ "$MODE" == "all" ]]; then
+  run_scanner semgrep semgrep semgrep scan --config auto --error --quiet \
+    --severity WARNING --severity ERROR .
+elif [[ "${#FILES[@]}" -gt 0 ]]; then
+  run_scanner semgrep semgrep semgrep scan --config auto --error --quiet \
+    --severity WARNING --severity ERROR "${FILES[@]}"
+else
+  record semgrep skipped "no files in scope"
+fi
+
+# secrets: repo-wide is cheap; the index in --staged mode.
+if [[ "$MODE" == "staged" ]]; then
+  run_scanner gitleaks gitleaks gitleaks protect --staged --no-banner
+else
+  run_scanner gitleaks gitleaks gitleaks detect --no-banner
+fi
+
+# Lint in-scope shell files with shellcheck.
+SH_FILES=()
+if [[ "$MODE" == "all" ]]; then
+  while IFS= read -r f; do SH_FILES+=("$f"); done \
+    < <(find . -name '*.sh' -type f -not -path './.git/*' 2>/dev/null)
+else
+  while IFS= read -r f; do SH_FILES+=("$f"); done < <(files_matching '\.sh$')
+fi
+if [[ "${#SH_FILES[@]}" -gt 0 ]]; then
+  run_scanner shellcheck shellcheck shellcheck --severity=warning "${SH_FILES[@]}"
+else
+  record shellcheck skipped "no shell files in scope"
+fi
+
+# bandit on in-scope python files (medium+ = above LOW).
+PY_FILES=()
+if [[ "$MODE" != "all" ]]; then
+  while IFS= read -r f; do PY_FILES+=("$f"); done < <(files_matching '\.py$')
+fi
+if [[ "$MODE" == "all" && ( -f pyproject.toml || -n "$(find . -maxdepth 2 -name '*.py' -not -path './.git/*' -print -quit 2>/dev/null)" ) ]]; then
+  run_scanner bandit bandit bandit -q -ll -r .
+elif [[ "${#PY_FILES[@]}" -gt 0 ]]; then
+  run_scanner bandit bandit bandit -q -ll "${PY_FILES[@]}"
+else
+  record bandit skipped "no python files in scope"
+fi
+
+# gosec: package-level, when go code is in scope.
+if [[ -f go.mod ]] && in_scope_matching '\.go$|(^|/)go\.(mod|sum)$'; then
+  run_scanner gosec gosec gosec -quiet ./...
+else
+  record gosec skipped "no go project/changes in scope"
+fi
+
+# cargo-audit / bundle-audit / npm audit: on dependency changes.
+if [[ -f Cargo.toml ]] && in_scope_matching '(^|/)Cargo\.(toml|lock)$'; then
+  run_scanner cargo-audit cargo-audit cargo audit
+else
+  record cargo-audit skipped "no rust dependency changes in scope"
+fi
+if [[ -f Gemfile ]] && in_scope_matching '(^|/)Gemfile(\.lock)?$'; then
+  run_scanner bundle-audit bundle-audit bundle-audit check
+else
+  record bundle-audit skipped "no ruby dependency changes in scope"
+fi
+if [[ -f package.json ]] && in_scope_matching '(^|/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock)$'; then
+  run_scanner npm-audit npm npm audit --omit=dev
+else
+  record npm-audit skipped "no node dependency changes in scope"
+fi
+
+# vet + SBOM/license gate: only when manifests or the LICENSE changed.
+if in_scope_matching "$MANIFEST_ERE"; then
+  run_scanner vet vet vet scan -D .
+  if [[ -x scripts/ci/license-check.sh ]]; then
+    if [[ -x scripts/ci/sbom-code.sh ]]; then
+      run_scanner license-check bash bash -c \
+        'scripts/ci/sbom-code.sh >/dev/null && AIDC_LICENSE_MODE=fail scripts/ci/license-check.sh'
+    else
+      run_scanner license-check bash bash -c \
+        'AIDC_LICENSE_MODE=fail scripts/ci/license-check.sh'
+    fi
+  else
+    record license-check skipped "scripts/ci/license-check.sh not present"
+  fi
+else
+  record vet skipped "no dependency/license changes in scope"
+  record license-check skipped "no dependency/license changes in scope"
+fi
+
+# ── report ────────────────────────────────────────────────────────────────────
+if [[ "$JSON" -eq 1 ]]; then
+  printf '{"scanners":['
+  i=0
+  while [[ "$i" -lt "${#R_NAMES[@]}" ]]; do
+    [[ "$i" -gt 0 ]] && printf ','
+    printf '{"name":"%s","status":"%s","info":"%s"}' \
+      "${R_NAMES[$i]}" "${R_STATUSES[$i]}" "${R_INFOS[$i]}"
+    i=$((i + 1))
+  done
+  printf '],"failures":%d}\n' "$failures"
+else
+  i=0
+  while [[ "$i" -lt "${#R_NAMES[@]}" ]]; do
+    printf '%-14s %s (%s)\n' "${R_NAMES[$i]}:" "${R_STATUSES[$i]}" "${R_INFOS[$i]}"
+    i=$((i + 1))
+  done
+fi
+
+if [[ "$failures" -gt 0 ]]; then
+  printf '\naidc-scan: %d scanner(s) reported findings above LOW — fix them before declaring the work done\n' "$failures" >&2
+  exit 1
+fi
+exit 0

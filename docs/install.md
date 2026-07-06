@@ -2,11 +2,26 @@
 
 ## Prereqs
 
-- macOS
-- Docker running (Docker Desktop / OrbStack / Colima)
+- macOS (primary platform) or Linux (experimental — see the matrix below)
+- Docker running (Docker Desktop / OrbStack / Colima on macOS; the docker
+  engine + compose plugin on Linux)
 - git
 
-`aidc` is macOS-only by design. The host-side bits (clipboard bridge, Keychain integration, LaunchAgent, profile aliases in `~/.local/bin`) assume a Mac.
+### Platform support
+
+aidc is **macOS-first**. The container side is Linux either way; what differs
+is the host integration:
+
+| Feature | macOS | Linux host |
+|---|---|---|
+| Container lifecycle (`init`/`up`/`scan`/agents/…) | ✅ | ✅ (exercised in CI on ubuntu) |
+| Claude token from Keychain | ✅ | ❌ — export `CLAUDE_CODE_OAUTH_TOKEN` yourself (or log in interactively once; it persists in the volume) |
+| Clipboard bridge (`pbpaste` in-container) | ✅ | ❌ (LaunchAgent + `pbpaste` are macOS-only) |
+| Claude profile aliases / completions in `~/.local/bin` | ✅ | ✅ |
+| `--isolate-vm` | Lima | Firecracker (rough edges expected) |
+
+On Linux, `aidc doctor` reports the unavailable host features as
+informational lines, not failures.
 
 ## Install
 

@@ -43,3 +43,45 @@ jobs:
           bash tests/license-resolve.test.sh
           bash tests/license-check.test.sh
           bash tests/sbom-diff.test.sh
+
+      - name: Run scaffold-validator unit tests
+        run: bash tests/validate-scaffold.test.sh
+
+      - name: Run supply-chain pin unit tests
+        run: |
+          set -euo pipefail
+          bash tests/update-pins.test.sh
+          bash tests/check-image-pins.test.sh
+
+      - name: Run compose file-chain unit tests
+        run: bash tests/compose-file-args.test.sh
+
+      - name: Run firewall unit tests
+        run: bash tests/init-firewall.test.sh
+
+      - name: Run token-delivery unit tests
+        run: bash tests/token-delivery.test.sh
+
+      - name: Run doctor + update unit tests
+        run: |
+          set -euo pipefail
+          bash tests/doctor.test.sh
+          bash tests/update.test.sh
+
+      - name: Run upgrade unit tests
+        run: bash tests/upgrade.test.sh
+
+      - name: Run aidc-scan unit tests
+        run: bash tests/aidc-scan.test.sh
+
+      - name: Run CLI polish unit tests
+        run: bash tests/cli-errors.test.sh
+
+      - name: Check lib module layering
+        run: .github/scripts/check-module-deps.sh
+
+      - name: Run scan-hook + insights unit tests
+        run: |
+          set -euo pipefail
+          bash tests/scan-hook.test.sh
+          bash tests/insights.test.sh

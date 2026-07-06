@@ -1,0 +1,59 @@
+name: release
+
+# Tag-driven releases. Push a tag `vX.Y.Z` and this workflow:
+#   1. asserts the tag matches AIDC_VERSION in lib/aidc.sh,
+#   2. asserts CHANGELOG.md has a `## [X.Y.Z]` section,
+#   3. creates a GitHub Release with that section as the body.
+# Procedure: docs/releasing.md. Uses the runner's preinstalled `gh` (no
+# third-party release action — keeps the workflow supply-chain surface at
+# zero beyond checkout).
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Assert tag matches AIDC_VERSION
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          ver="$(sed -n 's/^AIDC_VERSION="\${AIDC_VERSION:-\(.*\)}"$/\1/p' lib/aidc.sh)"
+          if [ -z "$ver" ]; then
+            echo "::error::could not parse AIDC_VERSION from lib/aidc.sh"
+            exit 1
+          fi
+          if [ "v$ver" != "$tag" ]; then
+            echo "::error::tag $tag does not match lib/aidc.sh AIDC_VERSION ($ver) — bump the version line first (see docs/releasing.md)"
+            exit 1
+          fi
+
+      - name: Extract changelog section
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v ver="$ver" '
+            $0 ~ "^## \\[" ver "\\]" { on = 1; next }
+            on && /^## /             { exit }
+            on                        { print }
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no '## [$ver]' section — move the Unreleased entries under it first (see docs/releasing.md)"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --title "aidc $GITHUB_REF_NAME" \
+            --notes-file release-notes.md

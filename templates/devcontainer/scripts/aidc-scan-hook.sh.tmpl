@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# aidc-managed
+# Claude Code Stop hook: hold the "I'm done" moment until aidc-scan is clean.
+#
+# Behavior:
+#   - exit 0 (allow stop): guardrail disabled, nothing changed, tree already
+#     scanned clean (debounce), or the scanner infrastructure itself failed —
+#     the hook FAILS OPEN, it must never make the agent unusable.
+#   - exit 2 (block stop): aidc-scan reported findings above LOW; the findings
+#     summary goes to stderr, which Claude Code feeds back to the agent.
+#
+# Loop guard: Claude Code sets stop_hook_active in the hook payload when the
+# session is already continuing because a stop hook blocked — never block
+# again in that state.
+#
+# Knob: AIDC_ENFORCE_SCAN_HOOK (project.env / config.env), default 1.
+# Outcomes are logged to .ai-container/scan-hook.log (bind-mounted, so the
+# host's `aidc insights` can read them).
+set -uo pipefail
+
+WS="${AIDC_SCAN_HOOK_WORKSPACE:-/workspace}"
+
+# Knob (sourced from the project env like the rest of the container config).
+if [[ -f "$WS/.ai-container/project.env" ]]; then
+  # shellcheck disable=SC1091
+  . "$WS/.ai-container/project.env" 2>/dev/null || true
+fi
+[[ "${AIDC_ENFORCE_SCAN_HOOK:-1}" == "1" ]] || exit 0
+
+# Hook payload arrives on stdin; honor the loop guard.
+payload="$(cat 2>/dev/null || true)"
+case "$payload" in
+  *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+esac
+
+command -v git >/dev/null 2>&1 || exit 0
+cd "$WS" 2>/dev/null || exit 0
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+
+# Nothing changed -> nothing to gate.
+changes="$(git status --porcelain 2>/dev/null || true)"
+[[ -n "$changes" ]] || exit 0
+
+log() {
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" \
+    >>"$WS/.ai-container/scan-hook.log" 2>/dev/null || true
+}
+
+# Debounce: if the tree is byte-identical to the last CLEAN pass, skip.
+cache_dir="${HOME:-/tmp}/.cache/aidc"
+mkdir -p "$cache_dir" 2>/dev/null || true
+state_file="$cache_dir/scan-hook-clean.hash"
+tree_hash="$({ git diff HEAD 2>/dev/null; printf '%s' "$changes"; } | sha256sum | cut -d' ' -f1)"
+if [[ -f "$state_file" && "$(cat "$state_file" 2>/dev/null)" == "$tree_hash" ]]; then
+  exit 0
+fi
+
+scan="$WS/.devcontainer/scripts/aidc-scan.sh"
+[[ -x "$scan" ]] || exit 0   # fail open: no scanner, no wedge
+
+out="$("$scan" --json 2>/dev/null)"
+rc=$?
+
+if [[ "$rc" -eq 0 ]]; then
+  printf '%s' "$tree_hash" >"$state_file" 2>/dev/null || true
+  log "clean"
+  exit 0
+fi
+
+if [[ "$rc" -eq 1 ]]; then
+  log "findings $out"
+  {
+    echo "aidc-scan found security findings above LOW in the changed files:"
+    printf '%s\n' "$out"
+    echo "Run aidc-scan for the full report. Fix the findings (or get explicit user confirmation to defer them), then finish."
+  } >&2
+  exit 2
+fi
+
+# Infrastructure error (rc >= 2): fail open, loudly in the log only.
+log "error rc=$rc (fail-open)"
+exit 0

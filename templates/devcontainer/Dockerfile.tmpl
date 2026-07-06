@@ -43,8 +43,38 @@ RUN apt-get update \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
+# Download-and-verify helper used by every pinned tool below. Fails the build
+# on checksum mismatch. The literal sha "SKIP" disables verification — only
+# for ad-hoc `latest` version overrides; never commit a SKIP.
+# To bump any pinned tool: run scripts/update-pins.sh (prints fresh ARG lines;
+# --write applies them), rebuild, commit.
+COPY --chown=root:root <<'EOF' /usr/local/bin/aidc-fetch-verified
+#!/bin/sh
+# usage: aidc-fetch-verified <url> <dest> <sha256|SKIP>
+set -eu
+url="$1"; dest="$2"; sha="$3"
+curl -fsSL "$url" -o "$dest"
+if [ "$sha" = "SKIP" ]; then
+  echo "aidc-fetch-verified: WARNING: checksum verification SKIPPED for $url" >&2
+  exit 0
+fi
+echo "$sha  $dest" | sha256sum -c - >/dev/null || {
+  echo "aidc-fetch-verified: checksum mismatch for $url" >&2
+  rm -f "$dest"
+  exit 1
+}
+EOF
+RUN chmod 0755 /usr/local/bin/aidc-fetch-verified
+
+ARG GIT_DELTA_SHA256_AMD64=1658c7b61825d411b50734f34016101309e4b6e7f5799944cf8e4ac542cebd7f
+ARG GIT_DELTA_SHA256_ARM64=937781aa7788e1510858743fff6c9a8b4a69fe0a22a7c8a69493e633227939a9
 RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb \
+    && case "$ARCH" in \
+         amd64) DELTA_SHA="$GIT_DELTA_SHA256_AMD64" ;; \
+         arm64) DELTA_SHA="$GIT_DELTA_SHA256_ARM64" ;; \
+         *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+       esac \
+    && aidc-fetch-verified "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" /tmp/git-delta.deb "$DELTA_SHA" \
     && dpkg -i /tmp/git-delta.deb \
     && rm /tmp/git-delta.deb
 
@@ -75,53 +105,94 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
 
 # Supply-chain guardrails: pmg intercepts npm/pip/uv/etc. and runs vet checks
 # before installs. Binaries installed system-wide; shell/shim wiring done
-# per-user below.
-RUN curl -fsSL https://raw.githubusercontent.com/safedep/pmg/main/install.sh | sh
+# per-user below. Pinned release artifact, checksum-verified (previously a
+# floating `main`-branch curl|sh installer).
+ARG PMG_VERSION=v0.21.3
+ARG PMG_SHA256_AMD64=6cd4ce75d187c6a3cd4082821b4341401f2e246d848338691b2a5927a5a1d21e
+ARG PMG_SHA256_ARM64=2c5b842ef1290c7d2ba3435dec542c04f2093bc9d81520226683f215c57a6868
+RUN ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) PMG_ASSET="pmg_Linux_x86_64.tar.gz"; PMG_SHA="$PMG_SHA256_AMD64" ;; \
+         arm64) PMG_ASSET="pmg_Linux_arm64.tar.gz"; PMG_SHA="$PMG_SHA256_ARM64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && if [ "$PMG_VERSION" = "latest" ]; then \
+         PMG_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/safedep/pmg/releases/latest | sed 's|.*/||')"; PMG_SHA="SKIP"; \
+       else \
+         PMG_TAG="$PMG_VERSION"; \
+       fi \
+    && aidc-fetch-verified "https://github.com/safedep/pmg/releases/download/${PMG_TAG}/${PMG_ASSET}" /tmp/pmg.tar.gz "$PMG_SHA" \
+    && tar -xzf /tmp/pmg.tar.gz -C /usr/local/bin pmg \
+    && chmod 0755 /usr/local/bin/pmg \
+    && rm /tmp/pmg.tar.gz
 
 # Pinned. To bump: check https://github.com/safedep/vet/releases for the
 # newest tag, update VET_VERSION, rebuild, and commit. "latest" is honoured
 # for ad-hoc overrides but resolves at build time, which defeats the pin —
 # avoid in committed configs.
 ARG VET_VERSION=v1.17.3
+ARG VET_SHA256_AMD64=b126d5e0d4abda882437f911c8e3702709ed4ed529461afdea494e984cac655d
+ARG VET_SHA256_ARM64=409be327ac16c9cd15debe6fc54baf32968480319808b1893b9650092bdb9ccc
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
-         amd64) VET_ARCH="x86_64" ;; \
-         arm64) VET_ARCH="arm64" ;; \
+         amd64) VET_ARCH="x86_64"; VET_SHA="$VET_SHA256_AMD64" ;; \
+         arm64) VET_ARCH="arm64"; VET_SHA="$VET_SHA256_ARM64" ;; \
          *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
        esac \
     && if [ "$VET_VERSION" = "latest" ]; then \
-         VET_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/safedep/vet/releases/latest | sed 's|.*/||')"; \
+         VET_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/safedep/vet/releases/latest | sed 's|.*/||')"; VET_SHA="SKIP"; \
        else \
          VET_TAG="$VET_VERSION"; \
        fi \
-    && curl -fsSL "https://github.com/safedep/vet/releases/download/${VET_TAG}/vet_Linux_${VET_ARCH}.tar.gz" -o /tmp/vet.tar.gz \
+    && aidc-fetch-verified "https://github.com/safedep/vet/releases/download/${VET_TAG}/vet_Linux_${VET_ARCH}.tar.gz" /tmp/vet.tar.gz "$VET_SHA" \
     && tar -xzf /tmp/vet.tar.gz -C /usr/local/bin vet \
     && chmod 0755 /usr/local/bin/vet \
     && rm /tmp/vet.tar.gz
 
 # Always-on security tooling: semgrep (SAST), gitleaks + trufflehog (secrets).
-# SCA is handled by vet/pmg above; this layer covers code-pattern and secret scans.
+# SCA is handled by vet/pmg above; this layer covers code-pattern and secret
+# scans. trufflehog is a pinned, checksum-verified release artifact
+# (previously a floating `main`-branch curl|sh installer).
+ARG TRUFFLEHOG_VERSION=v3.95.8
+ARG TRUFFLEHOG_SHA256_AMD64=136c42933697ab2e09402d003ff4259086312b80cb671e7d9ab05477597bc4f0
+ARG TRUFFLEHOG_SHA256_ARM64=49231b33cdd49dee4e98c7efc9acfb16e8d08ac5fed84bf7e983656487a96b98
 RUN uv tool install semgrep \
-    && curl -fsSL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
-       | sh -s -- -b /usr/local/bin
+    && ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) TH_ARCH="amd64"; TH_SHA="$TRUFFLEHOG_SHA256_AMD64" ;; \
+         arm64) TH_ARCH="arm64"; TH_SHA="$TRUFFLEHOG_SHA256_ARM64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && if [ "$TRUFFLEHOG_VERSION" = "latest" ]; then \
+         TH_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/trufflesecurity/trufflehog/releases/latest | sed 's|.*/||')"; TH_SHA="SKIP"; \
+       else \
+         TH_TAG="$TRUFFLEHOG_VERSION"; \
+       fi \
+    && TH_VER="${TH_TAG#v}" \
+    && aidc-fetch-verified "https://github.com/trufflesecurity/trufflehog/releases/download/${TH_TAG}/trufflehog_${TH_VER}_linux_${TH_ARCH}.tar.gz" /tmp/trufflehog.tar.gz "$TH_SHA" \
+    && tar -xzf /tmp/trufflehog.tar.gz -C /usr/local/bin trufflehog \
+    && chmod 0755 /usr/local/bin/trufflehog \
+    && rm /tmp/trufflehog.tar.gz
 
 # Pinned. To bump: check https://github.com/gitleaks/gitleaks/releases for the
 # newest tag, update GITLEAKS_VERSION, rebuild, and commit. "latest" still
 # works for ad-hoc overrides but resolves at build time and breaks the pin.
 ARG GITLEAKS_VERSION=v8.30.1
+ARG GITLEAKS_SHA256_AMD64=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+ARG GITLEAKS_SHA256_ARM64=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
-         amd64) GL_ARCH="x64" ;; \
-         arm64) GL_ARCH="arm64" ;; \
+         amd64) GL_ARCH="x64"; GL_SHA="$GITLEAKS_SHA256_AMD64" ;; \
+         arm64) GL_ARCH="arm64"; GL_SHA="$GITLEAKS_SHA256_ARM64" ;; \
          *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
        esac \
     && if [ "$GITLEAKS_VERSION" = "latest" ]; then \
-         GL_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/gitleaks/gitleaks/releases/latest | sed 's|.*/||')"; \
+         GL_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/gitleaks/gitleaks/releases/latest | sed 's|.*/||')"; GL_SHA="SKIP"; \
        else \
          GL_TAG="$GITLEAKS_VERSION"; \
        fi \
     && GL_VER="${GL_TAG#v}" \
-    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${GL_TAG}/gitleaks_${GL_VER}_linux_${GL_ARCH}.tar.gz" -o /tmp/gitleaks.tar.gz \
+    && aidc-fetch-verified "https://github.com/gitleaks/gitleaks/releases/download/${GL_TAG}/gitleaks_${GL_VER}_linux_${GL_ARCH}.tar.gz" /tmp/gitleaks.tar.gz "$GL_SHA" \
     && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
     && chmod 0755 /usr/local/bin/gitleaks \
     && rm /tmp/gitleaks.tar.gz
@@ -133,17 +204,52 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # build steps and every user share them.
 # Pinned. To bump: check https://github.com/anchore/syft/releases and
 # https://github.com/anchore/grype/releases, update the ARG, rebuild, commit.
+# Direct release artifacts, checksum-verified (previously vendor installer
+# scripts fetched from `main`, which could bypass the version pin).
 ARG SYFT_VERSION=v1.18.1
+ARG SYFT_SHA256_AMD64=066c251652221e4d44fcc4d115ce3df33a91769da38c830a8533199db2f65aab
+ARG SYFT_SHA256_ARM64=cd228306e5cb0654baecb454f76611606b84899d27fa9ceb7da4df46b94fe84e
 ARG GRYPE_VERSION=v0.87.0
-RUN curl -fsSL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-      | sh -s -- -b /usr/local/bin "$SYFT_VERSION" \
-    && curl -fsSL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-      | sh -s -- -b /usr/local/bin "$GRYPE_VERSION"
+ARG GRYPE_SHA256_AMD64=be710d15f5477e5c77ce03d14e480263415d7ab135e04b8483663f688823087d
+ARG GRYPE_SHA256_ARM64=3c64dc19d0dab8a1ab30860c9f5167383088d009528054b3854c56aac3574948
+RUN ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) A_ARCH="amd64"; SYFT_SHA="$SYFT_SHA256_AMD64"; GRYPE_SHA="$GRYPE_SHA256_AMD64" ;; \
+         arm64) A_ARCH="arm64"; SYFT_SHA="$SYFT_SHA256_ARM64"; GRYPE_SHA="$GRYPE_SHA256_ARM64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && SYFT_VER="${SYFT_VERSION#v}" \
+    && aidc-fetch-verified "https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/syft_${SYFT_VER}_linux_${A_ARCH}.tar.gz" /tmp/syft.tar.gz "$SYFT_SHA" \
+    && tar -xzf /tmp/syft.tar.gz -C /usr/local/bin syft \
+    && chmod 0755 /usr/local/bin/syft \
+    && GRYPE_VER="${GRYPE_VERSION#v}" \
+    && aidc-fetch-verified "https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}/grype_${GRYPE_VER}_linux_${A_ARCH}.tar.gz" /tmp/grype.tar.gz "$GRYPE_SHA" \
+    && tar -xzf /tmp/grype.tar.gz -C /usr/local/bin grype \
+    && chmod 0755 /usr/local/bin/grype \
+    && rm /tmp/syft.tar.gz /tmp/grype.tar.gz
 
 # Rust Token Killer: CLI proxy that cuts token usage on dev operations.
-# Env var goes on the sh side of the pipe so the installer (not curl) sees it.
-RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh \
-    | RTK_INSTALL_DIR=/usr/local/bin sh
+# Pinned release artifact, checksum-verified (previously a floating
+# `master`-branch curl|sh installer). Note the vendor's per-arch targets:
+# musl for x86_64, gnu for aarch64 — that is what rtk publishes.
+ARG RTK_VERSION=v0.43.0
+ARG RTK_SHA256_AMD64=ff8a1e7766496e175291a85aeca1dc97c9ff6df33e51e5893d1fbc78fea2a609
+ARG RTK_SHA256_ARM64=5519f7ca12e5c143a609f0d28a0a77b97413a8dce31c2681f1a41c24519a8731
+RUN ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) RTK_TARGET="x86_64-unknown-linux-musl"; RTK_SHA="$RTK_SHA256_AMD64" ;; \
+         arm64) RTK_TARGET="aarch64-unknown-linux-gnu"; RTK_SHA="$RTK_SHA256_ARM64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && if [ "$RTK_VERSION" = "latest" ]; then \
+         RTK_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/rtk-ai/rtk/releases/latest | sed 's|.*/||')"; RTK_SHA="SKIP"; \
+       else \
+         RTK_TAG="$RTK_VERSION"; \
+       fi \
+    && aidc-fetch-verified "https://github.com/rtk-ai/rtk/releases/download/${RTK_TAG}/rtk-${RTK_TARGET}.tar.gz" /tmp/rtk.tar.gz "$RTK_SHA" \
+    && tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk \
+    && chmod 0755 /usr/local/bin/rtk \
+    && rm /tmp/rtk.tar.gz
 
 RUN mkdir -p /commandhistory \
     && touch /commandhistory/.bash_history /commandhistory/.zsh_history \
@@ -210,11 +316,24 @@ ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/
 RUN pmg setup install \
     && pmg setup doctor || true
 
-# Coding agents as native prebuilt binaries. Each installer drops a binary into
-# ~/.local/bin (already on PATH) via plain curl — no npm dependency resolution,
-# so pmg has nothing to vet here; the "pmg first" invariant above still holds.
-# Grok's binary is forced into ~/.local/bin via GROK_BIN_DIR so the grok_home
-# volume mounted at ~/.grok at runtime cannot shadow it.
+# Coding agents as native prebuilt binaries, version-pinned. Each installer is
+# fetched to a file and then executed (never piped) so the executed bytes can
+# be inspected. Version contracts verified against each vendor's installer:
+#   claude:   positional arg (stable|latest|X.Y.Z); verifies the binary against
+#             its manifest SHA256 internally.
+#   codex:    --release X.Y.Z → github.com/openai/codex release rust-vX.Y.Z.
+#   opencode: VERSION env var → github.com/anomalyco/opencode release.
+#   grok:     positional arg X.Y.Z (no vendor checksum — TLS + version pin only).
+#   cursor:   NO version pin available from the vendor — documented exception,
+#             see docs/security.md (Image supply chain).
+# No npm dependency resolution here, so pmg has nothing to vet; the "pmg
+# first" invariant above still holds. Grok's binary is forced into
+# ~/.local/bin via GROK_BIN_DIR so the grok_home volume mounted at ~/.grok at
+# runtime cannot shadow it.
+ARG CLAUDE_VERSION=2.1.201
+ARG CODEX_VERSION=0.142.5
+ARG OPENCODE_VERSION=1.17.13
+ARG GROK_VERSION=0.2.87
 RUN mkdir -p \
       /home/vscode/.local/bin \
       /home/vscode/.claude \
@@ -222,12 +341,18 @@ RUN mkdir -p \
       /home/vscode/.config/opencode \
       /home/vscode/.cursor-agent \
       /home/vscode/.grok \
-    && curl -fsSL https://claude.ai/install.sh | bash \
-    && curl -fsSL https://chatgpt.com/codex/install.sh | sh \
-    && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
-    && curl -fsS https://cursor.com/install | bash \
+    && curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
+    && bash /tmp/install-claude.sh "$CLAUDE_VERSION" \
+    && curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
+    && sh /tmp/install-codex.sh --release "$CODEX_VERSION" \
+    && curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh \
+    && VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path \
+    && curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh \
+    && bash /tmp/install-cursor.sh \
     && { cursor-agent --version || true; } \
-    && curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/home/vscode/.local/bin bash
+    && curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
+    && GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" \
+    && rm -f /tmp/install-*.sh
 
 # Auto-detected toolchains. aidc fills AIDC_TOOLCHAINS by scanning the
 # workspace for marker files (go.mod, Cargo.toml, etc.). Override per repo

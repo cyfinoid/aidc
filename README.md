@@ -76,9 +76,12 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 
 ## Documentation
 
-- [`docs/install.md`](docs/install.md) — prereqs, install, daily commands, what lives where, per-project customisation, cleanup
+- [`docs/install.md`](docs/install.md) — prereqs, platform matrix, install, daily commands, what lives where, per-project customisation, cleanup
 - [`docs/claude-profiles.md`](docs/claude-profiles.md) — alternate Claude API targets, local-model profiles, one-time OAuth login, session sync
-- [`docs/security.md`](docs/security.md) — scanners, supply-chain guardrails, agent guardrails (rtk), opt-in egress firewall
+- [`docs/security.md`](docs/security.md) — `aidc scan`, scanners, image supply chain, container hardening, agent guardrails (rtk), opt-in egress firewall
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — symptom → cause → fix for the common failures (`aidc doctor` first)
+- [`docs/uninstall.md`](docs/uninstall.md) — per-project and host-wide removal
+- [`docs/releasing.md`](docs/releasing.md) — how releases are cut
 - [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md) — host-clipboard → container PNG paste bridge
 - [`CHANGELOG.md`](CHANGELOG.md) — high-level release notes; [`DETAILED_CHANGELOG.md`](DETAILED_CHANGELOG.md) — long-form per-change rationale
 - [`SECURITY.md`](SECURITY.md) — how to report vulnerabilities in aidc itself
@@ -104,6 +107,14 @@ aidc cursor
 aidc sync-claude-aliases
 aidc sync-config <claude|codex|opencode|grok|all>
 aidc sync-sessions [claude|codex|opencode|grok|all]
+aidc sbom
+aidc licenses [--fail]
+aidc scan [--all|--staged|paths...] [--json]
+aidc doctor
+aidc insights [--since DATE]
+aidc update
+aidc upgrade [--dry-run|--diff] [-y]
+aidc version
 ```
 
 `aidc status` shows the container + mounts/config for the current folder. `--global` lists every aidc container on the host with disk/CPU/memory and a totals line.
@@ -166,6 +177,7 @@ echo "AIDC_ISOLATE_VM=1" >> .ai-container/project.env
 ## Notes
 
 - Generated files are added to `.git/info/exclude` when the target directory is a git repo, so your project stays clean. The seeded project docs (`CHANGELOG.md`, `DETAILED_CHANGELOG.md`, `logs/`) are *not* excluded — they belong to your repo and are meant to be committed.
+- **Updating**: `aidc update` pulls the latest aidc (ff-only) and re-runs the installer; `aidc upgrade` then brings an existing project's scaffold up to the new templates — it shows a diff first, backs up anything it rewrites (to `.ai-container/backup/`), and never touches user-owned files. Implicit commands (`aidc up`, `aidc claude`, …) only *create missing* scaffold files and print a one-line notice when the scaffold is out of date; they never rewrite your files. `aidc doctor` diagnoses common setup problems.
 - Settings can be set host-wide in `~/.config/aidc/config.env` (universal defaults for every project) or per project in `.ai-container/project.env`, which overrides the global default. Both files are sourced for env vars like `AIDC_AUTO_SYNC_SESSIONS`, `AIDC_ENABLE_EGRESS_FIREWALL`, and `AIDC_ISOLATE_VM`.
 - Container egress is open by default; set `AIDC_ENABLE_EGRESS_FIREWALL=1` in `.ai-container/project.env` for a default-deny allowlist. See [`docs/security.md`](docs/security.md#optional-egress-firewall).
 - The host-clipboard bridge is **off by default** — no host clipboard socket is mounted into the container. Opt in per (re)create with `aidc up --clipboard` / `aidc rebuild --clipboard`, or persist `AIDC_ENABLE_CLIPBOARD=1` in `.ai-container/project.env`. See [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md).
