@@ -12,8 +12,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci/lib-common.sh
-. "$here/lib-common.sh"
+# shellcheck source=scripts/ci/aidc-lib-common.sh
+. "$here/aidc-lib-common.sh"
 
 sbom::require_tool jq
 
@@ -22,7 +22,7 @@ code_cdx="$out_dir/code.cdx.json"
 image_cdx="$out_dir/image.cdx.json"
 diff_json="$out_dir/diff.json"
 
-[[ -f "$code_cdx" ]] || sbom::die "missing $code_cdx (run sbom-code.sh first)"
+[[ -f "$code_cdx" ]] || sbom::die "missing $code_cdx (run aidc-sbom-code.sh first)"
 
 if [[ ! -f "$image_cdx" ]]; then
   sbom::log "no build-time SBOM ($image_cdx absent); skipping diff"

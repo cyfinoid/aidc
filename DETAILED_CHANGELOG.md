@@ -8,6 +8,188 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-07-08 — Fix: `aidc-scan` shim missing inside the container
+
+**Summary:** Every container-entering command (`aidc shell`/`exec`/`claude`/
+`codex`/`opencode`/`grok`/`cursor-agent`/`sbom`/`scan`/`licenses`) now
+re-asserts the in-container `aidc-scan` symlink synchronously, on the host, via
+their shared `ensure_container_running` chokepoint — so `aidc-scan` is always on
+PATH the first time you enter a container, not only after a full recreate.
+
+**Why:** A user hit `aidc-scan: command not found` inside a freshly started
+container. `aidc-scan` is not a binary — it's a symlink
+(`~/.local/bin/aidc-scan` → `/workspace/.devcontainer/scripts/aidc-scan.sh`)
+created by `bootstrap-state.sh`'s `init` dispatch (`install_aidc_scan_link`).
+Two structural gaps:
+1. **Race.** The container's compose `command:` is
+   `bootstrap-state.sh init && sleep infinity`, run asynchronously. `compose up
+   -d` returns as soon as the container *starts*, not when bootstrap *finishes*,
+   so `run_tool` can `exec claude` before the link is made — even on a genuine
+   first run.
+2. **Staleness.** `init` runs only at container (re)creation. A container built
+   before the scaffold gained `aidc-scan.sh` never gets the link, and
+   `install_aidc_scan_link`'s `[[ -f "$script" ]] || return 0` guard skips it
+   silently. Evidence on the dev box: `~/.local/bin/{claude,codex,grok}`
+   symlinks dated the container's build day, no `aidc-scan`, while
+   `.devcontainer/scripts/aidc-scan.sh` was dated days later.
+
+When the shim is missing the Stop-hook scan guardrail (which calls `aidc-scan`)
+silently no-ops (fails open), so this is a security-relevant reliability bug.
+
+**What changed:**
+- `lib/aidc/runtime.sh`: new `aidc::ensure_scan_link` runs a single idempotent
+  `compose exec … sh -c 'ln -sf …'` that (re)creates
+  `$AIDC_CONTAINER_HOME/.local/bin/aidc-scan` → the scaffold's `aidc-scan.sh`
+  when that script is present. It is called from `ensure_container_running` — the
+  single chokepoint every container-entering command passes through — after the
+  `up -d` block, so shell/exec/agents/sbom/… all get the shim. Because it is a
+  host-driven `docker exec` (a new process in the already-running container), it
+  does not depend on the async bootstrap having reached its link step, closing
+  the race deterministically. Non-fatal on failure (bootstrap remains a
+  fallback).
+- `tests/scan-link.test.sh`: asserts the exec shape (`exec -T … ln -sf` of the
+  scaffold path), `AIDC_CONTAINER_HOME` passthrough, non-fatal failure, and that
+  `ensure_container_running` wires the call.
+
+**Verification:**
+```
+bash tests/scan-link.test.sh                # 4 passed
+for t in tests/*.test.sh; do bash $t; done  # ALL TESTS PASS
+shellcheck -x --severity=warning lib/aidc/runtime.sh tests/scan-link.test.sh  # clean
+bash .devcontainer/scripts/aidc-scan.sh     # semgrep/gitleaks/shellcheck clean
+```
+
+**Notes:** Placed at `ensure_container_running` rather than only the agent path
+so `aidc shell`/`exec` and the rest also guarantee `aidc-scan` on PATH (the
+maintainer asked for it everywhere). `bootstrap-state.sh`'s
+`install_aidc_scan_link` is left as a belt-and-suspenders fallback (also serves
+non-aidc-launched execs). A cheap workaround for an already-running affected
+container: `ln -sf /workspace/.devcontainer/scripts/aidc-scan.sh
+~/.local/bin/aidc-scan`, or recreate with `aidc down && aidc up`.
+
+## 2026-07-07 — `aidc --debug` tracing (secret-safe)
+
+**Summary:** Added a global `--debug` flag that turns on `set -x` xtrace with a
+`file:line` PS4 and a handful of `aidc::debug` breadcrumbs, so a stalled run
+shows exactly where it stopped. Crucially, secret values never reach the trace.
+
+**Why:** A user reported `aidc claude` "getting stuck at getting auth from the
+macOS Keychain" on a fresh folder. Diagnosis: `aidc::resolve_claude_oauth_token`
+runs `security find-generic-password … -w`, and the `-w` read of the secret is
+gated by the Keychain item's ACL. When the calling binary (`/usr/bin/security`)
+isn't on that item's ACL — the usual case until the user clicks **Always
+Allow** once — macOS raises a blocking GUI approval dialog. `2>/dev/null` does
+not suppress it (it's a window-server dialog, not stderr), so the CLI hangs.
+It reads as "fresh folder" because `aidc claude` on a fresh folder is typically
+the first end-to-end run, i.e. the first time the CLI touches that item; once
+"Always Allow" adds `security` to the ACL, later runs don't prompt.
+(`aidc doctor`'s keychain check uses `security … ` **without** `-w` — metadata
+only, no ACL prompt — which is why doctor reports "token present" while the
+real path blocks.) There was no way to *see* this happening; hence `--debug`.
+
+**What changed:**
+- `lib/aidc.sh` `aidc::main`: parse leading global flags (`--debug` → set
+  `AIDC_DEBUG=1`) before the subcommand, so it never collides with a tool's own
+  args (`aidc claude -- …`). When on: `export AIDC_DEBUG`, set
+  `PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '`, print a one-line notice, `set -x`.
+- `lib/aidc/common.sh`: `aidc::debug` (stderr breadcrumb, no-op unless
+  `AIDC_DEBUG=1`) and the `aidc::secret_begin`/`aidc::secret_end` pair — the
+  latter suppresses xtrace across a secret-handling region and restores the
+  prior state (records it in `AIDC_XTRACE_SAVED`; regions must not span an early
+  `return` or nest).
+- Wrapped every token/secret touchpoint so `set -x` can't echo it:
+  `resolve_claude_oauth_token` (the "already set" check, the `-w` read, and the
+  export) in `profiles.sh`; the `run_tool` delivery/bootstrap conditionals
+  (replaced inline `[[ -n "$TOKEN" ]]` with a once-computed guarded
+  `have_oauth`); `deliver_claude_token`'s stdin pipe; `load_claude_profile_env`'s
+  `. "$env_file"`; and `doctor_check_keychain`'s token check. Added a keychain
+  breadcrumb that names the service/account and tells the user the hang is a
+  Keychain prompt (click Always Allow, or Ctrl-C and export the token).
+- Help: `aidc [--debug] <command>` usage line + a Notes paragraph.
+
+**Commands / verification:**
+```
+bash tests/debug-flag.test.sh   # 7 passed (incl. token-not-leaked-under-xtrace)
+for t in tests/*.test.sh; do bash $t; done   # ALL TESTS PASS
+shellcheck -x --severity=warning lib/aidc*.sh lib/aidc/*.sh tests/debug-flag.test.sh  # clean
+# manual: token present + xtrace on -> value appears 0 times in the trace
+bash .devcontainer/scripts/aidc-scan.sh   # semgrep/gitleaks/shellcheck clean
+```
+
+**Notes:** Blanket `set -x` is a genuine leak risk in this codebase — the token
+value is referenced in `[[ -n "$TOKEN" ]]` conditionals and assignments that
+xtrace expands verbatim — so the secret-region guard is load-bearing, not
+cosmetic. The Keychain **hang itself** is only diagnosed here, not fixed; a
+follow-up could wrap the `-w` read in a watchdog/timeout (macOS has no
+`timeout(1)`, so it'd need a bash-native killer) and fall back to interactive
+login. `--debug` is parsed only as a leading global flag (or `AIDC_DEBUG=1`),
+never trailing, so it can't be confused with args passed through to `claude`.
+
+## 2026-07-07 — Namespace scaffolded CI scripts; `aidc init --force`
+
+**Summary:** Two related fixes to `aidc init` ergonomics on a repo that
+already has files. (1) The six SBOM/license scripts scaffolded into
+`scripts/ci/` are renamed with an `aidc-` prefix so they stop colliding with
+a project's own CI helpers. (2) A new `-f/--force` flag lets `aidc init` adopt
+a directory that already has files at aidc-managed paths instead of aborting.
+
+**Why:** On a fresh checkout of a repo that ships its own
+`scripts/ci/lib-common.sh` (a very common CI-helper name), `aidc claude`
+auto-init'd, hit `aidc::check_init_conflicts`, and died with
+`refusing to overwrite existing file: …/scripts/ci/lib-common.sh`. The guard
+is correct — aidc must never silently clobber a user's file — but the
+collision was self-inflicted: aidc claimed generic, un-namespaced paths under
+the shared, committed `scripts/ci/` directory. Namespacing removes the
+collision at the source; `--force` is the escape hatch for the general case
+(any managed path already present).
+
+**What changed:**
+- Renamed (via `git mv`, in both `templates/ci/*.sh.tmpl` and the repo's own
+  dogfooded `scripts/ci/*.sh`): `lib-common`, `sbom-code`, `sbom-image`,
+  `sbom-diff`, `license-check`, `sbom-all` → each `aidc-`-prefixed. The `.sh`
+  working copies are byte-identical to their templates (`aidc::copy_template`
+  is a plain `cp`), so both were renamed and edited identically.
+- Updated every reference in lockstep (deliberately **not** the historical
+  `CHANGELOG.md`/`DETAILED_CHANGELOG.md` entries): the scripts' own `source`
+  lines and shellcheck directives, `AIDC_MANAGED_PATHS` +
+  `AIDC_OVERWRITE_TEMPLATE_MAP` in `lib/aidc/common.sh`, `aidc sbom` /
+  `aidc licenses` in `lib/aidc/runtime.sh`, the seeded `aidc-scan.sh` template,
+  the reference `.github/workflows/sbom.yml`, `templates/ci/github-sbom.yml.tmpl`,
+  `.github/workflows/aidc-e2e.yml`, `docs/security.md`, `lib/aidc.sh` help/notes,
+  and the `tests/` that source or name the scripts (including the render loop
+  in `tests/validate-scaffold.test.sh`).
+- `aidc::cmd_init` now parses `-f/--force` (and an optional `[path]`, either
+  order); `--force` skips `check_init_conflicts` and warns; unknown flags die
+  with the valid set. Help usage + a Notes paragraph document it.
+
+**Commands:**
+```
+# renames
+for f in lib-common sbom-code sbom-image sbom-diff license-check sbom-all; do
+  git mv templates/ci/$f.sh.tmpl templates/ci/aidc-$f.sh.tmpl
+  git mv scripts/ci/$f.sh        scripts/ci/aidc-$f.sh
+done
+# reference rewrite: sed -e 's|<name>.sh|aidc-<name>.sh|g' over the code
+# (changelogs excluded); see the file list in this session's log.
+```
+
+**Verification:**
+- `bash tests/init-force.test.sh` — 7 passed (new).
+- Full suite: every `tests/*.test.sh` green (validate-scaffold, license-check,
+  license-resolve, sbom-diff, upgrade, aidc-scan, scan-hook, cli-errors, …).
+- `grep` confirmed no un-prefixed `scripts/ci/<name>.sh` reference survives
+  outside the two changelog files, and no `aidc-aidc-` double prefix.
+- `bash .devcontainer/scripts/aidc-scan.sh` — semgrep/gitleaks/shellcheck
+  clean; language/dependency scanners skipped (no matching changes).
+
+**Notes:** `.devcontainer/scripts/aidc-scan.sh` is a git-excluded generated
+copy (read-only here) — the tracked source is
+`templates/devcontainer/scripts/aidc-scan.sh.tmpl`, which was updated.
+`scripts/ci/license-matrix.tsv` keeps its name (user-owned policy, not a
+script, and not the thing that collided). Existing aidc projects get the
+renamed files on their next `aidc upgrade`; the old un-prefixed copies are
+left in place for the user to delete (upgrade only writes mapped paths).
+
 ## 2026-07-06 — Agent-native guardrails: scan hook, MCP posture, insights
 
 **Summary:** Implemented `plans/roadmap-12-agent-native.md` — the final

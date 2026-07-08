@@ -85,11 +85,11 @@ Exit codes: `0` ok, `1` policy violation in `fail` mode, `2` tool missing / usag
 
 **The scripts:**
 
-- `scripts/ci/sbom-code.sh` — code-level SBOM in **both** CycloneDX (`code.cdx.json`) and SPDX (`code.spdx.json`), from one `syft` catalog so the two stay consistent.
-- `scripts/ci/sbom-image.sh` — build-time SBOM (`image.cdx.json`, `image.spdx.json`) from `AIDC_IMAGE_REF`. No-op when unset (projects with no Docker setup).
-- `scripts/ci/sbom-diff.sh` — diffs the code vs build SBOMs by component (added / removed / version-changed) into `diff.json`, so you can see exactly what the image build added over the source manifests.
-- `scripts/ci/license-check.sh` — the license gate. Resolves the project's own license (SPDX id from the `LICENSE` file or a manifest), builds a dependency license inventory from the SPDX SBOM, and flags any dependency whose license conflicts with the project license per `license-matrix.tsv`. Deterministic and offline; optionally enriched by `vet` when `AIDC_LICENSE_USE_VET=1`.
-- `scripts/ci/sbom-all.sh` — orchestrates all of the above; the single entry point any CI calls.
+- `scripts/ci/aidc-sbom-code.sh` — code-level SBOM in **both** CycloneDX (`code.cdx.json`) and SPDX (`code.spdx.json`), from one `syft` catalog so the two stay consistent.
+- `scripts/ci/aidc-sbom-image.sh` — build-time SBOM (`image.cdx.json`, `image.spdx.json`) from `AIDC_IMAGE_REF`. No-op when unset (projects with no Docker setup).
+- `scripts/ci/aidc-sbom-diff.sh` — diffs the code vs build SBOMs by component (added / removed / version-changed) into `diff.json`, so you can see exactly what the image build added over the source manifests.
+- `scripts/ci/aidc-license-check.sh` — the license gate. Resolves the project's own license (SPDX id from the `LICENSE` file or a manifest), builds a dependency license inventory from the SPDX SBOM, and flags any dependency whose license conflicts with the project license per `license-matrix.tsv`. Deterministic and offline; optionally enriched by `vet` when `AIDC_LICENSE_USE_VET=1`.
+- `scripts/ci/aidc-sbom-all.sh` — orchestrates all of the above; the single entry point any CI calls.
 
 **From the aidc CLI:**
 
@@ -100,7 +100,7 @@ aidc licenses                   # license check only, warn mode (fast dev-loop c
 aidc licenses --fail            # exit non-zero on a conflict (as CI would)
 ```
 
-**As early as possible.** The license check is meant to surface conflicts before they land. Three surfaces, all calling `license-check.sh`:
+**As early as possible.** The license check is meant to surface conflicts before they land. Three surfaces, all calling `aidc-license-check.sh`:
 
 1. Dev loop — `aidc licenses` (warns; exit 0).
 2. Agents — the "Security guardrails" block tells agents to run it when dependencies or the license change.
@@ -110,11 +110,11 @@ aidc licenses --fail            # exit non-zero on a conflict (as CI would)
    #!/usr/bin/env bash
    # Warn on license conflicts when a manifest or LICENSE changes.
    if git diff --cached --name-only | grep -Eq '(^|/)(package\.json|go\.mod|requirements\.txt|pyproject\.toml|Cargo\.toml|Gemfile|composer\.json|LICENSE)'; then
-     ./scripts/ci/license-check.sh || true
+     ./scripts/ci/aidc-license-check.sh || true
    fi
    ```
 
-4. CI — the scaffolded `.github/workflows/sbom.yml` (and the equivalent for any CI) runs `sbom-all.sh` with `AIDC_LICENSE_MODE=fail`.
+4. CI — the scaffolded `.github/workflows/sbom.yml` (and the equivalent for any CI) runs `aidc-sbom-all.sh` with `AIDC_LICENSE_MODE=fail`.
 
 **Tuning the policy.** `license-matrix.tsv` is TAB-separated `project-license <TAB> conflicting-dep-license` rows; `*` in the project column matches any project. The shipped default is conservative (permissive projects pulling in strong copyleft; AGPL flagged everywhere) and is **not legal advice** — edit it for your project. Note the check is deliberately conservative with dual-license expressions like `(MIT OR GPL-2.0-only)`: it flags the row if *any* branch conflicts, so review those by hand.
 

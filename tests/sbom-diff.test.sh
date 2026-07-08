@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Unit tests for scripts/ci/sbom-diff.sh.
+# Unit tests for scripts/ci/aidc-sbom-diff.sh.
 #
 # Offline: uses pre-baked CycloneDX fixtures. Run with:
 #   bash tests/sbom-diff.test.sh
@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DIFF="$REPO_ROOT/scripts/ci/sbom-diff.sh"
+DIFF="$REPO_ROOT/scripts/ci/aidc-sbom-diff.sh"
 FIX="$SCRIPT_DIR/fixtures/sbom-diff"
 
 TMP_ROOT="$(mktemp -d)"

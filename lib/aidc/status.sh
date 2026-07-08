@@ -77,9 +77,13 @@ aidc::doctor_check_keychain() {
   fi
   local svc="${AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE:-claude-code-oauth-token}"
   local account="${USER:-$(id -un 2>/dev/null || true)}"
+  local have_tok=0
+  aidc::secret_begin
+  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && have_tok=1
+  aidc::secret_end
   if [[ -z "$svc" ]]; then
     aidc::doctor_report ok keychain "lookup disabled (AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE empty)"
-  elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+  elif [[ "$have_tok" -eq 1 ]]; then
     aidc::doctor_report ok keychain "CLAUDE_CODE_OAUTH_TOKEN already set in this shell"
   elif security find-generic-password -a "$account" -s "$svc" >/dev/null 2>&1; then
     aidc::doctor_report ok keychain "Claude OAuth token present (service $svc)"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Unit tests for scripts/ci/license-check.sh.
+# Unit tests for scripts/ci/aidc-license-check.sh.
 #
 # Offline: feeds pre-baked SPDX SBOM fixtures via AIDC_LICENSE_SBOM so no syft
 # or network is needed. Run with: bash tests/license-check.test.sh
@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CHECK="$REPO_ROOT/scripts/ci/license-check.sh"
+CHECK="$REPO_ROOT/scripts/ci/aidc-license-check.sh"
 FIX="$SCRIPT_DIR/fixtures"
 
 TMP_ROOT="$(mktemp -d)"
@@ -22,7 +22,7 @@ FAILED_FILE="$TMP_ROOT/failed"; : >"$FAILED_FILE"
 fail() { printf 'FAIL: %s\n' "$1" >&2; printf '%s\n' "$1" >>"$FAILED_FILE"; }
 ok()   { printf 'ok: %s\n' "$1"; printf '%s\n' "$1" >>"$PASSED_FILE"; }
 
-# Run license-check.sh with a fresh output dir; sets RC and REPORT.
+# Run aidc-license-check.sh with a fresh output dir; sets RC and REPORT.
 # Args: <spdx-fixture> <project-license> <mode> [extra env assignments...]
 run_check() {
   local spdx="$1" plicense="$2" mode="$3"; shift 3

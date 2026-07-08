@@ -119,14 +119,32 @@ aidc::cmd_upgrade() {
 }
 
 aidc::cmd_init() {
+  local force=0
+  local workspace_arg=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      --) shift; [[ $# -gt 0 ]] && workspace_arg="$1"; break ;;
+      -*) aidc::die "unknown init flag: $1 (valid: -f/--force)" ;;
+      *) workspace_arg="$1"; shift ;;
+    esac
+  done
+
   local workspace
-  workspace="$(aidc::resolve_workspace_arg "${1:-}")"
+  workspace="$(aidc::resolve_workspace_arg "$workspace_arg")"
 
   aidc::need_cmd docker git
   aidc::ensure_host_config_dirs
   aidc::ensure_claude_profile_examples
   aidc::sync_claude_aliases
-  aidc::check_init_conflicts "$workspace"
+  # --force adopts a directory that already has files at aidc-managed paths,
+  # overwriting them (scaffold mode is "overwrite" during init). Without it,
+  # a pre-existing managed file is a hard stop so we never clobber silently.
+  if [[ "$force" -eq 1 ]]; then
+    aidc::warn "--force: overwriting any existing aidc-managed files in $workspace"
+  else
+    aidc::check_init_conflicts "$workspace"
+  fi
 
   local repo_slug
   repo_slug="$(aidc::repo_slug "$workspace")"

@@ -48,12 +48,12 @@ AIDC_MANAGED_PATHS=(
   ".devcontainer/scripts/aidc-scan-hook.sh"
   ".ai-container/project.env"
   ".cursor/rules/00-core-logics.mdc"
-  "scripts/ci/lib-common.sh"
-  "scripts/ci/sbom-code.sh"
-  "scripts/ci/sbom-image.sh"
-  "scripts/ci/sbom-diff.sh"
-  "scripts/ci/license-check.sh"
-  "scripts/ci/sbom-all.sh"
+  "scripts/ci/aidc-lib-common.sh"
+  "scripts/ci/aidc-sbom-code.sh"
+  "scripts/ci/aidc-sbom-image.sh"
+  "scripts/ci/aidc-sbom-diff.sh"
+  "scripts/ci/aidc-license-check.sh"
+  "scripts/ci/aidc-sbom-all.sh"
 )
 
 AIDC_MERGE_PATHS=(
@@ -77,12 +77,12 @@ AIDC_OVERWRITE_TEMPLATE_MAP=(
   "templates/devcontainer/scripts/aidc-scan.sh.tmpl:.devcontainer/scripts/aidc-scan.sh:0755"
   "templates/devcontainer/scripts/aidc-scan-hook.sh.tmpl:.devcontainer/scripts/aidc-scan-hook.sh:0755"
   "templates/cursor-rules/00-core-logics.mdc.tmpl:.cursor/rules/00-core-logics.mdc:0644"
-  "templates/ci/lib-common.sh.tmpl:scripts/ci/lib-common.sh:0755"
-  "templates/ci/sbom-code.sh.tmpl:scripts/ci/sbom-code.sh:0755"
-  "templates/ci/sbom-image.sh.tmpl:scripts/ci/sbom-image.sh:0755"
-  "templates/ci/sbom-diff.sh.tmpl:scripts/ci/sbom-diff.sh:0755"
-  "templates/ci/license-check.sh.tmpl:scripts/ci/license-check.sh:0755"
-  "templates/ci/sbom-all.sh.tmpl:scripts/ci/sbom-all.sh:0755"
+  "templates/ci/aidc-lib-common.sh.tmpl:scripts/ci/aidc-lib-common.sh:0755"
+  "templates/ci/aidc-sbom-code.sh.tmpl:scripts/ci/aidc-sbom-code.sh:0755"
+  "templates/ci/aidc-sbom-image.sh.tmpl:scripts/ci/aidc-sbom-image.sh:0755"
+  "templates/ci/aidc-sbom-diff.sh.tmpl:scripts/ci/aidc-sbom-diff.sh:0755"
+  "templates/ci/aidc-license-check.sh.tmpl:scripts/ci/aidc-license-check.sh:0755"
+  "templates/ci/aidc-sbom-all.sh.tmpl:scripts/ci/aidc-sbom-all.sh:0755"
 )
 
 # "create" = only materialize missing files (implicit paths: up/agent
@@ -307,4 +307,31 @@ aidc::warn() {
 aidc::die() {
   printf '[aidc] error: %s\n' "$*" >&2
   exit 1
+}
+
+# Debug breadcrumb — printed to stderr only when `aidc --debug` (or AIDC_DEBUG=1)
+# is active. Cheap no-op otherwise, so it is safe to sprinkle at decision points.
+# Never pass secret values here.
+aidc::debug() {
+  [[ "${AIDC_DEBUG:-0}" == "1" ]] || return 0
+  printf '[aidc] debug: %s\n' "$*" >&2
+}
+
+# Secret-region guard. `--debug` turns on shell xtrace, which would otherwise
+# echo the OAuth token / profile API keys the moment they appear in an
+# expansion. Wrap any code that touches a secret value in:
+#     aidc::secret_begin;  <secret-handling lines>;  aidc::secret_end
+# secret_begin suppresses xtrace and records whether it was on; secret_end
+# restores it. Regions must not span an early `return` and must not nest.
+aidc::secret_begin() {
+  AIDC_XTRACE_SAVED=0
+  case "$-" in
+    *x*) AIDC_XTRACE_SAVED=1; set +x ;;
+  esac
+}
+
+aidc::secret_end() {
+  [[ "${AIDC_XTRACE_SAVED:-0}" -eq 1 ]] && set -x
+  AIDC_XTRACE_SAVED=0
+  return 0
 }

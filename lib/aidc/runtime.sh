@@ -176,6 +176,24 @@ aidc::compose_exec() {
   aidc::compose "$workspace" exec ${AIDC_EXEC_ENV_ARGS[@]+"${AIDC_EXEC_ENV_ARGS[@]}"} workspace "$@"
 }
 
+# The `aidc-scan` PATH shim is created by bootstrap-state.sh's init dispatch,
+# which runs asynchronously and only at container (re)creation. That leaves two
+# gaps: (1) a race — `compose up -d` returns before bootstrap finishes, so on a
+# first run a shell/agent can enter before the symlink exists; and (2) staleness
+# — a container reused from before the scaffold gained aidc-scan.sh never gets
+# the link at all. ensure_container_running calls this on every container-entering
+# command (shell, exec, agents, sbom, …) so `aidc-scan` (and the Stop-hook
+# guardrail that invokes it) is always on PATH. Idempotent; non-fatal on failure.
+aidc::ensure_scan_link() {
+  local workspace="$1"
+  local home="${AIDC_CONTAINER_HOME:-/home/vscode}"
+  aidc::compose "$workspace" exec -T workspace sh -c '
+    script=/workspace/.devcontainer/scripts/aidc-scan.sh
+    [ -f "$script" ] || exit 0
+    mkdir -p "$1/.local/bin" && ln -sf "$script" "$1/.local/bin/aidc-scan"
+  ' aidc-ensure-scan-link "$home" >/dev/null 2>&1 || true
+}
+
 aidc::cmd_exec() {
   local workspace
   workspace="$(aidc::default_workspace)"
@@ -211,7 +229,7 @@ aidc::cmd_sbom() {
   fi
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_sbom_env_args
-  aidc::compose_exec "$workspace" bash /workspace/scripts/ci/sbom-all.sh "$@"
+  aidc::compose_exec "$workspace" bash /workspace/scripts/ci/aidc-sbom-all.sh "$@"
 }
 
 # Run the changed-file-scoped scanner suite inside the container. All logic
@@ -250,7 +268,7 @@ aidc::cmd_licenses() {
   if [[ -n "$mode" ]]; then
     AIDC_EXEC_ENV_ARGS+=("-e" "AIDC_LICENSE_MODE=$mode")
   fi
-  aidc::compose_exec "$workspace" bash /workspace/scripts/ci/license-check.sh ${args[@]+"${args[@]}"}
+  aidc::compose_exec "$workspace" bash /workspace/scripts/ci/aidc-license-check.sh ${args[@]+"${args[@]}"}
 }
 
 aidc::cmd_claude() {
@@ -333,13 +351,21 @@ aidc::run_tool() {
     aidc::resolve_claude_oauth_token
   fi
 
+  # Snapshot "is an OAuth token present" once, xtrace-suppressed, so the token
+  # value never reaches a --debug trace via the delivery/bootstrap conditionals
+  # below (which would otherwise expand it inside [[ -n "$TOKEN" ]]).
+  local have_oauth=0
+  aidc::secret_begin
+  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && have_oauth=1
+  aidc::secret_end
+
   # Claude OAuth token delivery. Default "file": the token travels over the
   # exec's stdin into a 0600 tmpfs file (/dev/shm) and is read — then deleted —
   # inside the container, so it never appears in docker exec metadata or in
   # any argv. AIDC_TOKEN_DELIVERY=env restores the legacy -e passthrough.
   local token_delivery="${AIDC_TOKEN_DELIVERY:-file}"
   local claude_token_via_file=0
-  if [[ "$tool" == "claude" && "$token_delivery" != "env" && -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+  if [[ "$tool" == "claude" && "$token_delivery" != "env" && "$have_oauth" -eq 1 ]]; then
     claude_token_via_file=1
   fi
 
@@ -362,7 +388,7 @@ aidc::run_tool() {
     fi
   fi
 
-  if [[ "$tool" == "claude" && -z "$profile" && -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+  if [[ "$tool" == "claude" && -z "$profile" && "$have_oauth" -eq 1 ]]; then
     if [[ "$claude_token_via_file" -eq 1 ]]; then
       aidc::compose "$workspace" exec -T workspace \
         bash -c "$AIDC_CLAUDE_TOKEN_SNIPPET; exec aidc-bootstrap-claude" || \
@@ -422,8 +448,13 @@ aidc::run_tool() {
 # 0600 tmpfs file. Never on any argv, never in exec env metadata.
 aidc::deliver_claude_token() {
   local workspace="$1"
+  # xtrace-suppressed: the token value is piped on stdin here.
+  aidc::secret_begin
   printf '%s' "$CLAUDE_CODE_OAUTH_TOKEN" | aidc::compose "$workspace" exec -T workspace \
     sh -c 'umask 077 && cat >/dev/shm/aidc-oauth-token'
+  local rc=$?
+  aidc::secret_end
+  return "$rc"
 }
 
 # Drop profile-sourced variables (API keys etc.) from aidc's own environment
@@ -438,6 +469,7 @@ aidc::scrub_profile_env() {
 
 aidc::ensure_container_running() {
   local workspace="$1"
+  aidc::debug "ensuring workspace ready: $workspace"
   aidc::ensure_workspace_ready "$workspace"
 
   if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
@@ -445,11 +477,17 @@ aidc::ensure_container_running() {
   fi
 
   if [[ -z "$(aidc::compose_capture "$workspace" ps -q workspace)" ]]; then
+    aidc::debug "container not running — building and starting (first run can take minutes)"
     aidc::compose "$workspace" up -d --build workspace
     # Only on the down→up transition (not every exec), so we recover prior
     # transcripts without adding a sync to each command.
     aidc::auto_sync_sessions "$workspace" all
   fi
+
+  # Every container-entering command passes through here, so this is the single
+  # chokepoint that guarantees the aidc-scan shim on PATH (shell, exec, agents,
+  # sbom, …), closing the async-bootstrap race and stale-container gaps.
+  aidc::ensure_scan_link "$workspace"
 }
 
 # Build the -f file chain for docker compose. The base compose.yaml is always

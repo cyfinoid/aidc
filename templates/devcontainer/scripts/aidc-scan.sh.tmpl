@@ -195,16 +195,16 @@ fi
 # vet + SBOM/license gate: only when manifests or the LICENSE changed.
 if in_scope_matching "$MANIFEST_ERE"; then
   run_scanner vet vet vet scan -D .
-  if [[ -x scripts/ci/license-check.sh ]]; then
-    if [[ -x scripts/ci/sbom-code.sh ]]; then
+  if [[ -x scripts/ci/aidc-license-check.sh ]]; then
+    if [[ -x scripts/ci/aidc-sbom-code.sh ]]; then
       run_scanner license-check bash bash -c \
-        'scripts/ci/sbom-code.sh >/dev/null && AIDC_LICENSE_MODE=fail scripts/ci/license-check.sh'
+        'scripts/ci/aidc-sbom-code.sh >/dev/null && AIDC_LICENSE_MODE=fail scripts/ci/aidc-license-check.sh'
     else
       run_scanner license-check bash bash -c \
-        'AIDC_LICENSE_MODE=fail scripts/ci/license-check.sh'
+        'AIDC_LICENSE_MODE=fail scripts/ci/aidc-license-check.sh'
     fi
   else
-    record license-check skipped "scripts/ci/license-check.sh not present"
+    record license-check skipped "scripts/ci/aidc-license-check.sh not present"
   fi
 else
   record vet skipped "no dependency/license changes in scope"

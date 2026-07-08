@@ -92,7 +92,12 @@ aidc::append_passthrough_env_args() {
 # AIDC_PASSTHROUGH_ENV_KEYS), when the Keychain lookup is disabled, or when the
 # `security` tool is unavailable (e.g. non-macOS hosts). Never logs the token.
 aidc::resolve_claude_oauth_token() {
-  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && return 0
+  local already=0
+  aidc::secret_begin
+  [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && already=1
+  aidc::secret_end
+  [[ "$already" -eq 1 ]] && return 0
+
   [[ -n "${AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE:-}" ]] || return 0
 
   local key forwarded=0
@@ -108,10 +113,18 @@ aidc::resolve_claude_oauth_token() {
 
   local account token
   account="${USER:-$(id -un 2>/dev/null || true)}"
+  aidc::debug "reading Claude OAuth token from Keychain (service $AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE, account $account) — if this hangs, macOS is waiting on a Keychain access prompt: click Always Allow, or Ctrl-C and export CLAUDE_CODE_OAUTH_TOKEN"
+  # The -w read of the secret is gated by the Keychain item's ACL; suppress
+  # xtrace so the token value never lands in a --debug trace.
+  local found="not found"
+  aidc::secret_begin
   token="$(security find-generic-password -a "$account" -s "$AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE" -w 2>/dev/null || true)"
   if [[ -n "$token" ]]; then
     export CLAUDE_CODE_OAUTH_TOKEN="$token"
+    found="found"
   fi
+  aidc::secret_end
+  aidc::debug "Keychain lookup complete (token $found)"
 }
 
 aidc::validate_claude_profile_name() {
@@ -266,10 +279,14 @@ aidc::load_claude_profile_env() {
   # --list-profiles only warn.)
   aidc::require_strict_permissions "$env_file"
 
+  # Suppress xtrace while sourcing: the profile file holds secrets (API keys)
+  # whose assignments would otherwise be echoed by --debug.
+  aidc::secret_begin
   set -a
   # shellcheck disable=SC1090
   . "$env_file"
   set +a
+  aidc::secret_end
 
   local metadata alias_name
   metadata="$(aidc::claude_profile_metadata "$profile")"

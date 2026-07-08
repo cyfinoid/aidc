@@ -47,7 +47,7 @@ make_fixture() {
   cp "$t/devcontainer/scripts/bootstrap-state.sh.tmpl" "$dir/.devcontainer/scripts/bootstrap-state.sh"
   cp "$t/devcontainer/scripts/init-firewall.sh.tmpl"   "$dir/.devcontainer/scripts/init-firewall.sh"
   local f
-  for f in lib-common sbom-code sbom-image sbom-diff license-check sbom-all; do
+  for f in aidc-lib-common aidc-sbom-code aidc-sbom-image aidc-sbom-diff aidc-license-check aidc-sbom-all; do
     cp "$t/ci/${f}.sh.tmpl" "$dir/scripts/ci/${f}.sh"
   done
   # Minimal project.env in the shape aidc::write_project_env produces.

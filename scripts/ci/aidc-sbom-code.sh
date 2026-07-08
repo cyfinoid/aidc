@@ -12,8 +12,8 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci/lib-common.sh
-. "$here/lib-common.sh"
+# shellcheck source=scripts/ci/aidc-lib-common.sh
+. "$here/aidc-lib-common.sh"
 
 sbom::require_tool syft "syft is baked into every aidc image; on other CI runners install it: https://github.com/anchore/syft"
 

@@ -50,7 +50,7 @@ jobs:
       #   run: docker build -t "$AIDC_IMAGE_REF" .
 
       - name: Generate SBOMs + license check
-        run: ./scripts/ci/sbom-all.sh
+        run: ./scripts/ci/aidc-sbom-all.sh
 
       - name: Upload SBOM artifacts
         if: always()

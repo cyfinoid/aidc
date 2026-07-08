@@ -28,6 +28,23 @@ AIDC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$AIDC_LIB_DIR/aidc/status.sh"
 
 aidc::main() {
+  # Global flags that precede the subcommand. Kept minimal and parsed here so
+  # they never collide with a tool's own args (e.g. `aidc claude -- ...`).
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --debug) AIDC_DEBUG=1; shift ;;
+      *) break ;;
+    esac
+  done
+  if [[ "${AIDC_DEBUG:-0}" == "1" ]]; then
+    export AIDC_DEBUG=1
+    # file:line prefix so the trace pinpoints where a run stalls; secrets are
+    # suppressed at their source via aidc::secret_begin/secret_end.
+    export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+    printf '[aidc] debug: tracing enabled (file:line prefixed; secret values suppressed)\n' >&2
+    set -x
+  fi
+
   local cmd="${1:-help}"
   if [[ $# -gt 0 ]]; then
     shift
@@ -146,7 +163,8 @@ aidc::cmd_help() {
 aidc - AI devcontainer bootstrapper
 
 Usage:
-  aidc init [path]
+  aidc [--debug] <command> [args...]
+  aidc init [-f|--force] [path]
   aidc up [--clipboard] [--isolate-vm]
   aidc down
   aidc rebuild [--clipboard] [--isolate-vm]
@@ -175,13 +193,20 @@ Usage:
 
 Notes:
   - aidc sbom generates code-level + build-time SBOMs (CycloneDX + SPDX), diffs
-    them, and runs the license check. It calls scripts/ci/sbom-all.sh in the
+    them, and runs the license check. It calls scripts/ci/aidc-sbom-all.sh in the
     container; any CI can call the same scripts directly. Set AIDC_IMAGE_REF to
     scan a built image for the build-time SBOM.
-  - aidc licenses runs the license-conflict check (scripts/ci/license-check.sh).
+  - aidc licenses runs the license-conflict check (scripts/ci/aidc-license-check.sh).
     Defaults to warn; pass --fail to exit non-zero on a conflict (CI gate).
+  - aidc --debug <command> (or AIDC_DEBUG=1) prints a file:line-prefixed
+    execution trace to stderr to diagnose where a run stalls (e.g. the macOS
+    Keychain token read, or the first container build). Secret values (OAuth
+    token, profile API keys) are suppressed from the trace.
   - Run commands from the repo root you want to isolate.
   - Tool commands auto-bootstrap the repo and container if needed.
+  - aidc init refuses to run if the repo already has a file at an aidc-managed
+    path (e.g. its own scripts/ci/*.sh). Pass -f/--force to adopt the directory
+    anyway, overwriting those managed files with the current templates.
   - Plain 'aidc claude' keeps the default Anthropic path.
   - aidc cursor opens the host Cursor app; reopen the repo in the devcontainer.
   - aidc destroy removes the container, named volumes, and image by default.

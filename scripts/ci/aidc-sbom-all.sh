@@ -16,21 +16,21 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/ci/lib-common.sh
-. "$here/lib-common.sh"
+# shellcheck source=scripts/ci/aidc-lib-common.sh
+. "$here/aidc-lib-common.sh"
 
 sbom::log "=== code-level SBOM ==="
-"$here/sbom-code.sh"
+"$here/aidc-sbom-code.sh"
 
 sbom::log "=== build-time SBOM ==="
-"$here/sbom-image.sh"
+"$here/aidc-sbom-image.sh"
 
 sbom::log "=== code-vs-build diff ==="
-"$here/sbom-diff.sh"
+"$here/aidc-sbom-diff.sh"
 
 sbom::log "=== license check (mode: ${AIDC_LICENSE_MODE:-warn}) ==="
 # Reuse the code SPDX SBOM just generated instead of re-cataloging.
 out_dir="$(sbom::sbom_dir)"
-AIDC_LICENSE_SBOM="${AIDC_LICENSE_SBOM:-$out_dir/code.spdx.json}" "$here/license-check.sh"
+AIDC_LICENSE_SBOM="${AIDC_LICENSE_SBOM:-$out_dir/code.spdx.json}" "$here/aidc-license-check.sh"
 
 sbom::log "SBOM pipeline complete; artifacts in $out_dir"

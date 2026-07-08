@@ -344,8 +344,8 @@ jobs:
             .devcontainer \
             .ai-container \
             .cursor/rules/00-core-logics.mdc \
-            scripts/ci/sbom-all.sh \
-            scripts/ci/license-check.sh; do
+            scripts/ci/aidc-sbom-all.sh \
+            scripts/ci/aidc-license-check.sh; do
             [ ! -e "$work/$f" ] || fail "destroy --purge-scaffold left $f behind"
           done
           # ...user-owned seeded docs must survive...

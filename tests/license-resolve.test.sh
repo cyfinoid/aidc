@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Unit tests for sbom::resolve_project_license (scripts/ci/lib-common.sh).
+# Unit tests for sbom::resolve_project_license (scripts/ci/aidc-lib-common.sh).
 #
 # Pure/offline: no syft, no network. Run with:
 #   bash tests/license-resolve.test.sh
@@ -12,8 +12,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# shellcheck source=../scripts/ci/lib-common.sh
-. "$REPO_ROOT/scripts/ci/lib-common.sh"
+# shellcheck source=../scripts/ci/aidc-lib-common.sh
+. "$REPO_ROOT/scripts/ci/aidc-lib-common.sh"
 
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
