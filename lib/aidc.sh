@@ -879,6 +879,14 @@ aidc::run_tool() {
 
   local workspace
   workspace="$(aidc::default_workspace)"
+
+  # Seed the agent list from the tool being run so the first build only bakes
+  # in the agent(s) actually used. Explicit AIDC_AGENTS in project.env or the
+  # environment wins; 'all' bakes in every agent for back-compat.
+  if [[ -z "${AIDC_AGENTS:-}" ]]; then
+    export AIDC_AGENTS="$tool"
+  fi
+
   aidc::ensure_container_running "$workspace"
 
   if [[ "$tool" == "claude" ]]; then
@@ -1789,6 +1797,10 @@ aidc::export_compose_env() {
   # base image; this layer adds grype/syft/checkov/bandit when requested).
   export AIDC_SECURITY_TOOLS
   AIDC_SECURITY_TOOLS="${AIDC_SECURITY_TOOLS:-}"
+  # Coding agents baked into the image. Tool commands (aidc claude etc.) seed
+  # this to the invoked tool; 'aidc up' without a tool defaults to all five.
+  export AIDC_AGENTS
+  AIDC_AGENTS="${AIDC_AGENTS:-all}"
 
   # VM isolation: when active, point DOCKER_HOST at the per-project VM's
   # Docker daemon so all compose commands run inside the VM transparently.
