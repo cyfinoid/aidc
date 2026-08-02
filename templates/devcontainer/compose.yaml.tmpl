@@ -5,6 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        AIDC_BASE_IMAGE: ${AIDC_BASE_IMAGE:-aidc-base:latest}
         AIDC_TOOLCHAINS: ${AIDC_TOOLCHAINS:-}
         AIDC_SECURITY_TOOLS: ${AIDC_SECURITY_TOOLS:-}
     init: true

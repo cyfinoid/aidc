@@ -1,0 +1,226 @@
+# aidc-managed
+# Shared base image: base OS + apt tools + uv/Python + coding agents +
+# always-on scanners + clipboard bridge + pmg wiring.
+#
+# Built ONCE per content hash (see aidc::ensure_base_image in lib/aidc.sh)
+# and reused by every project via `FROM aidc-base:<hash>` in the per-project
+# Dockerfile. This is the "one copy of Python serves 10,000 sandboxes" layer:
+# projects share the big common layers on disk and only build their small
+# toolchain delta on top. To force a refresh of unpinned agent/scanner
+# installs, bump a pinned version here (the tag changes, everything rebuilds).
+#
+# Base image and uv stage pinned by index (multi-arch) digest.
+# To repin: `docker pull <ref>:<tag>` then read the "Digest:" line.
+FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec AS uv
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
+
+ARG GIT_DELTA_VERSION=0.18.2
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+USER root
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+      bubblewrap \
+      build-essential \
+      ca-certificates \
+      curl \
+      dnsutils \
+      fd-find \
+      fzf \
+      gh \
+      gnupg \
+      ipset \
+      iptables \
+      iproute2 \
+      jq \
+      nano \
+      ripgrep \
+      rsync \
+      socat \
+      tmux \
+      unzip \
+      vim \
+      xz-utils \
+      zip \
+      zsh \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends nodejs \
+    && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb \
+    && dpkg -i /tmp/git-delta.deb \
+    && rm /tmp/git-delta.deb
+
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_TOOL_DIR=/opt/uv/tools \
+    UV_TOOL_BIN_DIR=/usr/local/bin \
+    UV_LINK_MODE=copy
+RUN uv python install 3.13 \
+    && ln -sf "$(uv python find 3.13)" /usr/local/bin/python3 \
+    && ln -sf /usr/local/bin/python3 /usr/local/bin/python \
+    && uv tool install ast-grep-cli
+
+ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
+    NPM_CONFIG_AUDIT=true \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_SAVE_EXACT=true \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_MINIMUM_RELEASE_AGE=1440 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    NODE_OPTIONS=--max-old-space-size=4096
+
+# Coding agents are installed as native prebuilt binaries per-user below (no
+# npm-global, no Node runtime dependency for the agents themselves). The
+# NPM_CONFIG_* hardening above still governs any npm the agents or project
+# toolchains invoke at runtime.
+
+# Supply-chain guardrails: pmg intercepts npm/pip/uv/etc. and runs vet checks
+# before installs. Binaries installed system-wide; shell/shim wiring done
+# per-user below.
+RUN curl -fsSL https://raw.githubusercontent.com/safedep/pmg/main/install.sh | sh
+
+# Pinned. To bump: check https://github.com/safedep/vet/releases for the
+# newest tag, update VET_VERSION, rebuild, and commit. "latest" is honoured
+# for ad-hoc overrides but resolves at build time, which defeats the pin —
+# avoid in committed configs.
+ARG VET_VERSION=v1.17.3
+RUN ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) VET_ARCH="x86_64" ;; \
+         arm64) VET_ARCH="arm64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && if [ "$VET_VERSION" = "latest" ]; then \
+         VET_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/safedep/vet/releases/latest | sed 's|.*/||')"; \
+       else \
+         VET_TAG="$VET_VERSION"; \
+       fi \
+    && curl -fsSL "https://github.com/safedep/vet/releases/download/${VET_TAG}/vet_Linux_${VET_ARCH}.tar.gz" -o /tmp/vet.tar.gz \
+    && tar -xzf /tmp/vet.tar.gz -C /usr/local/bin vet \
+    && chmod 0755 /usr/local/bin/vet \
+    && rm /tmp/vet.tar.gz
+
+# Always-on security tooling: semgrep (SAST), gitleaks + trufflehog (secrets).
+# SCA is handled by vet/pmg above; this layer covers code-pattern and secret scans.
+RUN uv tool install semgrep \
+    && curl -fsSL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh \
+       | sh -s -- -b /usr/local/bin
+
+# Pinned. To bump: check https://github.com/gitleaks/gitleaks/releases for the
+# newest tag, update GITLEAKS_VERSION, rebuild, and commit. "latest" still
+# works for ad-hoc overrides but resolves at build time and breaks the pin.
+ARG GITLEAKS_VERSION=v8.30.1
+RUN ARCH_RAW="$(dpkg --print-architecture)" \
+    && case "$ARCH_RAW" in \
+         amd64) GL_ARCH="x64" ;; \
+         arm64) GL_ARCH="arm64" ;; \
+         *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;; \
+       esac \
+    && if [ "$GITLEAKS_VERSION" = "latest" ]; then \
+         GL_TAG="$(curl -fsSI -o /dev/null -w '%{redirect_url}' https://github.com/gitleaks/gitleaks/releases/latest | sed 's|.*/||')"; \
+       else \
+         GL_TAG="$GITLEAKS_VERSION"; \
+       fi \
+    && GL_VER="${GL_TAG#v}" \
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/${GL_TAG}/gitleaks_${GL_VER}_linux_${GL_ARCH}.tar.gz" -o /tmp/gitleaks.tar.gz \
+    && tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks \
+    && chmod 0755 /usr/local/bin/gitleaks \
+    && rm /tmp/gitleaks.tar.gz
+
+# Rust Token Killer: CLI proxy that cuts token usage on dev operations.
+# Env var goes on the sh side of the pipe so the installer (not curl) sees it.
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh \
+    | RTK_INSTALL_DIR=/usr/local/bin sh
+
+RUN mkdir -p /commandhistory \
+    && touch /commandhistory/.bash_history /commandhistory/.zsh_history \
+    && chown -R vscode:vscode /commandhistory \
+    && echo 'export HISTFILE=/commandhistory/.bash_history' >> /etc/bash.bashrc
+
+# Clipboard bridge: pbpaste/xclip/wl-paste all proxy to a host Unix socket
+# bind-mounted at /host-clipboard/clipboard.sock. If the host clipboard
+# server is not running, the shim fails benignly with "connection refused".
+RUN printf '#!/usr/bin/env bash\nexec socat - UNIX-CONNECT:/host-clipboard/clipboard.sock\n' \
+      > /usr/local/bin/aidc-clipboard-recv \
+    && chmod 0755 /usr/local/bin/aidc-clipboard-recv \
+    && ln -sf /usr/local/bin/aidc-clipboard-recv /usr/local/bin/pbpaste \
+    && ln -sf /usr/local/bin/aidc-clipboard-recv /usr/local/bin/xclip \
+    && ln -sf /usr/local/bin/aidc-clipboard-recv /usr/local/bin/wl-paste
+
+# Bootstrap Claude OAuth + skip the first-run welcome screen when a token
+# is present. Idempotent: returns immediately if ~/.claude.json already has
+# hasCompletedOnboarding=true. Invoked by aidc::run_tool before 'aidc claude'.
+COPY --chown=root:root <<'EOF' /usr/local/bin/aidc-bootstrap-claude
+#!/usr/bin/env bash
+set -euo pipefail
+[[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || exit 0
+
+config="$HOME/.claude.json"
+if [[ -f "$config" ]] && python3 - "$config" <<'PY' 2>/dev/null
+import json, sys
+try:
+    sys.exit(0 if json.load(open(sys.argv[1])).get("hasCompletedOnboarding") else 1)
+except Exception:
+    sys.exit(1)
+PY
+then
+  exit 0
+fi
+
+claude -p ok >/dev/null 2>&1 || true
+
+python3 - "$config" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+try:
+    cfg = json.load(open(p))
+except (FileNotFoundError, ValueError):
+    cfg = {}
+cfg["hasCompletedOnboarding"] = True
+with open(p, "w") as f:
+    json.dump(cfg, f, indent=2)
+    f.write("\n")
+PY
+EOF
+RUN chmod 0755 /usr/local/bin/aidc-bootstrap-claude
+
+USER vscode
+
+ENV HOME=/home/vscode
+# ~/.pmg/bin is FIRST on PATH on purpose. pmg interception rides on these PATH
+# shims, NOT on the shell aliases pmg also writes to ~/.zshrc/~/.bashrc: build
+# RUN steps and exec'd agent subprocesses never source rc files, so only the
+# shims (first on PATH at build and runtime) reliably gate npm/pip/uv/etc.
+ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+# Wire pmg in before ANY user-level package install so nothing slips past it.
+RUN pmg setup install \
+    && pmg setup doctor || true
+
+# Coding agents as native prebuilt binaries. Each installer drops a binary into
+# ~/.local/bin (already on PATH) via plain curl — no npm dependency resolution,
+# so pmg has nothing to vet here; the "pmg first" invariant above still holds.
+# Grok's binary is forced into ~/.local/bin via GROK_BIN_DIR so the grok_home
+# volume mounted at ~/.grok at runtime cannot shadow it.
+RUN mkdir -p \
+      /home/vscode/.local/bin \
+      /home/vscode/.claude \
+      /home/vscode/.codex \
+      /home/vscode/.config/opencode \
+      /home/vscode/.cursor-agent \
+      /home/vscode/.grok \
+    && curl -fsSL https://claude.ai/install.sh | bash \
+    && curl -fsSL https://chatgpt.com/codex/install.sh | sh \
+    && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
+    && curl -fsS https://cursor.com/install | bash \
+    && { cursor-agent --version || true; } \
+    && curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/home/vscode/.local/bin bash

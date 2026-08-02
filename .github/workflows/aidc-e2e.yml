@@ -184,6 +184,7 @@ jobs:
 
           for f in \
             .devcontainer/Dockerfile \
+            .devcontainer/Dockerfile.base \
             .devcontainer/compose.yaml \
             .devcontainer/devcontainer.json \
             .devcontainer/scripts/bootstrap-state.sh \
