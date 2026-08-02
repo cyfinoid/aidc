@@ -45,6 +45,12 @@ aidc up            # build + start container
 | `aidc rebuild` | rebuild the image and restart |
 | `aidc destroy` | remove container + volumes + image (prompts; `-f` to skip) |
 
+`aidc up` and the tool commands build the image only when it's missing; if the
+image already exists they start the container directly (fast path). Force a
+full rebuild with `aidc rebuild` (or `aidc rescan`). Set `AIDC_NO_BUILD=1`
+in `.ai-container/project.env` to skip builds entirely — `aidc up` then fails
+fast if the image is missing instead of building it.
+
 ## What lives where (inside the container)
 
 ```

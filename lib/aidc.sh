@@ -237,7 +237,7 @@ aidc::cmd_up() {
     aidc::vm_ensure "$workspace"
   fi
 
-  aidc::compose "$workspace" up -d --build workspace
+  aidc::compose_up "$workspace"
   # Catch up the host with any transcripts a prior (possibly ungraceful) session
   # left in the volume — the recovery case the on-exit hooks can't cover.
   aidc::auto_sync_sessions "$workspace" all
@@ -1529,7 +1529,7 @@ aidc::ensure_container_running() {
   fi
 
   if [[ -z "$(aidc::compose_capture "$workspace" ps -q workspace)" ]]; then
-    aidc::compose "$workspace" up -d --build workspace
+    aidc::compose_up "$workspace"
     # Only on the down→up transition (not every exec), so we recover prior
     # transcripts without adding a sync to each command.
     aidc::auto_sync_sessions "$workspace" all
@@ -1739,6 +1739,39 @@ aidc::compose() {
   shift
   aidc::export_compose_env "$workspace"
   docker compose -f "$workspace/.devcontainer/compose.yaml" "$@"
+}
+
+# True when the compose image for the workspace already exists locally, so
+# 'up' can skip a full rebuild. Resolves the image name from the compose
+# config (which applies COMPOSE_PROJECT_NAME + build args) and checks it
+# against the local image store. Returns non-zero when the image is missing
+# or the compose project is not yet materialised.
+aidc::image_exists() {
+  local workspace="$1"
+  local image
+  image="$(aidc::compose_capture "$workspace" config --images 2>/dev/null | head -n1)"
+  [[ -n "$image" ]] || return 1
+  docker image inspect "$image" >/dev/null 2>&1
+}
+
+# Start the workspace container, building only when needed:
+#   - image missing → full build (first run / after 'aidc destroy')
+#   - image present → no --build (fast path; compose still creates/starts)
+# 'aidc rebuild' and 'aidc rescan' call compose directly with --build so
+# they always force a rebuild. AIDC_NO_BUILD=1 opts out of builds entirely
+# and fails fast if the image is missing.
+aidc::compose_up() {
+  local workspace="$1"
+  if [[ "${AIDC_NO_BUILD:-0}" == "1" ]]; then
+    if ! aidc::image_exists "$workspace"; then
+      aidc::die "AIDC_NO_BUILD=1 but no image for $(basename "$workspace"); run 'aidc up' once or 'aidc rebuild'"
+    fi
+    aidc::compose "$workspace" up -d workspace
+  elif aidc::image_exists "$workspace"; then
+    aidc::compose "$workspace" up -d workspace
+  else
+    aidc::compose "$workspace" up -d --build workspace
+  fi
 }
 
 aidc::compose_capture() {
