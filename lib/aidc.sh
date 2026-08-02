@@ -23,6 +23,7 @@ AIDC_CORE_WORKTREE_ROOT="${AIDC_CORE_WORKTREE_ROOT:-$HOME/.local/share/aidc/core
 AIDC_MANAGED_CLAUDE_ALIAS_MARKER="# aidc-managed claude-alias"
 AIDC_MANAGED_PATHS=(
   ".devcontainer/Dockerfile"
+  ".devcontainer/Dockerfile.base"
   ".devcontainer/compose.yaml"
   ".devcontainer/devcontainer.json"
   ".devcontainer/scripts/bootstrap-state.sh"
@@ -204,6 +205,7 @@ aidc::refresh_scaffold() {
     "$workspace/.cursor/rules"
 
   aidc::copy_template "templates/devcontainer/Dockerfile.tmpl" "$workspace/.devcontainer/Dockerfile" "0755"
+  aidc::copy_template "templates/devcontainer/Dockerfile.base.tmpl" "$workspace/.devcontainer/Dockerfile.base" "0644"
   aidc::copy_template "templates/devcontainer/compose.yaml.tmpl" "$workspace/.devcontainer/compose.yaml" "0644"
   aidc::copy_template "templates/devcontainer/devcontainer.json.tmpl" "$workspace/.devcontainer/devcontainer.json" "0644"
   aidc::copy_template "templates/devcontainer/scripts/bootstrap-state.sh.tmpl" "$workspace/.devcontainer/scripts/bootstrap-state.sh" "0755"
@@ -237,6 +239,7 @@ aidc::cmd_up() {
     aidc::vm_ensure "$workspace"
   fi
 
+  aidc::ensure_base_image "$workspace"
   aidc::compose "$workspace" up -d --build workspace
   # Catch up the host with any transcripts a prior (possibly ungraceful) session
   # left in the volume — the recovery case the on-exit hooks can't cover.
@@ -254,6 +257,7 @@ aidc::cmd_rebuild() {
     aidc::vm_ensure "$workspace"
   fi
 
+  aidc::ensure_base_image "$workspace"
   aidc::compose "$workspace" up -d --build --force-recreate workspace
   aidc::auto_sync_sessions "$workspace" all
   aidc::log "container rebuilt for $(basename "$workspace")"
@@ -282,6 +286,7 @@ aidc::cmd_rescan() {
   fi
 
   # --build picks up the changed AIDC_TOOLCHAINS build arg and reinstalls.
+  aidc::ensure_base_image "$workspace"
   aidc::compose "$workspace" up -d --build workspace
   aidc::log "rescan complete for $(basename "$workspace")"
 }
@@ -1529,6 +1534,7 @@ aidc::ensure_container_running() {
   fi
 
   if [[ -z "$(aidc::compose_capture "$workspace" ps -q workspace)" ]]; then
+    aidc::ensure_base_image "$workspace"
     aidc::compose "$workspace" up -d --build workspace
     # Only on the down→up transition (not every exec), so we recover prior
     # transcripts without adding a sync to each command.
@@ -1739,6 +1745,49 @@ aidc::compose() {
   shift
   aidc::export_compose_env "$workspace"
   docker compose -f "$workspace/.devcontainer/compose.yaml" "$@"
+}
+
+# Shared base image tag. Content-hashed from the workspace's Dockerfile.base
+# plus the requested agent set, so any template edit — or a different
+# AIDC_AGENTS selection — flows into a new tag automatically (and projects
+# that share the same template + agent set share the same base image on disk).
+aidc::base_image_tag() {
+  local workspace="$1"
+  local hash cmd input
+  if command -v sha256sum >/dev/null 2>&1; then
+    cmd="sha256sum"
+  else
+    cmd="shasum -a 256"
+  fi
+  input="$(cat "$workspace/.devcontainer/Dockerfile.base" 2>/dev/null)"
+  input+="|AIDC_AGENTS=${AIDC_AGENTS:-all}"
+  hash="$(printf '%s' "$input" | $cmd | awk '{print $1}' | cut -c1-12)"
+  printf 'aidc-base:%s' "${hash:-latest}"
+}
+
+# Ensure the shared aidc-base image exists locally, building it once per
+# content hash. Returns the tag via AIDC_BASE_IMAGE (exported) so the
+# per-project Dockerfile's FROM resolves. Called before any compose build so
+# a fresh project only pays for the toolchain delta, not the ~3GB common
+# layer. Set AIDC_BASE_IMAGE explicitly in project.env to pin a custom base.
+aidc::ensure_base_image() {
+  local workspace="$1"
+  local tag
+  if [[ -n "${AIDC_BASE_IMAGE:-}" ]]; then
+    tag="$AIDC_BASE_IMAGE"
+  else
+    tag="$(aidc::base_image_tag "$workspace")"
+    export AIDC_BASE_IMAGE="$tag"
+  fi
+  if ! docker image inspect "$tag" >/dev/null 2>&1; then
+    aidc::log "building shared base image $tag (one-time; shared across projects)"
+    ( cd "$workspace" \
+        && docker build -f "$workspace/.devcontainer/Dockerfile.base" \
+             --build-arg AIDC_AGENTS="${AIDC_AGENTS:-all}" \
+             -t "$tag" "$workspace/.devcontainer" ) \
+      || aidc::die "failed to build base image $tag"
+    aidc::log "base image $tag ready"
+  fi
 }
 
 aidc::compose_capture() {
