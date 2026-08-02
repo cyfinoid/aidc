@@ -190,7 +190,15 @@ ENV HOME=/home/vscode
 # shims, NOT on the shell aliases pmg also writes to ~/.zshrc/~/.bashrc: build
 # RUN steps and exec'd agent subprocesses never source rc files, so only the
 # shims (first on PATH at build and runtime) reliably gate npm/pip/uv/etc.
-ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/bin
+#
+# The shared toolchain volume is mounted read-only at /opt/toolchains by
+# compose (one copy of Go/Rust/JDK serves all projects — see
+# Dockerfile.toolchain). Its bin dirs are on PATH; empty dirs are harmless
+# when the matching toolchain isn't installed.
+ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/opt/toolchains/go/bin:/opt/toolchains/rust/bin:/opt/toolchains/java/bin:/usr/local/bin:/usr/bin:/bin
+ENV GOROOT=/opt/toolchains/go \
+    RUSTUP_HOME=/opt/toolchains/rust/rustup \
+    JAVA_HOME=/opt/toolchains/java
 
 # Wire pmg in before ANY user-level package install so nothing slips past it.
 RUN pmg setup install \
@@ -224,25 +232,15 @@ RUN if [ -n "$AIDC_TOOLCHAINS" ]; then \
       for tc in $(echo "$AIDC_TOOLCHAINS" | tr ',' ' '); do \
         case "$tc" in \
           go) \
-            sudo apt-get update && \
-            sudo apt-get install -y --no-install-recommends golang-go && \
-            GOBIN=/home/vscode/.local/bin go install github.com/securego/gosec/v2/cmd/gosec@latest ;; \
+            echo "aidc: go toolchain + gosec provided by shared volume (/opt/toolchains/go); run 'aidc tools install go'" ;; \
           rust) \
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path && \
-            mkdir -p /home/vscode/.local/bin && \
-            ln -sf "$HOME/.cargo/bin/cargo" /home/vscode/.local/bin/cargo && \
-            ln -sf "$HOME/.cargo/bin/rustc" /home/vscode/.local/bin/rustc && \
-            ln -sf "$HOME/.cargo/bin/rustup" /home/vscode/.local/bin/rustup && \
-            "$HOME/.cargo/bin/cargo" install cargo-audit --locked && \
-            ln -sf "$HOME/.cargo/bin/cargo-audit" /home/vscode/.local/bin/cargo-audit ;; \
+            echo "aidc: rust toolchain + cargo-audit provided by shared volume (/opt/toolchains/rust); run 'aidc tools install rust'" ;; \
           ruby) \
             sudo apt-get update && \
             sudo apt-get install -y --no-install-recommends ruby-full && \
             sudo gem install --no-document bundler-audit ;; \
           java) \
-            sudo apt-get update && \
-            sudo apt-get install -y --no-install-recommends default-jdk ;; \
+            echo "aidc: java toolchain provided by shared volume (/opt/toolchains/java); run 'aidc tools install java'" ;; \
           php) \
             sudo apt-get update && \
             sudo apt-get install -y --no-install-recommends php-cli ;; \

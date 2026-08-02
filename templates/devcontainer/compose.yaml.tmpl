@@ -64,6 +64,13 @@ services:
       - type: volume
         source: command_history
         target: /commandhistory
+      # Shared read-only toolchain store: one copy of Go/Rust/JDK serves all
+      # projects (populated by 'aidc tools install'). Read-only so agents
+      # can't tamper with the shared toolchain; revoke by repopulating.
+      - type: volume
+        source: aidc_toolchains
+        target: /opt/toolchains
+        read_only: true
       - type: volume
         source: claude_home
         target: /home/vscode/.claude
@@ -82,6 +89,7 @@ services:
 
 volumes:
   command_history:
+  aidc_toolchains:
   claude_home:
   codex_home:
   opencode_home:

@@ -44,6 +44,8 @@ aidc up            # build + start container
 | `aidc down` | stop the container, keep volumes |
 | `aidc rebuild` | rebuild the image and restart |
 | `aidc destroy` | remove container + volumes + image (prompts; `-f` to skip) |
+| `aidc tools install [go\|rust\|java\|all]` | populate the shared read-only toolchain volume |
+| `aidc tools status` | show which shared toolchains are installed |
 
 ## What lives where (inside the container)
 
@@ -80,6 +82,8 @@ aidc inspects the repo on every `aidc up` and installs matching toolchains:
 Node and Python markers don't trigger a language install (the base image already has them) — they're listed so you can see in the build log what aidc detected, and so explicit `AIDC_TOOLCHAINS=node,python` works for clarity. The Python detection still installs `bandit`; see [security.md](security.md#per-toolchain-linters-auto-installed).
 
 The detected list is passed as a Docker `--build-arg AIDC_TOOLCHAINS=go,rust,...` so it caches per combination — switching between repos doesn't rebuild.
+
+Go, Rust, and Java toolchains are **not baked into the image** — they live in a shared read-only volume (`aidc_toolchains`) populated once by `aidc tools install` and mounted at `/opt/toolchains` in every project container. `aidc up` auto-ensures the toolchains a project needs. This keeps per-project images small (no per-project copy of Go/Rust/JDK) and lets you revoke a bad toolchain everywhere by repopulating the volume. Ruby, PHP, and shell toolchains (and their linters) still install into the image.
 
 **Override** in `.ai-container/project.env`:
 
