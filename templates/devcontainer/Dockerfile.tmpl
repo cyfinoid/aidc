@@ -13,7 +13,6 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       bubblewrap \
-      build-essential \
       ca-certificates \
       curl \
       dnsutils \
@@ -35,14 +34,9 @@ RUN apt-get update \
       xz-utils \
       zip \
       zsh \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
-    && rm -rf /var/lib/apt/lists/*
-
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL "https://github.com/dandavison/delta/releases/download/${GIT_DELTA_VERSION}/git-delta_${GIT_DELTA_VERSION}_${ARCH}.deb" -o /tmp/git-delta.deb \
     && dpkg -i /tmp/git-delta.deb \
@@ -228,6 +222,8 @@ RUN if [ -n "$AIDC_TOOLCHAINS" ]; then \
             sudo apt-get install -y --no-install-recommends golang-go && \
             GOBIN=/home/vscode/.local/bin go install github.com/securego/gosec/v2/cmd/gosec@latest ;; \
           rust) \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends build-essential && \
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path && \
             mkdir -p /home/vscode/.local/bin && \
@@ -250,7 +246,11 @@ RUN if [ -n "$AIDC_TOOLCHAINS" ]; then \
             sudo apt-get update && \
             sudo apt-get install -y --no-install-recommends shellcheck ;; \
           node) \
-            echo "aidc: node 22 already in base (npm/pnpm/yarn/bun via pmg shims; npm audit built-in)" ;; \
+            sudo mkdir -p /etc/apt/keyrings && \
+            sudo curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+            echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null && \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends nodejs ;; \
           python) \
             UV_TOOL_BIN_DIR="$HOME/.local/bin" \
             UV_TOOL_DIR="$HOME/.local/share/uv-tools" \

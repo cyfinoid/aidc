@@ -74,10 +74,15 @@ aidc inspects the repo on every `aidc up` and installs matching toolchains:
 | `Gemfile` | Ruby — apt `ruby-full` |
 | `pom.xml`, `build.gradle`, `build.gradle.kts` | JDK — apt `default-jdk` |
 | `composer.json` | PHP CLI — apt `php-cli` |
-| `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` | Node 22 (already in base) |
+| `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` | Node 22 — apt `nodejs` (nodesource repo) |
 | `requirements.txt`, `uv.lock`, `pyproject.toml`, `Pipfile`, `Pipfile.lock`, `poetry.lock` | Python 3.13 via uv (already in base) |
 
-Node and Python markers don't trigger a language install (the base image already has them) — they're listed so you can see in the build log what aidc detected, and so explicit `AIDC_TOOLCHAINS=node,python` works for clarity. The Python detection still installs `bandit`; see [security.md](security.md#per-toolchain-linters-auto-installed).
+Node is installed from the nodesource repo when the `node` toolchain is
+detected (or pinned via `AIDC_TOOLCHAINS=node`). Python is already in the
+base image (uv-managed) — the marker triggers only the `bandit` linter; see
+[security.md](security.md#per-toolchain-linters-auto-installed). Both are
+listed so you can see in the build log what aidc detected, and so explicit
+`AIDC_TOOLCHAINS=node,python` works for clarity.
 
 The detected list is passed as a Docker `--build-arg AIDC_TOOLCHAINS=go,rust,...` so it caches per combination — switching between repos doesn't rebuild.
 
