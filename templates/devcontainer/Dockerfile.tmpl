@@ -201,19 +201,36 @@ RUN pmg setup install \
 # so pmg has nothing to vet here; the "pmg first" invariant above still holds.
 # Grok's binary is forced into ~/.local/bin via GROK_BIN_DIR so the grok_home
 # volume mounted at ~/.grok at runtime cannot shadow it.
-RUN mkdir -p \
+#
+# AIDC_AGENTS (comma-separated) selects which agents get baked into the image;
+# default is all five for back-compat. A claude-only project can set
+# AIDC_AGENTS=claude and skip ~800MB of unused agent binaries.
+ARG AIDC_AGENTS="claude,codex,opencode,cursor-agent,grok"
+RUN agents="${AIDC_AGENTS:-all}" \
+    && if [ "$agents" = "all" ]; then agents="claude,codex,opencode,cursor-agent,grok"; fi \
+    && mkdir -p \
       /home/vscode/.local/bin \
       /home/vscode/.claude \
       /home/vscode/.codex \
       /home/vscode/.config/opencode \
       /home/vscode/.cursor-agent \
       /home/vscode/.grok \
-    && curl -fsSL https://claude.ai/install.sh | bash \
-    && curl -fsSL https://chatgpt.com/codex/install.sh | sh \
-    && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
-    && curl -fsS https://cursor.com/install | bash \
-    && { cursor-agent --version || true; } \
-    && curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/home/vscode/.local/bin bash
+    && for agent in $(echo "$agents" | tr ',' ' '); do \
+         case "$agent" in \
+           claude) \
+             curl -fsSL https://claude.ai/install.sh | bash ;; \
+           codex) \
+             curl -fsSL https://chatgpt.com/codex/install.sh | sh ;; \
+           opencode) \
+             curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path ;; \
+           cursor-agent) \
+             curl -fsS https://cursor.com/install | bash && { cursor-agent --version || true; } ;; \
+           grok) \
+             curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/home/vscode/.local/bin bash ;; \
+           *) \
+             echo "aidc: unknown agent '$agent' (skipped)" >&2 ;; \
+         esac; \
+       done
 
 # Auto-detected toolchains. aidc fills AIDC_TOOLCHAINS by scanning the
 # workspace for marker files (go.mod, Cargo.toml, etc.). Override per repo
