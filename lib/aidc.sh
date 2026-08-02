@@ -1465,6 +1465,12 @@ aidc::shell_escape() {
   printf '%q' "$1"
 }
 
+# Move aside any pre-existing files/dirs that aidc manages so `init` can
+# scaffold its own without clobbering user content. The user's originals are
+# preserved (renamed, never deleted) and a restore hint is printed. Only the
+# top-level directories aidc scaffolds wholesale can conflict here
+# (.devcontainer/, .cursor/rules/00-core-logics.mdc); .ai-container/ can't,
+# because a present project.env returns early above.
 aidc::check_init_conflicts() {
   local workspace="$1"
   local project_env="$workspace/.ai-container/project.env"
@@ -1472,11 +1478,27 @@ aidc::check_init_conflicts() {
     return
   fi
 
-  local path
-  for path in "${AIDC_MANAGED_PATHS[@]}"; do
-    if [[ -e "$workspace/$path" ]]; then
-      aidc::die "refusing to overwrite existing file: $workspace/$path"
-    fi
+  local top
+  for top in .devcontainer .cursor; do
+    local managed=0
+    local path
+    for path in "${AIDC_MANAGED_PATHS[@]}"; do
+      if [[ "$path" == "$top"/* && -e "$workspace/$path" ]]; then
+        managed=1
+        break
+      fi
+    done
+    [[ "$managed" -eq 1 ]] || continue
+
+    local backup="$workspace/$top.aidc-backup"
+    local n=1
+    while [[ -e "$backup" ]]; do
+      backup="$workspace/$top.aidc-backup.$n"
+      n=$((n + 1))
+    done
+    mv "$workspace/$top" "$backup"
+    aidc::warn "existing $top moved to $(basename "$backup") so aidc can scaffold its own"
+    aidc::warn "restore it later with: mv $(basename "$backup") $top"
   done
 }
 
@@ -1496,7 +1518,7 @@ aidc::ensure_local_git_excludes() {
   touch "$exclude_file"
 
   local pattern
-  for pattern in ".devcontainer/" ".ai-container/" ".cursor/rules/00-core-logics.mdc" "CLAUDE.md" "AGENTS.md"; do
+  for pattern in ".devcontainer/" ".devcontainer.aidc-backup*/" ".ai-container/" ".cursor/rules/00-core-logics.mdc" "CLAUDE.md" "AGENTS.md"; do
     if ! grep -Fxq "$pattern" "$exclude_file"; then
       printf '%s\n' "$pattern" >>"$exclude_file"
     fi
