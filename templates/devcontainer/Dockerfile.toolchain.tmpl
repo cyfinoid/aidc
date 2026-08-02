@@ -1,0 +1,72 @@
+# aidc-managed
+# Shared toolchain store image: builds ONE toolchain (go | rust | java) into
+# /opt/toolchains-store/<lang> and, when run with the shared aidc_toolchains
+# volume mounted at /opt/toolchains, copies it into the volume.
+#
+# The volume is then mounted READ-ONLY into every project container at
+# /opt/toolchains — one copy of Go/Rust/JDK serves all projects ("mount
+# snapshots of pre-verified tools as shared read-only memory"). Revoke a bad
+# toolchain once: `docker volume rm aidc_toolchains` + `aidc tools ensure`
+# repopulates it everywhere.
+#
+# Built once per (content hash, lang) by aidc::ensure_toolchain_volume.
+
+ARG AIDC_BASE_IMAGE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
+FROM ${AIDC_BASE_IMAGE}
+
+ARG AIDC_TOOLCHAIN
+ENV DEBIAN_FRONTEND=noninteractive
+
+USER root
+
+RUN set -eux; \
+    ARCH="$(dpkg --print-architecture)"; \
+    case "$ARCH" in \
+      amd64) GOARCH="amd64"; JDKARCH="x64" ;; \
+      arm64) GOARCH="arm64"; JDKARCH="aarch64" ;; \
+      *) echo "unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/toolchains-store; \
+    case "$AIDC_TOOLCHAIN" in \
+      go) \
+        curl -fsSL "https://go.dev/dl/go1.26.5.linux-${GOARCH}.tar.gz" -o /tmp/go.tgz \
+          && tar -C /opt/toolchains-store -xzf /tmp/go.tgz \
+          && rm /tmp/go.tgz \
+          && GOROOT=/opt/toolchains-store/go \
+             GOBIN=/opt/toolchains-store/go/bin \
+             GOPATH=/tmp/gopath GOCACHE=/tmp/gocache \
+             /opt/toolchains-store/go/bin/go install github.com/securego/gosec/v2/cmd/gosec@latest \
+          && rm -rf /tmp/gopath /tmp/gocache \
+          && touch /opt/toolchains-store/go/.aidc-ready \
+          ;; \
+      rust) \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | RUSTUP_HOME=/opt/toolchains-store/rust/rustup \
+            CARGO_HOME=/opt/toolchains-store/rust/cargo \
+            sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+        && mkdir -p /opt/toolchains-store/rust/bin \
+        && for b in cargo rustc rustup; do \
+             ln -sf "/opt/toolchains-store/rust/cargo/bin/$b" "/opt/toolchains-store/rust/bin/$b"; \
+           done \
+        && RUSTUP_HOME=/opt/toolchains-store/rust/rustup \
+           CARGO_HOME=/opt/toolchains-store/rust/cargo \
+           CARGO_TARGET_DIR=/tmp/cargo-target \
+           /opt/toolchains-store/rust/cargo/bin/cargo install cargo-audit --locked \
+        && ln -sf "/opt/toolchains-store/rust/cargo/bin/cargo-audit" "/opt/toolchains-store/rust/bin/cargo-audit" \
+        && rm -rf /tmp/cargo-target /opt/toolchains-store/rust/cargo/registry \
+        && touch /opt/toolchains-store/rust/.aidc-ready \
+        ;; \
+      java) \
+        curl -fsSL "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12%2B8/OpenJDK21U-jdk_${JDKARCH}_linux_hotspot_21.0.12_8.tar.gz" -o /tmp/jdk.tgz \
+          && mkdir -p /opt/toolchains-store/java \
+          && tar -C /opt/toolchains-store/java -xzf /tmp/jdk.tgz --strip-components=1 \
+          && rm /tmp/jdk.tgz \
+          && touch /opt/toolchains-store/java/.aidc-ready \
+          ;; \
+      *) \
+        echo "unsupported toolchain: $AIDC_TOOLCHAIN" >&2; exit 1 ;; \
+    esac; \
+    chmod -R a+rX /opt/toolchains-store
+
+# Populate the mounted shared volume with the built toolchain.
+ENTRYPOINT ["sh", "-c", "cp -a /opt/toolchains-store/. /opt/toolchains/"]
