@@ -838,6 +838,20 @@ aidc::sync_session_tool() {
   mkdir -p "$host_dst"
   aidc::compose "$workspace" exec -T workspace tar -C "$container_src" -cf - . \
     | tar -C "$host_dst" --no-same-owner --no-same-permissions -xf -
+
+  # Agent transcripts record absolute paths from inside the container, where
+  # the repo is bind-mounted at /workspace (see compose.yaml.tmpl). Copying
+  # them verbatim leaves `/workspace/...` paths that do not exist on the host.
+  # Rewrite that in-container mount root to the real host workspace path so the
+  # synced logs/transcripts reference paths that actually exist in the OS.
+  if [[ -n "$workspace" && "$workspace" != "/workspace" ]]; then
+    local esc_ws f
+    esc_ws="$(printf '%s' "$workspace" | sed 's/[&|\\]/\\&/g')"
+    while IFS= read -r f; do
+      { sed "s|/workspace|${esc_ws}|g" "$f" > "$f.aidc-tmp" && mv "$f.aidc-tmp" "$f"; } \
+        || rm -f "$f.aidc-tmp"
+    done < <(find "$host_dst" -type f \( -name '*.jsonl' -o -name '*.json' \) 2>/dev/null)
+  fi
   aidc::log "synced $tool sessions to $host_dst"
 }
 
