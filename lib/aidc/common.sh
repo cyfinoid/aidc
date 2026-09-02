@@ -36,8 +36,15 @@ AIDC_CORE_WORKTREE_ROOT="${AIDC_CORE_WORKTREE_ROOT:-$HOME/.local/share/aidc/core
 
 AIDC_MANAGED_CLAUDE_ALIAS_MARKER="# aidc-managed claude-alias"
 
+# Shared toolchain store (issue #9): one read-only named volume holds Go/Rust/
+# JDK for every project, populated from per-language store images tagged
+# "<prefix>-<lang>:<hash>".
+AIDC_TOOLCHAIN_VOLUME="${AIDC_TOOLCHAIN_VOLUME:-aidc_toolchains}"
+AIDC_TOOLCHAIN_STORE_IMAGE_PREFIX="aidc-toolchain-store"
+
 AIDC_MANAGED_PATHS=(
   ".devcontainer/Dockerfile"
+  ".devcontainer/Dockerfile.base"
   ".devcontainer/compose.yaml"
   ".devcontainer/compose.firewall.yaml"
   ".devcontainer/compose.hardened.yaml"
@@ -68,6 +75,7 @@ AIDC_MERGE_PATHS=(
 # seed-once files that are never rewritten.
 AIDC_OVERWRITE_TEMPLATE_MAP=(
   "templates/devcontainer/Dockerfile.tmpl:.devcontainer/Dockerfile:0755"
+  "templates/devcontainer/Dockerfile.base.tmpl:.devcontainer/Dockerfile.base:0644"
   "templates/devcontainer/compose.yaml.tmpl:.devcontainer/compose.yaml:0644"
   "templates/devcontainer/compose.firewall.yaml.tmpl:.devcontainer/compose.firewall.yaml:0644"
   "templates/devcontainer/compose.hardened.yaml.tmpl:.devcontainer/compose.hardened.yaml:0644"

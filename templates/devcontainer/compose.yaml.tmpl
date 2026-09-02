@@ -5,6 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        AIDC_BASE_IMAGE: ${AIDC_BASE_IMAGE:-aidc-base:latest}
         AIDC_TOOLCHAINS: ${AIDC_TOOLCHAINS:-}
         AIDC_SECURITY_TOOLS: ${AIDC_SECURITY_TOOLS:-}
         AIDC_AGENTS: ${AIDC_AGENTS:-}
@@ -87,9 +88,22 @@ services:
       - type: volume
         source: grok_home
         target: /home/vscode/.grok
+      # Shared read-only toolchain store (issue #9): one copy of Go/Rust/JDK
+      # (+ gosec/cargo-audit) serves all projects, populated by
+      # 'aidc tools install'. Read-only so agents can't tamper with the shared
+      # toolchain; revoke by repopulating the volume.
+      - type: volume
+        source: aidc_toolchains
+        target: /opt/toolchains
+        read_only: true
 
 volumes:
   command_history:
+  # Shared across ALL projects (not project-scoped), so it is external: aidc
+  # creates/populates it via 'aidc tools install' and never removes it on a
+  # per-project 'aidc destroy'. aidc ensures it exists before compose runs.
+  aidc_toolchains:
+    external: true
   claude_home:
   codex_home:
   opencode_home:

@@ -39,6 +39,7 @@ make_fixture() {
   mkdir -p "$dir/.devcontainer/scripts" "$dir/.ai-container" "$dir/scripts/ci"
   local t="$REPO_ROOT/templates"
   cp "$t/devcontainer/Dockerfile.tmpl"              "$dir/.devcontainer/Dockerfile"
+  cp "$t/devcontainer/Dockerfile.base.tmpl"         "$dir/.devcontainer/Dockerfile.base"
   cp "$t/devcontainer/compose.yaml.tmpl"            "$dir/.devcontainer/compose.yaml"
   cp "$t/devcontainer/compose.firewall.yaml.tmpl"   "$dir/.devcontainer/compose.firewall.yaml"
   cp "$t/devcontainer/compose.hardened.yaml.tmpl"   "$dir/.devcontainer/compose.hardened.yaml"

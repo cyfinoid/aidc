@@ -58,6 +58,8 @@ aidc up            # build + start container
 | `aidc status --global` | one-line summary of every aidc container on this host |
 | `aidc down` | stop the container, keep volumes |
 | `aidc rebuild` | rebuild the image and restart |
+| `aidc tools install [go\|rust\|java\|all]` | populate the shared read-only toolchain volume |
+| `aidc tools status` | show which shared toolchains are installed |
 | `aidc destroy` | remove container + volumes + image (prompts; `-f` to skip) |
 
 ## What lives where (inside the container)
@@ -84,10 +86,10 @@ aidc inspects the repo on every `aidc up` and installs matching toolchains:
 
 | Marker file(s) | Toolchain |
 |---|---|
-| `go.mod` | Go — apt `golang-go` |
-| `Cargo.toml`, `rust-toolchain.toml`, `rust-toolchain` | Rust stable via rustup (minimal profile) |
+| `go.mod` | Go (+ `gosec`) — shared toolchain volume |
+| `Cargo.toml`, `rust-toolchain.toml`, `rust-toolchain` | Rust stable (+ `cargo-audit`) — shared toolchain volume |
 | `Gemfile` | Ruby — apt `ruby-full` |
-| `pom.xml`, `build.gradle`, `build.gradle.kts` | JDK — apt `default-jdk` |
+| `pom.xml`, `build.gradle`, `build.gradle.kts` | JDK 21 — shared toolchain volume |
 | `composer.json` | PHP CLI — apt `php-cli` |
 | `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` | Node 22 — nodesource apt (installed on detection) |
 | `requirements.txt`, `uv.lock`, `pyproject.toml`, `Pipfile`, `Pipfile.lock`, `poetry.lock` | Python 3.13 via uv (already in base) |
@@ -95,6 +97,24 @@ aidc inspects the repo on every `aidc up` and installs matching toolchains:
 Node is installed from the nodesource apt repo when the `node` toolchain is detected (or pinned via `AIDC_TOOLCHAINS=node`) — it's no longer baked into the base image, so projects that don't use Node don't carry it. Python 3.13 (uv-managed) stays in the base image; the Python marker still triggers a `bandit` install (see [security.md](security.md#per-toolchain-linters-auto-installed)).
 
 The detected list is passed as a Docker `--build-arg AIDC_TOOLCHAINS=go,rust,...` so it caches per combination — switching between repos doesn't rebuild.
+
+### Shared image + toolchain volume
+
+aidc's image is split so N projects don't each carry a full ~3 GB copy:
+
+- **Shared base image** (`aidc-base:<hash>`) — OS, uv/Python, the pinned security
+  scanners, pmg, and the coding agents. Built **once** per content hash (of
+  `.devcontainer/Dockerfile.base` + the `AIDC_AGENTS` selection) and reused by
+  every project; the per-project image is a thin `FROM aidc-base` layer with just
+  the detected toolchains and project-setup. Pin a custom base with
+  `AIDC_BASE_IMAGE=<tag>` in `.ai-container/project.env`.
+- **Shared toolchain volume** (`aidc_toolchains`) — Go, Rust, and the JDK (plus
+  `gosec`/`cargo-audit`) live in **one** read-only Docker volume mounted at
+  `/opt/toolchains` in every container, instead of being baked per project. It's
+  populated automatically for detected go/rust/java toolchains on `aidc up`, or
+  manually with `aidc tools install [go|rust|java|all]` (`aidc tools status` lists
+  what's present). Because it's read-only and shared, revoke a bad toolchain once
+  with `docker volume rm aidc_toolchains` and repopulate.
 
 **Override** in `.ai-container/project.env`:
 
@@ -106,6 +126,8 @@ AIDC_AGENTS=claude,codex     # bake in only these coding agents; default is the
                              #   Adding one later needs 'aidc rebuild'.
 AIDC_NO_BUILD=1              # never build implicitly — 'aidc up' fails fast if
                              #   the image is missing (build it with 'aidc rebuild')
+AIDC_BASE_IMAGE=my-base:tag  # pin a custom shared base instead of the built
+                             #   content-hashed aidc-base:<hash>
 ```
 
 ### Custom setup hook

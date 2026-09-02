@@ -2,13 +2,14 @@
 #
 # Assert every pinned tool inside a built aidc image reports its pinned
 # version. Reads the `ARG <TOOL>_VERSION=` defaults from the Dockerfile
-# template and substring-matches each tool's version output.
+# template and substring-matches each tool's version output. The pinned tools
+# live in the shared base template (Dockerfile.base.tmpl) since the image split.
 #
 # Usage: check-image-pins.sh <image-ref> [dockerfile]
 set -euo pipefail
 
 image="${1:?usage: check-image-pins.sh <image-ref> [dockerfile]}"
-df="${2:-templates/devcontainer/Dockerfile.tmpl}"
+df="${2:-templates/devcontainer/Dockerfile.base.tmpl}"
 [[ -f "$df" ]] || { echo "dockerfile not found: $df" >&2; exit 2; }
 
 arg_value() { sed -n "s/^ARG $1=\(.*\)$/\1/p" "$df" | head -1; }

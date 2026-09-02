@@ -8,6 +8,77 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-02 — Port community PRs #18 + #20 (Wave 3: image split + toolchain volume)
+
+**Summary:** The image architecture re-work, done as one design. Two community
+PRs (written against `main`'s monolithic Dockerfile) were **re-derived** onto
+the enhancements-branch Dockerfile:
+
+- **#18 (issue #7)** — split into a shared `aidc-base:<hash>` image + a thin
+  `FROM aidc-base` per-project layer.
+- **#20 (issue #9)** — move Go/Rust/JDK (+ gosec/cargo-audit) into one shared
+  read-only `aidc_toolchains` volume, with `aidc tools install/status`.
+
+**Why:** N projects each carried a full ~3 GB image with identical common
+layers and duplicate toolchains. The base is now built once and shared; the
+toolchains are one on-disk copy mounted read-only everywhere. Fresh-project
+setup drops from tens of minutes to a thin-layer build.
+
+**What changed:**
+- **New `templates/devcontainer/Dockerfile.base.tmpl`** — the project-independent
+  layers (former `Dockerfile.tmpl` lines 1–371: apt base, uv/Python, git-delta,
+  pmg, vet, semgrep/trufflehog/gitleaks, syft/grype, rtk, clipboard bridge,
+  bootstrap-claude, and the `AIDC_AGENTS` agent install). **`Dockerfile.tmpl`**
+  is now a thin `FROM ${AIDC_BASE_IMAGE}` layer: toolchain-volume PATH/env, the
+  toolchain arm (go/rust/java → volume echo; ruby/node/php/shell/python baked),
+  the security-tools arm, and project-setup.
+- **New `templates/devcontainer/Dockerfile.toolchain.tmpl`** — builds one
+  toolchain (go|rust|java) into `/opt/toolchains-store/<lang>` (gosec ships in
+  the go store, cargo-audit in the rust store; `build-essential` added to the
+  rust arm to compile cargo-audit) and its ENTRYPOINT copies the store into the
+  mounted volume.
+- **`lib/aidc/runtime.sh`** — `base_image_tag`/`ensure_base_image` (content hash
+  of Dockerfile.base + AIDC_AGENTS; honors an explicit `AIDC_BASE_IMAGE`),
+  `toolchain_image_tag`/`ensure_toolchain_image`, `ensure_toolchain_volume`(s),
+  and `cmd_tools`/`tools_status`. `ensure_base_image` + `ensure_toolchain_volumes`
+  are wired before the compose build in up/rebuild/rescan/ensure_container_running
+  (preserving the Wave-2 fast path). `lib/aidc/common.sh` gains the volume/prefix
+  constants and registers `.devcontainer/Dockerfile.base` in the managed paths +
+  overwrite map. `lib/aidc.sh` routes `tools`, and lists it in help + the known
+  set; `completions/aidc.bash` adds it (drift guard).
+- **`compose.yaml.tmpl`** — `AIDC_BASE_IMAGE` build arg + the read-only
+  `/opt/toolchains` mount, with the volume declared **`external: true`**.
+- **CI/validator** — `check-image-pins.sh` and the sbom pin-reuse steps now read
+  the pins from `Dockerfile.base.tmpl` (that's where they moved); the sbom and
+  image-size builds build the base first then the thin layer;
+  `validate-scaffold.sh`, its test, and the e2e file list require Dockerfile.base
+  and lint both Dockerfiles.
+
+**Commands / verification:**
+- `bash tests/toolchain-volume.test.sh` → 14 passed; full suite (24 files) green;
+  `bash .github/scripts/check-module-deps.sh` OK; `bash-compat-check.sh` OK;
+  `shellcheck` clean; `aidc-scan` clean above LOW; compose.yaml parses (pyyaml).
+- **Needs a Docker host (none here) — flagged for host validation:** `aidc rebuild`
+  to prove the base builds, the thin layer builds `FROM` it, `aidc tools install
+  go` populates the volume, and a go/rust project resolves the toolchain +
+  gosec/cargo-audit from `/opt/toolchains` at runtime.
+
+**Notes / deliberate corrections to the source PRs:**
+- **Volume must be `external`.** PR #20 declared `aidc_toolchains` as a normal
+  compose volume, which compose project-scopes (`aidc_<slug>_aidc_toolchains`) —
+  it would never match the `docker volume create aidc_toolchains` the CLI
+  populates. Declared `external: true` and made `ensure_toolchain_volumes` always
+  create the volume (even with no go/rust/java) so the external mount resolves.
+- Toolchain builder `build-essential` added (cargo-audit compiles); FROM pinned
+  by digest like the base. `aidc destroy` leaves the base image and the external
+  volume intact (`--rmi local` / `-v` don't touch them), so other projects keep
+  working.
+- Fast-path (#14) × agent-set hashing: switching `AIDC_AGENTS` rehashes the base
+  and may build a fresh base even though the thin image fast-starts unchanged —
+  use `aidc rebuild` to actually pick up a new agent. Documented.
+
+---
+
 ## 2026-09-02 — Port community PRs #14/#15/#17/#19 (Wave 2: perf + image size)
 
 **Summary:** Second batch of the open-PR triage. Four community PRs (all

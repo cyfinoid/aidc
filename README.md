@@ -67,6 +67,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 - seeds selected config from host read-only mounts on first startup
 - creates one `CORE_LOGICS` git worktree per repo and mounts it at `/opt/CORE_LOGICS` for shared cross-repo notes
 - detects the project's toolchains (Go, Rust, Ruby, Java, PHP, Node, Python — plus shell scripts) and installs them automatically; `aidc rescan` re-detects later for a repo that started empty
+- shares one `aidc-base` image (OS, Python, scanners, agents) across all projects — each project's image is a thin toolchain delta on top — and keeps Go/Rust/JDK in one read-only `aidc_toolchains` volume (`aidc tools install`) instead of a full copy per project
 - bakes always-on security scanners (`semgrep`, `gitleaks`, `trufflehog`) plus per-toolchain linters (`gosec`, `bandit`, `cargo-audit`, `bundler-audit`, `shellcheck`) into the image
 - seeds non-negotiable guidance into `CLAUDE.md` / `AGENTS.md` for every project — security guardrails, test-coverage discipline, and changelog/session-log conventions
 - seeds committed project docs once, never overwriting your edits — `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and a `logs/` session journal
@@ -94,6 +95,7 @@ aidc up [--clipboard] [--isolate-vm]
 aidc down
 aidc rebuild [--clipboard] [--isolate-vm]
 aidc rescan
+aidc tools <install [go|rust|java|all]|status>
 aidc status [--global]
 aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
 aidc shell

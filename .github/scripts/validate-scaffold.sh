@@ -31,6 +31,7 @@ skip() { printf 'skip: %s\n' "$1"; }
 # --- 1. required files -------------------------------------------------------
 required_files=(
   .devcontainer/Dockerfile
+  .devcontainer/Dockerfile.base
   .devcontainer/compose.yaml
   .devcontainer/compose.firewall.yaml
   .devcontainer/compose.hardened.yaml
@@ -157,10 +158,20 @@ fi
 
 # --- 6. Dockerfile BuildKit lint ----------------------------------------------
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  if docker build --check "$proj/.devcontainer" >/dev/null 2>&1; then
+  # Shared base layer (Dockerfile.base) — the substantial one.
+  if docker build --check -f "$proj/.devcontainer/Dockerfile.base" "$proj/.devcontainer" >/dev/null 2>&1; then
+    ok "Dockerfile.base passes docker build --check"
+  else
+    docker build --check -f "$proj/.devcontainer/Dockerfile.base" "$proj/.devcontainer" 2>&1 | sed 's/^/  /' >&2 || true
+    fail "Dockerfile.base failed docker build --check"
+  fi
+  # Thin per-project layer — point AIDC_BASE_IMAGE at a resolvable base so its
+  # FROM lints (the real base tag is content-hashed at build time).
+  lint_base="mcr.microsoft.com/devcontainers/base:ubuntu-24.04"
+  if docker build --check --build-arg "AIDC_BASE_IMAGE=$lint_base" "$proj/.devcontainer" >/dev/null 2>&1; then
     ok "Dockerfile passes docker build --check"
   else
-    docker build --check "$proj/.devcontainer" 2>&1 | sed 's/^/  /' >&2 || true
+    docker build --check --build-arg "AIDC_BASE_IMAGE=$lint_base" "$proj/.devcontainer" 2>&1 | sed 's/^/  /' >&2 || true
     fail "Dockerfile failed docker build --check"
   fi
 else

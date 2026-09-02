@@ -86,6 +86,9 @@ jobs:
           bash tests/compose-up.test.sh
           bash tests/agents-opt-in.test.sh
 
+      - name: Run image-split + toolchain-volume unit tests
+        run: bash tests/toolchain-volume.test.sh
+
       - name: Check lib module layering
         run: .github/scripts/check-module-deps.sh
 

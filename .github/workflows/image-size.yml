@@ -33,6 +33,7 @@ jobs:
           set -euo pipefail
           mkdir -p work
           cp templates/devcontainer/Dockerfile.tmpl work/Dockerfile
+          cp templates/devcontainer/Dockerfile.base.tmpl work/Dockerfile.base
           cat > work/project-setup.sh <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -46,7 +47,12 @@ jobs:
       - name: Build image
         run: |
           set -euo pipefail
+          # Image split (issue #7): build the shared base, then the thin layer
+          # FROM it. Go/Rust/Java live in the shared volume now (issue #9), so
+          # this per-project image measures base + node/python deltas.
+          docker build -f work/Dockerfile.base -t aidc-base:probe work
           docker build \
+            --build-arg AIDC_BASE_IMAGE=aidc-base:probe \
             --build-arg AIDC_TOOLCHAINS=go,node,python \
             --build-arg AIDC_SECURITY_TOOLS= \
             -t aidc-size-probe work

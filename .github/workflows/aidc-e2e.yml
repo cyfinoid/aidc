@@ -195,6 +195,7 @@ jobs:
 
           for f in \
             .devcontainer/Dockerfile \
+            .devcontainer/Dockerfile.base \
             .devcontainer/compose.yaml \
             .devcontainer/compose.firewall.yaml \
             .devcontainer/compose.hardened.yaml \

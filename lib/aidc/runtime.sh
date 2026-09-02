@@ -13,6 +13,8 @@ aidc::cmd_up() {
     aidc::vm_ensure "$workspace"
   fi
 
+  aidc::ensure_base_image "$workspace"
+  aidc::ensure_toolchain_volumes "$workspace"
   aidc::compose_up "$workspace"
   # Catch up the host with any transcripts a prior (possibly ungraceful) session
   # left in the volume — the recovery case the on-exit hooks can't cover.
@@ -30,6 +32,8 @@ aidc::cmd_rebuild() {
     aidc::vm_ensure "$workspace"
   fi
 
+  aidc::ensure_base_image "$workspace"
+  aidc::ensure_toolchain_volumes "$workspace"
   aidc::compose "$workspace" up -d --build --force-recreate workspace
   aidc::auto_sync_sessions "$workspace" all
   aidc::log "container rebuilt for $(basename "$workspace")"
@@ -57,6 +61,8 @@ aidc::cmd_rescan() {
     aidc::vm_ensure "$workspace"
   fi
 
+  aidc::ensure_base_image "$workspace"
+  aidc::ensure_toolchain_volumes "$workspace"
   # --build picks up the changed AIDC_TOOLCHAINS build arg and reinstalls.
   aidc::compose "$workspace" up -d --build workspace
   aidc::log "rescan complete for $(basename "$workspace")"
@@ -489,6 +495,8 @@ aidc::ensure_container_running() {
 
   if [[ -z "$(aidc::compose_capture "$workspace" ps -q workspace)" ]]; then
     aidc::debug "container not running — starting (first run builds the image; can take minutes)"
+    aidc::ensure_base_image "$workspace"
+    aidc::ensure_toolchain_volumes "$workspace"
     aidc::compose_up "$workspace"
     # Only on the down→up transition (not every exec), so we recover prior
     # transcripts without adding a sync to each command.
@@ -566,6 +574,165 @@ aidc::compose_up() {
   else
     aidc::compose "$workspace" up -d --build workspace
   fi
+}
+
+# ─── shared base image (issue #7) ───
+# The project-independent layer (OS/uv/scanners/pmg/agents) is built once from
+# Dockerfile.base and reused across projects. The tag is content-hashed on the
+# base template plus the AIDC_AGENTS selection, so a template edit or an
+# agent-set change transparently produces a fresh base.
+
+aidc::base_image_tag() {
+  local workspace="$1"
+  local hash cmd input
+  if command -v sha256sum >/dev/null 2>&1; then
+    cmd="sha256sum"
+  else
+    cmd="shasum -a 256"
+  fi
+  input="$(cat "$workspace/.devcontainer/Dockerfile.base" 2>/dev/null)"
+  input+="|AIDC_AGENTS=${AIDC_AGENTS:-all}"
+  hash="$(printf '%s' "$input" | $cmd | awk '{print $1}' | cut -c1-12)"
+  printf 'aidc-base:%s' "${hash:-latest}"
+}
+
+# Build the shared base image if it isn't present. An explicit AIDC_BASE_IMAGE
+# (environment or project.env) pins a custom base and skips the content hash.
+aidc::ensure_base_image() {
+  local workspace="$1"
+  # Load project.env (custom AIDC_BASE_IMAGE) and compute AIDC_AGENTS before we
+  # derive/build the tag.
+  aidc::export_compose_env "$workspace"
+  local tag
+  if [[ -n "${AIDC_BASE_IMAGE:-}" ]]; then
+    tag="$AIDC_BASE_IMAGE"
+  else
+    tag="$(aidc::base_image_tag "$workspace")"
+    export AIDC_BASE_IMAGE="$tag"
+  fi
+  if ! docker image inspect "$tag" >/dev/null 2>&1; then
+    aidc::log "building shared base image $tag (one-time; shared across projects)"
+    ( cd "$workspace/.devcontainer" \
+        && docker build -f "$workspace/.devcontainer/Dockerfile.base" \
+             --build-arg AIDC_AGENTS="${AIDC_AGENTS:-all}" \
+             -t "$tag" "$workspace/.devcontainer" ) \
+      || aidc::die "failed to build base image $tag"
+    aidc::log "base image $tag ready"
+  fi
+}
+
+# ─── shared toolchain volume (issue #9) ───
+# Go/Rust/JDK (plus gosec/cargo-audit) live in one read-only named volume shared
+# by every project, populated from a per-language store image
+# (Dockerfile.toolchain). One copy on disk; revoke by removing the volume and
+# repopulating with 'aidc tools install'.
+
+aidc::toolchain_image_tag() {
+  local lang="$1"
+  local hash cmd
+  if command -v sha256sum >/dev/null 2>&1; then
+    cmd="sha256sum"
+  else
+    cmd="shasum -a 256"
+  fi
+  hash="$($cmd "$AIDC_ROOT/templates/devcontainer/Dockerfile.toolchain.tmpl" 2>/dev/null | awk '{print $1}' | cut -c1-12)"
+  printf '%s-%s:%s' "$AIDC_TOOLCHAIN_STORE_IMAGE_PREFIX" "$lang" "${hash:-latest}"
+}
+
+aidc::ensure_toolchain_image() {
+  local lang="$1"
+  local tag
+  tag="$(aidc::toolchain_image_tag "$lang")"
+  if ! docker image inspect "$tag" >/dev/null 2>&1; then
+    aidc::log "building toolchain store image $tag (one-time)"
+    ( cd "$AIDC_ROOT" \
+        && docker build \
+             -f "templates/devcontainer/Dockerfile.toolchain.tmpl" \
+             --build-arg AIDC_TOOLCHAIN="$lang" \
+             -t "$tag" templates/devcontainer ) \
+      || aidc::die "failed to build toolchain store image for $lang"
+    aidc::log "toolchain store image $tag ready"
+  fi
+}
+
+# Populate the shared volume with one toolchain, if not already present. Idempotent.
+aidc::ensure_toolchain_volume() {
+  local lang="$1"
+  local tag
+  tag="$(aidc::toolchain_image_tag "$lang")"
+  docker volume inspect "$AIDC_TOOLCHAIN_VOLUME" >/dev/null 2>&1 \
+    || docker volume create "$AIDC_TOOLCHAIN_VOLUME" >/dev/null
+  aidc::ensure_toolchain_image "$lang"
+  if ! docker run --rm -v "$AIDC_TOOLCHAIN_VOLUME:/opt/toolchains" \
+         --entrypoint test "$tag" -f "/opt/toolchains/$lang/.aidc-ready" >/dev/null 2>&1; then
+    aidc::log "populating shared $lang toolchain in $AIDC_TOOLCHAIN_VOLUME (one-time)"
+    docker run --rm -v "$AIDC_TOOLCHAIN_VOLUME:/opt/toolchains" "$tag" \
+      || aidc::die "failed to populate $lang toolchain volume"
+    aidc::log "shared $lang toolchain ready"
+  fi
+}
+
+# Ensure every volume-backed toolchain the workspace needs (go/rust/java) is
+# present before the container starts. Node/Ruby/PHP/shell/Python bake into the
+# per-project image instead, so they are skipped here.
+aidc::ensure_toolchain_volumes() {
+  local workspace="$1"
+  aidc::export_compose_env "$workspace"
+  # compose mounts the shared volume as `external`, so it must exist before
+  # `up` even when no go/rust/java toolchain is used — an empty volume mounts
+  # harmlessly (the /opt/toolchains/*/bin dirs are simply absent from PATH).
+  docker volume inspect "$AIDC_TOOLCHAIN_VOLUME" >/dev/null 2>&1 \
+    || docker volume create "$AIDC_TOOLCHAIN_VOLUME" >/dev/null
+  local tc
+  IFS=',' read -ra _aidc_tcs <<<"${AIDC_TOOLCHAINS:-}"
+  for tc in ${_aidc_tcs[@]+"${_aidc_tcs[@]}"}; do
+    case "$tc" in
+      go|rust|java) aidc::ensure_toolchain_volume "$tc" ;;
+      *) : ;;
+    esac
+  done
+}
+
+# 'aidc tools install [go|rust|java|all]' / 'aidc tools status'.
+aidc::cmd_tools() {
+  local sub="${1:-status}"
+  case "$sub" in
+    install|ensure)
+      shift || true
+      local lang="${1:-all}"
+      case "$lang" in
+        all) aidc::ensure_toolchain_volume go; aidc::ensure_toolchain_volume rust; aidc::ensure_toolchain_volume java ;;
+        go|rust|java) aidc::ensure_toolchain_volume "$lang" ;;
+        *) aidc::die "usage: aidc tools install [go|rust|java|all]" ;;
+      esac
+      ;;
+    status)
+      aidc::tools_status
+      ;;
+    *)
+      aidc::die "usage: aidc tools <install [go|rust|java|all]|status>"
+      ;;
+  esac
+}
+
+aidc::tools_status() {
+  printf 'shared toolchain volume: %s\n' "$AIDC_TOOLCHAIN_VOLUME"
+  if ! docker volume inspect "$AIDC_TOOLCHAIN_VOLUME" >/dev/null 2>&1; then
+    # shellcheck disable=SC2016  # backticks are literal guidance, not a subshell
+    printf '  (not created yet — run `aidc tools install all`)\n'
+    return 0
+  fi
+  local lang tag
+  for lang in go rust java; do
+    tag="$(aidc::toolchain_image_tag "$lang")"
+    if docker image inspect "$tag" >/dev/null 2>&1 \
+        && docker run --rm -v "$AIDC_TOOLCHAIN_VOLUME:/opt/toolchains" \
+             --entrypoint test "$tag" -f "/opt/toolchains/$lang/.aidc-ready" >/dev/null 2>&1; then
+      printf '  %-5s installed\n' "$lang"
+    else
+      printf '  %-5s not installed\n' "$lang"
+    fi
+  done
 }
 
 aidc::export_compose_env() {

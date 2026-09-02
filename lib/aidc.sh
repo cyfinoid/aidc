@@ -66,6 +66,9 @@ aidc::main() {
     rescan)
       aidc::cmd_rescan "$@"
       ;;
+    tools)
+      aidc::cmd_tools "$@"
+      ;;
     status)
       aidc::cmd_status "$@"
       ;;
@@ -142,7 +145,7 @@ aidc::main() {
 # first letter) before pointing at help and doctor.
 aidc::suggest_command() {
   local cmd="$1"
-  local known="init up down rebuild rescan status destroy shell exec claude codex opencode grok cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
+  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode grok cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
   local suggestions="" k
   for k in $known; do
     case "$k" in
@@ -169,6 +172,7 @@ Usage:
   aidc down
   aidc rebuild [--clipboard] [--isolate-vm]
   aidc rescan
+  aidc tools <install [go|rust|java|all]|status>
   aidc status [--global]
   aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
   aidc shell
@@ -213,6 +217,10 @@ Notes:
     Worktree and scaffold removal are opt-in via the listed flags.
   - aidc rescan re-detects project languages (handy once a repo that started
     empty gains code) and rebuilds so the matching toolchains/scanners install.
+  - aidc tools install [go|rust|java|all] populates the shared, read-only
+    toolchain volume (one copy of Go/Rust/JDK for all projects); 'aidc tools
+    status' shows what's installed. Detected go/rust/java toolchains are
+    populated automatically on 'aidc up'.
   - aidc sync-sessions pulls in-container session logs back to host
     ~/.claude/projects so '/insights' on the host can see them. Sessions also
     auto-sync on container start, agent exit, 'down', and 'destroy' unless
