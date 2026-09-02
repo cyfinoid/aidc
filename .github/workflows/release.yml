@@ -25,13 +25,13 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          ver="$(sed -n 's/^AIDC_VERSION="\${AIDC_VERSION:-\(.*\)}"$/\1/p' lib/aidc.sh)"
+          ver="$(sed -n 's/^AIDC_VERSION="\${AIDC_VERSION:-\(.*\)}"$/\1/p' lib/aidc/common.sh)"
           if [ -z "$ver" ]; then
-            echo "::error::could not parse AIDC_VERSION from lib/aidc.sh"
+            echo "::error::could not parse AIDC_VERSION from lib/aidc/common.sh"
             exit 1
           fi
           if [ "v$ver" != "$tag" ]; then
-            echo "::error::tag $tag does not match lib/aidc.sh AIDC_VERSION ($ver) — bump the version line first (see docs/releasing.md)"
+            echo "::error::tag $tag does not match lib/aidc/common.sh AIDC_VERSION ($ver) — bump the version line first (see docs/releasing.md)"
             exit 1
           fi
 

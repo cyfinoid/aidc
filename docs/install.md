@@ -121,9 +121,10 @@ aidc's image is split so N projects don't each carry a full ~3 GB copy:
 ```bash
 AIDC_TOOLCHAINS=go,ruby      # force-install this list, ignore detection
 AIDC_TOOLCHAINS=             # disable installs entirely (empty value, still set)
-AIDC_AGENTS=claude,codex     # bake in only these coding agents; default is the
-                             #   tool you first run, 'all' bakes in every agent.
-                             #   Adding one later needs 'aidc rebuild'.
+AIDC_AGENTS=claude,codex     # slim the shared base to only these agents (builds
+                             #   a base variant). Default 'all' bakes in every
+                             #   agent once in the shared base (issue #7), so the
+                             #   per-project cost of all agents is already zero.
 AIDC_NO_BUILD=1              # never build implicitly — 'aidc up' fails fast if
                              #   the image is missing (build it with 'aidc rebuild')
 AIDC_BASE_IMAGE=my-base:tag  # pin a custom shared base instead of the built

@@ -352,15 +352,12 @@ aidc::run_tool() {
   local workspace
   workspace="$(aidc::default_workspace)"
 
-  # Seed the agent list from the tool being run so a first build only bakes in
-  # the agent actually used (AIDC_AGENTS opt-in — issue #8). An explicit
-  # AIDC_AGENTS in project.env or the environment wins; 'all' bakes in every
-  # agent. Adding a different agent later needs a rebuild (the image already
-  # exists, so 'aidc <other>' fast-starts without it) — set AIDC_AGENTS in
-  # project.env and run 'aidc rebuild', or 'aidc rebuild' after exporting it.
-  if [[ -z "${AIDC_AGENTS:-}" ]]; then
-    export AIDC_AGENTS="$tool"
-  fi
+  # Agent selection is NOT seeded from the tool: the shared base image (issue #7)
+  # amortizes all agents across every project, so the default bakes in all of
+  # them (one shared base, no per-project agent cost). Set AIDC_AGENTS explicitly
+  # in .ai-container/project.env to build a slim single/few-agent base variant —
+  # the base is content-hashed on the selection and the thin image rebuilds when
+  # it changes (see aidc::image_base_is_current).
 
   aidc::ensure_container_running "$workspace"
 
@@ -558,6 +555,21 @@ aidc::image_exists() {
   docker image inspect "$image" >/dev/null 2>&1
 }
 
+# True when the existing thin image was built on the *current* base tag
+# (aidc.base label == $AIDC_BASE_IMAGE). False when it's stale — e.g. the
+# AIDC_AGENTS selection or the base template changed and ensure_base_image
+# produced a new base — so the fast path rebuilds instead of starting an image
+# that lacks the newly-selected agents. Callers set AIDC_BASE_IMAGE first.
+aidc::image_base_is_current() {
+  local workspace="$1"
+  [[ -n "${AIDC_BASE_IMAGE:-}" ]] || return 1
+  local image thin_base
+  image="$(aidc::compose_capture "$workspace" config --images 2>/dev/null | head -n1)"
+  [[ -n "$image" ]] || return 1
+  thin_base="$(docker image inspect "$image" --format '{{index .Config.Labels "aidc.base"}}' 2>/dev/null)" || return 1
+  [[ -n "$thin_base" && "$thin_base" == "$AIDC_BASE_IMAGE" ]]
+}
+
 # Start the container, building only when the image is missing (fast path for
 # 'aidc up' and the agent commands — routine restarts skip the multi-minute
 # rebuild). 'aidc rebuild'/'aidc rescan' always force a build and bypass this.
@@ -569,7 +581,7 @@ aidc::compose_up() {
       aidc::die "AIDC_NO_BUILD=1 but no image for $(basename "$workspace"); run 'aidc up' once or 'aidc rebuild'"
     fi
     aidc::compose "$workspace" up -d workspace
-  elif aidc::image_exists "$workspace"; then
+  elif aidc::image_exists "$workspace" && aidc::image_base_is_current "$workspace"; then
     aidc::compose "$workspace" up -d workspace
   else
     aidc::compose "$workspace" up -d --build workspace

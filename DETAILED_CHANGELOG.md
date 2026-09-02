@@ -8,6 +8,58 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-02 — Version bump 0.2.0 + agent-availability fixes (Wave 3 follow-up)
+
+**Summary:** Bump `AIDC_VERSION` to 0.2.0 (so existing projects detect as stale
+and prompt `aidc upgrade`) and fix three agent-related defects surfaced by a
+real `aidc opencode` run after Wave 3.
+
+**Symptoms (from the user's run):** `aidc opencode` → `OCI runtime exec failed:
+exec: "opencode": executable file not found in $PATH`; `aidc grok`/`aidc claude`
+likewise missing even after a plain `aidc up`.
+
+**Diagnosis:**
+1. **opencode install dir.** opencode's installer hard-codes
+   `INSTALL_DIR=$HOME/.opencode/bin` and `--no-modify-path` skips PATH wiring, so
+   the binary was never on PATH (pre-existing, but exposed now).
+2. **Seed-from-tool × shared base × fast path.** Wave-2 seeded
+   `AIDC_AGENTS="$tool"` in `run_tool`, so the first `aidc opencode` built an
+   **opencode-only** base. The Wave-2 fast path (`compose_up`) then started the
+   existing thin image without rebuilding even after `aidc up` rebuilt the base
+   to all-agents — so claude/grok stayed absent. Seed-from-tool also fragments
+   the shared base (defeating issue #7's amortization).
+3. **Version parse after the split.** `aidc update` and `release.yml` parsed
+   `AIDC_VERSION` from `lib/aidc.sh`, but the module split moved it to
+   `lib/aidc/common.sh` → empty version.
+
+**What changed:**
+- `templates/devcontainer/Dockerfile.base.tmpl`: symlink
+  `~/.opencode/bin/opencode` → `~/.local/bin/opencode` after install.
+- `lib/aidc/runtime.sh`: removed the seed-from-tool block in `run_tool`
+  (`AIDC_AGENTS` now defaults to `all` via `export_compose_env`; explicit
+  project.env value still slims). New `aidc::image_base_is_current` +
+  `compose_up` fast-path gate: the thin image is labeled `aidc.base=<tag>`
+  (`Dockerfile.tmpl`) and rebuilds when that differs from the current base tag
+  (agent-set or base-template change), instead of starting a stale image.
+- `lib/aidc/common.sh`: `AIDC_VERSION` 0.1.0 → **0.2.0**. `lib/aidc/status.sh`
+  (aidc update) and `.github/workflows/release.yml` now parse the version from
+  `lib/aidc/common.sh`; `docs/releasing.md` points there too.
+- Tests: `compose-up.test.sh` gains a stale-base rebuild case (8);
+  `agents-opt-in.test.sh` now asserts run_tool does NOT seed;
+  `update.test.sh` fixture writes the version to `lib/aidc/common.sh`.
+
+**Verification:** full suite (24 files) green; shellcheck clean; `aidc-scan`
+clean; the version parses to `0.2.0` via the exact `sed` used by update/release.
+Still needs a Docker host to confirm the opencode symlink and the base-freshness
+rebuild end-to-end (flagged).
+
+**Notes:** the base-freshness rebuild also fixes a latent bug where editing
+`Dockerfile.base` (or bumping a pinned tool) rebuilt the base but the thin image
+fast-started on the old base. Slim single-agent bases (explicit `AIDC_AGENTS`)
+still work and rebuild the thin when the selection changes.
+
+---
+
 ## 2026-09-02 — Port community PRs #18 + #20 (Wave 3: image split + toolchain volume)
 
 **Summary:** The image architecture re-work, done as one design. Two community

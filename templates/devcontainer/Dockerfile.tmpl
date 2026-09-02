@@ -7,6 +7,12 @@
 # (compose passes it as a build arg); the aidc-base:latest default is a fallback.
 ARG AIDC_BASE_IMAGE=aidc-base:latest
 FROM ${AIDC_BASE_IMAGE}
+# Re-declared after FROM so it's usable below; the label records which base this
+# thin image was built on. aidc compares it against the current base tag and
+# forces a rebuild when they differ (e.g. the AIDC_AGENTS selection or the base
+# template changed) instead of fast-starting a now-stale image.
+ARG AIDC_BASE_IMAGE
+LABEL aidc.base="${AIDC_BASE_IMAGE}"
 
 # Shared read-only toolchain volume (issue #9): Go/Rust/JDK live in the
 # aidc_toolchains volume (populated by 'aidc tools install', mounted read-only

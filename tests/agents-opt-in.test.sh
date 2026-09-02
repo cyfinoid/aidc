@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
-# Unit tests for AIDC_AGENTS opt-in agent seeding in aidc::run_tool
-# (PR #15 / issue #8).
+# Unit tests for AIDC_AGENTS handling in aidc::run_tool (PR #15 / issue #8,
+# reconciled with the shared base image, issue #7).
 #
-#   - running 'aidc <tool>' with AIDC_AGENTS unset seeds AIDC_AGENTS to just
-#     that tool, so a first build bakes in only the agent actually used.
+#   - running 'aidc <tool>' does NOT seed AIDC_AGENTS from the tool: with the
+#     shared base amortizing all agents, the default (all) is applied later in
+#     export_compose_env, not per-tool. So an unset AIDC_AGENTS stays unset here.
 #   - an explicit AIDC_AGENTS (project.env / environment) is left untouched.
 #
 # The container-facing layer is stubbed (as in token-delivery.test.sh) so the
-# test is hermetic. run_tool is invoked in the current shell so the exported
-# AIDC_AGENTS is observable.
+# test is hermetic. run_tool is invoked in the current shell so AIDC_AGENTS is
+# observable.
 #
 # Run with: bash tests/agents-opt-in.test.sh
 # shellcheck disable=SC2034,SC1090,SC1091,SC2317
@@ -36,13 +37,13 @@ aidc::auto_sync_sessions() { :; }
 aidc::resolve_claude_oauth_token() { :; }
 aidc::compose() { :; }
 
-# ── 1. unset AIDC_AGENTS is seeded from the tool ──
+# ── 1. unset AIDC_AGENTS is NOT seeded from the tool ──
 unset AIDC_AGENTS 2>/dev/null || true
 aidc::run_tool codex "" </dev/null >/dev/null 2>&1 || true
-if [[ "${AIDC_AGENTS:-}" == "codex" ]]; then
-  ok "unset AIDC_AGENTS seeded to the invoked tool (codex)"
+if [[ -z "${AIDC_AGENTS:-}" ]]; then
+  ok "unset AIDC_AGENTS is left unset (default all applied at build time)"
 else
-  fail "expected AIDC_AGENTS=codex, got '${AIDC_AGENTS:-}'"
+  fail "run_tool unexpectedly seeded AIDC_AGENTS='${AIDC_AGENTS:-}'"
 fi
 
 # ── 2. an explicit AIDC_AGENTS wins and is not overwritten ──

@@ -47,16 +47,26 @@ COMPOSE_CALL=""
 aidc::compose() { shift; COMPOSE_CALL="$*"; }
 IMAGE_PRESENT=1
 aidc::image_exists() { [[ "$IMAGE_PRESENT" -eq 1 ]]; }
+BASE_CURRENT=1
+aidc::image_base_is_current() { [[ "$BASE_CURRENT" -eq 1 ]]; }
 
-COMPOSE_CALL=""; IMAGE_PRESENT=1
+COMPOSE_CALL=""; IMAGE_PRESENT=1; BASE_CURRENT=1
 AIDC_NO_BUILD=0 aidc::compose_up /ws
 if [[ "$COMPOSE_CALL" == "up -d workspace" ]]; then
-  ok "image present → 'up -d workspace' (no rebuild)"
+  ok "image present + base current → 'up -d workspace' (no rebuild)"
 else
   fail "expected fast path, got: $COMPOSE_CALL"
 fi
 
-COMPOSE_CALL=""; IMAGE_PRESENT=0
+COMPOSE_CALL=""; IMAGE_PRESENT=1; BASE_CURRENT=0
+AIDC_NO_BUILD=0 aidc::compose_up /ws
+if [[ "$COMPOSE_CALL" == "up -d --build workspace" ]]; then
+  ok "image present but base stale → 'up -d --build workspace' (rebuild)"
+else
+  fail "expected rebuild on stale base, got: $COMPOSE_CALL"
+fi
+
+COMPOSE_CALL=""; IMAGE_PRESENT=0; BASE_CURRENT=1
 AIDC_NO_BUILD=0 aidc::compose_up /ws
 if [[ "$COMPOSE_CALL" == "up -d --build workspace" ]]; then
   ok "image missing → 'up -d --build workspace'"

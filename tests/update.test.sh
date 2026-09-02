@@ -33,10 +33,12 @@ STUB
 chmod +x "$STUB_DIR/git"
 export PATH="$STUB_DIR:$PATH"
 
-# Fixture aidc root with a version line and a marker-dropping install.sh.
+# Fixture aidc root with a version line and a marker-dropping install.sh. The
+# canonical AIDC_VERSION lives in lib/aidc/common.sh (that's what aidc update
+# re-reads for the post-pull version).
 FIXTURE_ROOT="$TMP_ROOT/aidc-root"
-mkdir -p "$FIXTURE_ROOT/lib"
-printf 'AIDC_VERSION="${AIDC_VERSION:-9.9.9}"\n' >"$FIXTURE_ROOT/lib/aidc.sh"
+mkdir -p "$FIXTURE_ROOT/lib/aidc"
+printf 'AIDC_VERSION="${AIDC_VERSION:-9.9.9}"\n' >"$FIXTURE_ROOT/lib/aidc/common.sh"
 cat >"$FIXTURE_ROOT/install.sh" <<'EOF'
 #!/usr/bin/env bash
 touch "$(dirname "$0")/.install-ran"

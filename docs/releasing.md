@@ -6,7 +6,7 @@ releases give users a version to report (`aidc version`), give
 
 ## Procedure
 
-1. **Bump the version line** in `lib/aidc.sh`:
+1. **Bump the version line** in `lib/aidc/common.sh`:
 
    ```bash
    AIDC_VERSION="${AIDC_VERSION:-0.2.0}"

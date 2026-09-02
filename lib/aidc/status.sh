@@ -285,7 +285,7 @@ aidc::cmd_update() {
   fi
 
   local new_version new_sha
-  new_version="$(sed -n 's/^AIDC_VERSION="\${AIDC_VERSION:-\(.*\)}"$/\1/p' "$AIDC_ROOT/lib/aidc.sh")"
+  new_version="$(sed -n 's/^AIDC_VERSION="\${AIDC_VERSION:-\(.*\)}"$/\1/p' "$AIDC_ROOT/lib/aidc/common.sh")"
   new_sha="$(git -C "$AIDC_ROOT" rev-parse --short HEAD 2>/dev/null || echo '?')"
   aidc::log "updated: $old_version ($old_sha) -> ${new_version:-$old_version} ($new_sha)"
 

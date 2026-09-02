@@ -365,7 +365,8 @@ RUN mkdir -p \
              sh /tmp/install-codex.sh --release "$CODEX_VERSION" ;; \
            opencode) \
              curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
-             VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path ;; \
+             VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path && \
+             ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode ;; \
            cursor-agent) \
              curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh && \
              bash /tmp/install-cursor.sh && \
