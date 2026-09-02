@@ -108,6 +108,42 @@ for flagpos in "before" "after"; do
   fi
 done
 
+# ── 4b. a pre-existing .devcontainer is moved aside, not refused (issue #6) ──
+ws="$TMP_ROOT/devcontainer-backup"
+mkdir -p "$ws/.devcontainer"
+: >"$ws/.devcontainer/devcontainer.json"   # an aidc-managed path
+: >"$ws/.devcontainer/custom.txt"          # a user file that must survive
+if (aidc::check_init_conflicts "$ws") >/dev/null 2>&1 \
+   && [[ ! -e "$ws/.devcontainer" ]] \
+   && [[ -f "$ws/.devcontainer.aidc-backup/devcontainer.json" ]] \
+   && [[ -f "$ws/.devcontainer.aidc-backup/custom.txt" ]]; then
+  ok "pre-existing .devcontainer moved to .devcontainer.aidc-backup, contents preserved"
+else
+  fail "expected .devcontainer moved aside with contents intact"
+fi
+
+# ── 4c. a second init picks the next free backup name ──
+mkdir -p "$ws/.devcontainer"
+: >"$ws/.devcontainer/devcontainer.json"
+if (aidc::check_init_conflicts "$ws") >/dev/null 2>&1 \
+   && [[ -d "$ws/.devcontainer.aidc-backup.1" ]]; then
+  ok "second conflict backs up to .devcontainer.aidc-backup.1"
+else
+  fail "expected .devcontainer.aidc-backup.1 on the second conflict"
+fi
+
+# ── 4d. a .devcontainer with no aidc-managed file inside is left alone ──
+ws="$TMP_ROOT/devcontainer-unmanaged"
+mkdir -p "$ws/.devcontainer"
+: >"$ws/.devcontainer/notes.md"            # user content, no managed collision
+if (aidc::check_init_conflicts "$ws") >/dev/null 2>&1 \
+   && [[ -f "$ws/.devcontainer/notes.md" ]] \
+   && [[ ! -e "$ws/.devcontainer.aidc-backup" ]]; then
+  ok "a .devcontainer without a managed collision is not moved aside"
+else
+  fail "unexpected backup of a .devcontainer with no managed file"
+fi
+
 # ── 5. unknown init flag is rejected ──
 out="$( (aidc::cmd_init --bogus) 2>&1 )" && rc=0 || rc=$?
 if [[ "$rc" -ne 0 ]] && printf '%s' "$out" | grep -q 'unknown init flag'; then

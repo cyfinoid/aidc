@@ -252,7 +252,7 @@ aidc::destroy_scaffold() {
     if [[ -f "$exclude_file" ]]; then
       local tmp
       tmp="$(mktemp)"
-      grep -Fvx -e ".devcontainer/" -e ".ai-container/" -e ".cursor/rules/00-core-logics.mdc" -e "CLAUDE.md" -e "AGENTS.md" "$exclude_file" >"$tmp" || true
+      grep -Fvx -e ".devcontainer/" -e ".devcontainer.aidc-backup*/" -e ".ai-container/" -e ".cursor/rules/00-core-logics.mdc" -e ".cursor.aidc-backup*/" -e "CLAUDE.md" -e "AGENTS.md" "$exclude_file" >"$tmp" || true
       mv "$tmp" "$exclude_file"
     fi
   fi
@@ -384,6 +384,35 @@ aidc::check_init_conflicts() {
     return
   fi
 
+  # A project that already ships its own .devcontainer/.cursor is common; refusing
+  # to init there is hostile (issue #6). When a managed file exists under one of
+  # those trees, move the whole tree aside to <top>.aidc-backup[.N] so aidc can
+  # scaffold its own without clobbering the user's. Backups are git-excluded
+  # (see ensure_local_git_excludes) and restorable by hand.
+  local top
+  for top in .devcontainer .cursor; do
+    local managed=0 path
+    for path in "${AIDC_MANAGED_PATHS[@]}"; do
+      if [[ "$path" == "$top"/* && -e "$workspace/$path" ]]; then
+        managed=1
+        break
+      fi
+    done
+    [[ "$managed" -eq 1 ]] || continue
+
+    local backup="$workspace/$top.aidc-backup"
+    local n=1
+    while [[ -e "$backup" ]]; do
+      backup="$workspace/$top.aidc-backup.$n"
+      n=$((n + 1))
+    done
+    mv "$workspace/$top" "$backup"
+    aidc::warn "existing $top moved to $(basename "$backup") so aidc can scaffold its own"
+    aidc::warn "restore it later with: mv $(basename "$backup") $top"
+  done
+
+  # Any other managed path that still pre-exists (e.g. a project's own
+  # scripts/ci/aidc-*.sh) is a genuine collision we won't silently overwrite.
   local path
   for path in "${AIDC_MANAGED_PATHS[@]}"; do
     if [[ -e "$workspace/$path" ]]; then
@@ -408,7 +437,7 @@ aidc::ensure_local_git_excludes() {
   touch "$exclude_file"
 
   local pattern
-  for pattern in ".devcontainer/" ".ai-container/" ".cursor/rules/00-core-logics.mdc" "CLAUDE.md" "AGENTS.md"; do
+  for pattern in ".devcontainer/" ".devcontainer.aidc-backup*/" ".ai-container/" ".cursor/rules/00-core-logics.mdc" ".cursor.aidc-backup*/" "CLAUDE.md" "AGENTS.md"; do
     if ! grep -Fxq "$pattern" "$exclude_file"; then
       printf '%s\n' "$pattern" >>"$exclude_file"
     fi

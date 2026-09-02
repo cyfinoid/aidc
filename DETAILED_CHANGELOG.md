@@ -8,6 +8,87 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-02 — Port community PRs #23/#21/#16 onto the module layout (Batch 1)
+
+**Summary:** First batch of the open-PR triage for the `enhancements` branch.
+Three isolated, high-value community PRs were **ported** (not merged) onto the
+post-split module layout, since each was written against `main`'s monolithic
+`lib/aidc.sh` and would not `git merge` cleanly:
+
+- **#23 (issue #22)** — rewrite the in-container `/workspace` mount root to the
+  real host path in synced transcripts.
+- **#21 (issue #6)** — `aidc init` moves a pre-existing `.devcontainer`/`.cursor`
+  aside instead of refusing.
+- **#16 (issue #10)** — keep build caches out of image layers.
+
+**Why:** The `enhancements` branch already split the ~2,900-line `lib/aidc.sh`
+into `lib/aidc/*.sh` modules and reworked `templates/devcontainer/Dockerfile.tmpl`,
+so the functions and RUN blocks these PRs edit had physically moved. A plain
+merge would conflict wholesale and land nothing usable. Each PR's *idea* was
+re-applied in its new home, with tests + `aidc-scan` + changelog per repo
+guardrails. Value: #23 makes synced transcripts usable on the host, #21 removes
+a hostile "refusing to overwrite" wall for repos that already ship a
+devcontainer, #16 shrinks per-project image size.
+
+**What changed:**
+- **#23 → `lib/aidc/sync.sh` (`aidc::sync_session_tool`):** after the tar
+  extract, when the host workspace path is non-empty and `!= /workspace`, escape
+  it for `sed` and rewrite `/workspace` → the host path across `*.json`/`*.jsonl`
+  under the destination (atomic temp-write, cleaned on failure). This one edit
+  also covers `aidc::auto_sync_sessions` and `cmd_sync_sessions`, which funnel
+  through the same function. New `tests/sync-sessions.test.sh` (4 cases: rewrite
+  in json/jsonl, non-JSON untouched, `/workspace` no-op, sed-special chars in the
+  host path) wired into `.github/workflows/shellcheck.yml`.
+- **#21 → `lib/aidc/scaffold.sh` (`aidc::check_init_conflicts`):** the function
+  used to `aidc::die` on the first pre-existing `AIDC_MANAGED_PATHS` entry. It now
+  first moves `.devcontainer`/`.cursor` aside to `<top>.aidc-backup[.N]` (with a
+  restore-hint warning) when a managed file exists under them, then keeps the
+  original hard-stop for any *other* managed path — preserving the never-silently-
+  overwrite guarantee and the existing `tests/init-force.test.sh` assertions.
+  The `.aidc-backup*` globs were added to `ensure_local_git_excludes` (and the
+  symmetric removal in `destroy_scaffold`). PR #21 hard-coded `.devcontainer`/
+  `.cursor`; the hybrid keeps the generic guard for `scripts/ci/aidc-*.sh` etc.
+  Three new cases added to `tests/init-force.test.sh`.
+- **#16 → `templates/devcontainer/Dockerfile.tmpl`:** nine cache-cleanup edits —
+  apt `clean` + `/var/cache/apt/archives`, `--mount=type=cache` on the base uv
+  Python/semgrep RUNs, throwaway `GOPATH`/`GOCACHE` for `go install` gosec, temp
+  `CARGO_TARGET_DIR` + drop cargo registry/git for cargo-audit, gem cache clear
+  for bundler-audit, and `uv cache clean` after per-project bandit/checkov. All
+  version/SHA pins left intact. The live `.devcontainer/Dockerfile` is a plain
+  gitignored `cp` of the template (host-mounted read-only here), so only the
+  tracked template was changed; the host regenerates the live copy on
+  `aidc upgrade`.
+
+**Commands:**
+- `bash tests/sync-sessions.test.sh` → 4 passed
+- `bash tests/init-force.test.sh` → 10 passed
+- `bash tests/validate-scaffold.test.sh` → 6 passed;
+  `bash tests/check-image-pins.test.sh` → 5 passed;
+  `bash tests/update-pins.test.sh` → 23 passed
+- `shellcheck --severity=warning lib/aidc.sh lib/aidc/*.sh tests/*.test.sh` → clean
+- `aidc-scan` → semgrep/gitleaks/shellcheck ok (clean); rest skipped (out of scope)
+
+**Verification:** unit tests above are green; `aidc-scan` clean above LOW.
+Image-size proof for #16 needs a real `aidc up --build` on a host with a Docker
+daemon (none in this container) — flagged for host-side confirmation. BuildKit
+lint (`docker build --check`, run by `validate-scaffold.sh` in CI) likewise
+needs a daemon; `RUN --mount=type=cache` is natively supported by modern
+BuildKit without a `# syntax=` frontend directive, which was deliberately not
+added to avoid an unpinned network frontend.
+
+**Notes:**
+- Deferred waves (not in this batch): perf/agent PRs #14/#15/#17/#19, then the
+  big image-architecture change #18 + #20 (shared base image + shared toolchain
+  volume, done together). Fresh issues to code: #24 (oh-my-posh), #5 (opencode
+  desktop), #25 (Apple native-container backend — a spike). See
+  `plans/so-aidc-lives-at-joyful-balloon.md`.
+- Design choice on #21: whole-tree move (matching the PR and issue #6) vs
+  per-file backup — went with whole-tree for `.devcontainer`/`.cursor` but
+  retained per-path hard-stop elsewhere so a project's own `scripts/ci/aidc-*.sh`
+  is never clobbered.
+
+---
+
 ## 2026-07-08 — Fix: `aidc-scan` shim missing inside the container
 
 **Summary:** Every container-entering command (`aidc shell`/`exec`/`claude`/

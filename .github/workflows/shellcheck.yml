@@ -77,6 +77,9 @@ jobs:
       - name: Run CLI polish unit tests
         run: bash tests/cli-errors.test.sh
 
+      - name: Run session-sync unit tests
+        run: bash tests/sync-sessions.test.sh
+
       - name: Check lib module layering
         run: .github/scripts/check-module-deps.sh
 
