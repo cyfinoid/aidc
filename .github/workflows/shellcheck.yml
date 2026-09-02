@@ -80,6 +80,12 @@ jobs:
       - name: Run session-sync unit tests
         run: bash tests/sync-sessions.test.sh
 
+      - name: Run build/agent-selection unit tests
+        run: |
+          set -euo pipefail
+          bash tests/compose-up.test.sh
+          bash tests/agents-opt-in.test.sh
+
       - name: Check lib module layering
         run: .github/scripts/check-module-deps.sh
 

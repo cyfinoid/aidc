@@ -1,0 +1,84 @@
+name: image-size
+
+# Builds the aidc Dockerfile template with a representative toolchain set and
+# reports/asserts the resulting image size, so size regressions are visible
+# before merge. The budget is a soft gate (a warning, not a failure) — the
+# number is posted as a PR comment for maintainer visibility.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: image-size-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  size:
+    name: image size (go,node,python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Scaffold representative project
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          cp templates/devcontainer/Dockerfile.tmpl work/Dockerfile
+          cat > work/project-setup.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          :
+          EOF
+          # Trigger the go/node/python toolchain arms.
+          touch work/go.mod
+          printf '{"name":"x","version":"1.0.0"}\n' > work/package.json
+          printf 'uv\n' > work/uv.lock
+
+      - name: Build image
+        run: |
+          set -euo pipefail
+          docker build \
+            --build-arg AIDC_TOOLCHAINS=go,node,python \
+            --build-arg AIDC_SECURITY_TOOLS= \
+            -t aidc-size-probe work
+          SIZE=$(docker images aidc-size-probe --format '{{.Size}}')
+          echo "IMAGE_SIZE=$SIZE" >> "$GITHUB_ENV"
+          echo "Built image size: $SIZE"
+
+      - name: Report size on PR
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --body "**aidc image size** (toolchains: go,node,python): \`${IMAGE_SIZE}\` — 6 GB soft ceiling, informational until the size-reduction PRs all land."
+
+      - name: Budget assertion (soft)
+        run: |
+          set -euo pipefail
+          SIZE=$(docker images aidc-size-probe --format '{{.Size}}')
+          # Normalize docker's human size (e.g. "4.2GB") to whole bytes. printf
+          # %d truncates the float so the integer comparison below is safe.
+          BYTES=$(echo "$SIZE" | awk '{
+            if ($0 ~ /GB$/) printf "%d", $0 * 1024 * 1024 * 1024;
+            else if ($0 ~ /MB$/) printf "%d", $0 * 1024 * 1024;
+            else if ($0 ~ /kB$/) printf "%d", $0 * 1024;
+            else printf "%d", $0
+          }')
+          echo "size bytes: $BYTES"
+          MAX=$((6 * 1024 * 1024 * 1024))
+          if [ "$BYTES" -gt "$MAX" ]; then
+            echo "::warning::image size $SIZE exceeds the 6 GB soft budget"
+          else
+            echo "image size $SIZE within budget"
+          fi

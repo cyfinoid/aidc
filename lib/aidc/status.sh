@@ -477,8 +477,11 @@ aidc::cmd_status_global() {
   fi
 
   # One-shot disk and stats lookups so we don't fork docker per container.
-  local size_map stats_map running_ids
+  local size_map stats_map running_ids image_map
   size_map="$(docker container ls --all --size --format '{{.ID}}|{{.Size}}' 2>/dev/null)"
+  # Image sizes keyed by image ID, so we can show each project's on-disk image
+  # footprint from one lookup.
+  image_map="$(docker image ls --no-trunc --format '{{.ID}}|{{.Size}}' 2>/dev/null)"
   running_ids="$(printf '%s\n' "$rows" | awk -F'|' '$3=="running" {printf "%s ", $1}')"
   stats_map=''
   if [[ -n "$running_ids" ]]; then
@@ -495,8 +498,10 @@ aidc::cmd_status_global() {
     local workspace="${working_dir%/.devcontainer*}"
     [[ -z "$workspace" ]] && workspace='(unknown)'
 
-    local size
+    local size image_size cimage
     size="$(printf '%s\n' "$size_map" | awk -F'|' -v id="$id" 'index($1,id)==1 {print $2; exit}')"
+    cimage="$(docker inspect --format '{{.Image}}' "$id" 2>/dev/null || true)"
+    image_size="$(printf '%s\n' "$image_map" | awk -F'|' -v img="$cimage" 'index($1,img)==1 {print $2; exit}')"
 
     if [[ "$state" == "running" ]]; then
       running=$((running + 1))
@@ -515,6 +520,7 @@ aidc::cmd_status_global() {
         "$C_LBL" "$C_RST" "${cpu:-?}" \
         "$C_LBL" "$C_RST" "${mem:-?}" \
         "$C_LBL" "$C_RST" "${pids:-?}"
+      [[ -n "$image_size" ]] && printf '              %simage%s %s\n' "$C_LBL" "$C_RST" "$image_size"
       [[ -n "$started" ]] && printf '              %ssince%s %s\n' "$C_LBL" "$C_RST" "$started"
     else
       stopped=$((stopped + 1))
@@ -525,6 +531,7 @@ aidc::cmd_status_global() {
       printf '  %s○ %s%s  %s\n' "$C_WARN" "$state" "$C_RST" "$slug"
       printf '              %s%s%s\n' "$C_DIM" "$workspace" "$C_RST"
       printf '              %sdisk%s %s\n' "$C_LBL" "$C_RST" "${size:-?}"
+      [[ -n "$image_size" ]] && printf '              %simage%s %s\n' "$C_LBL" "$C_RST" "$image_size"
       [[ -n "$exited" ]] && printf '              %sexited%s %s\n' "$C_LBL" "$C_RST" "$exited"
     fi
     printf '\n'

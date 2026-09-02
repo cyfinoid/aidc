@@ -8,6 +8,73 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-02 — Port community PRs #14/#15/#17/#19 (Wave 2: perf + image size)
+
+**Summary:** Second batch of the open-PR triage. Four community PRs (all
+written against `main`'s monolithic `lib/aidc.sh` / pre-rework Dockerfile) were
+**ported** onto the module layout:
+
+- **#14 (issue #13)** — `aidc up`/agents skip the rebuild when the image exists.
+- **#15 (issue #8)** — `AIDC_AGENTS` opt-in coding agents.
+- **#17 (issue #11)** — drop unconditional Node + `build-essential` from base.
+- **#19 (issue #12)** — CI image-size budget + `aidc status --global` image size.
+
+**Why:** Wave 2 of the "low-risk wins first" plan — perf and image-size wins
+that don't restructure the image (that's Wave 3: #18 + #20). Each reduces build
+time or per-project image footprint.
+
+**What changed:**
+- **#14 → `lib/aidc/runtime.sh`:** new `aidc::image_exists` (resolves the compose
+  image via `compose config --images`, then `docker image inspect`) and
+  `aidc::compose_up`, which builds only when the image is missing, honors
+  `AIDC_NO_BUILD=1` (fail fast if missing), and is called from `cmd_up` and
+  `ensure_container_running`. `cmd_rebuild`/`cmd_rescan` keep their forced
+  `--build`. New `tests/compose-up.test.sh` (7 cases). docs/install.md fixed —
+  the old "`aidc up` — `--build` is implicit" claim was now false.
+- **#15 → `runtime.sh` + `Dockerfile.tmpl` + `compose.yaml.tmpl`:** `run_tool`
+  seeds `AIDC_AGENTS="$tool"` when unset (explicit value wins); `export_compose_env`
+  defaults it to `all`; the agent-install RUN became a `for agent in … case`
+  loop over the list, preserving the pinned versions and fetch-to-file contract
+  from the enhancements branch (the PR's original `curl | sh` loop was adapted,
+  not pasted). `AIDC_AGENTS` added as a compose build arg. New
+  `tests/agents-opt-in.test.sh` (2 cases). Known trade-off with #14: switching
+  agents after the first build needs `aidc rebuild` — documented.
+- **#17 → `Dockerfile.tmpl`:** removed `build-essential` and the nodesource
+  keyring/repo/`nodejs` block from the base `RUN`; added a nodesource install to
+  the `node)` toolchain arm and `build-essential` to the `rust)` arm.
+  `detect_toolchains` already emits `node` for `package.json`/lockfiles
+  (runtime.sh:680), so node projects still get Node — no regression.
+  docs/install.md updated.
+- **#19 → `lib/aidc/status.sh` + new `.github/workflows/image-size.yml`:**
+  `cmd_status_global` now builds an image-size map (`docker image ls`) and prints
+  an `image` line per project (running and stopped). The workflow scaffolds a
+  go/node/python probe, builds it, comments the size on the PR, and warns past a
+  6 GB soft ceiling. Adapted to repo conventions: action pinned by SHA (matching
+  the other workflows), PR comment via the runner's `gh` instead of adding
+  `actions/github-script`, and the budget size coerced to an integer with
+  `printf "%d"` (the PR's float would break bash `-gt`).
+
+**Commands:**
+- `bash tests/compose-up.test.sh` → 7 passed; `bash tests/agents-opt-in.test.sh` → 2 passed
+- `bash tests/{validate-scaffold,check-image-pins,init-force,sync-sessions}.test.sh` → all green
+- `shellcheck --severity=warning lib/aidc.sh lib/aidc/*.sh tests/*.test.sh` → clean
+- `image-size.yml` parsed as valid YAML (pyyaml); `aidc-scan` → clean above LOW
+
+**Verification:** unit tests + shellcheck green; `aidc-scan` clean. Two things
+need a Docker daemon (absent here), flagged for host-side: (1) `aidc up --build`
+to confirm the #17 slim base still builds every toolchain (esp. that removing
+base `build-essential` doesn't break a uv/semgrep or Rust build) and the #15
+per-agent selection; (2) `docker build --check` / the new image-size workflow.
+`status --global`'s image line is display-only (docker-dependent, like the rest
+of the status renderer) — verified by shellcheck + host run.
+
+**Notes:**
+- Remaining: Wave 3 — #18 (shared base image) + #20 (shared toolchain volume),
+  done together. Fresh issues: #24 (oh-my-posh), #5 (opencode desktop), #25
+  (Apple native-container spike). See `plans/so-aidc-lives-at-joyful-balloon.md`.
+
+---
+
 ## 2026-09-02 — Port community PRs #23/#21/#16 onto the module layout (Batch 1)
 
 **Summary:** First batch of the open-PR triage for the `enhancements` branch.

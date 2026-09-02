@@ -89,10 +89,10 @@ aidc inspects the repo on every `aidc up` and installs matching toolchains:
 | `Gemfile` | Ruby — apt `ruby-full` |
 | `pom.xml`, `build.gradle`, `build.gradle.kts` | JDK — apt `default-jdk` |
 | `composer.json` | PHP CLI — apt `php-cli` |
-| `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` | Node 22 (already in base) |
+| `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` | Node 22 — nodesource apt (installed on detection) |
 | `requirements.txt`, `uv.lock`, `pyproject.toml`, `Pipfile`, `Pipfile.lock`, `poetry.lock` | Python 3.13 via uv (already in base) |
 
-Node and Python markers don't trigger a language install (the base image already has them) — they're listed so you can see in the build log what aidc detected, and so explicit `AIDC_TOOLCHAINS=node,python` works for clarity. The Python detection still installs `bandit`; see [security.md](security.md#per-toolchain-linters-auto-installed).
+Node is installed from the nodesource apt repo when the `node` toolchain is detected (or pinned via `AIDC_TOOLCHAINS=node`) — it's no longer baked into the base image, so projects that don't use Node don't carry it. Python 3.13 (uv-managed) stays in the base image; the Python marker still triggers a `bandit` install (see [security.md](security.md#per-toolchain-linters-auto-installed)).
 
 The detected list is passed as a Docker `--build-arg AIDC_TOOLCHAINS=go,rust,...` so it caches per combination — switching between repos doesn't rebuild.
 
@@ -101,6 +101,11 @@ The detected list is passed as a Docker `--build-arg AIDC_TOOLCHAINS=go,rust,...
 ```bash
 AIDC_TOOLCHAINS=go,ruby      # force-install this list, ignore detection
 AIDC_TOOLCHAINS=             # disable installs entirely (empty value, still set)
+AIDC_AGENTS=claude,codex     # bake in only these coding agents; default is the
+                             #   tool you first run, 'all' bakes in every agent.
+                             #   Adding one later needs 'aidc rebuild'.
+AIDC_NO_BUILD=1              # never build implicitly — 'aidc up' fails fast if
+                             #   the image is missing (build it with 'aidc rebuild')
 ```
 
 ### Custom setup hook
@@ -119,7 +124,7 @@ go install golang.org/x/tools/gopls@latest
 
 Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/rtk) stay cached.
 
-After editing, `aidc rebuild` (or just `aidc up` — `--build` is implicit) picks up the change.
+After editing, run `aidc rebuild` to pick up the change — `aidc up` and the agent commands build only when the image is **missing** (fast path), so they won't rebuild an existing image on their own.
 
 It's `.gitignore`'d via `.git/info/exclude` along with the rest of `.devcontainer/`. `git add -f .devcontainer/project-setup.sh` if you want to track it.
 

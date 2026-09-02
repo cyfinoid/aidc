@@ -13,7 +13,7 @@ aidc::cmd_up() {
     aidc::vm_ensure "$workspace"
   fi
 
-  aidc::compose "$workspace" up -d --build workspace
+  aidc::compose_up "$workspace"
   # Catch up the host with any transcripts a prior (possibly ungraceful) session
   # left in the volume — the recovery case the on-exit hooks can't cover.
   aidc::auto_sync_sessions "$workspace" all
@@ -345,6 +345,17 @@ aidc::run_tool() {
 
   local workspace
   workspace="$(aidc::default_workspace)"
+
+  # Seed the agent list from the tool being run so a first build only bakes in
+  # the agent actually used (AIDC_AGENTS opt-in — issue #8). An explicit
+  # AIDC_AGENTS in project.env or the environment wins; 'all' bakes in every
+  # agent. Adding a different agent later needs a rebuild (the image already
+  # exists, so 'aidc <other>' fast-starts without it) — set AIDC_AGENTS in
+  # project.env and run 'aidc rebuild', or 'aidc rebuild' after exporting it.
+  if [[ -z "${AIDC_AGENTS:-}" ]]; then
+    export AIDC_AGENTS="$tool"
+  fi
+
   aidc::ensure_container_running "$workspace"
 
   if [[ "$tool" == "claude" ]]; then
@@ -477,8 +488,8 @@ aidc::ensure_container_running() {
   fi
 
   if [[ -z "$(aidc::compose_capture "$workspace" ps -q workspace)" ]]; then
-    aidc::debug "container not running — building and starting (first run can take minutes)"
-    aidc::compose "$workspace" up -d --build workspace
+    aidc::debug "container not running — starting (first run builds the image; can take minutes)"
+    aidc::compose_up "$workspace"
     # Only on the down→up transition (not every exec), so we recover prior
     # transcripts without adding a sync to each command.
     aidc::auto_sync_sessions "$workspace" all
@@ -530,6 +541,33 @@ aidc::compose_capture() {
   docker compose "${AIDC_COMPOSE_FILE_ARGS[@]}" "$@"
 }
 
+# True when the compose image for this workspace already exists locally.
+aidc::image_exists() {
+  local workspace="$1"
+  local image
+  image="$(aidc::compose_capture "$workspace" config --images 2>/dev/null | head -n1)"
+  [[ -n "$image" ]] || return 1
+  docker image inspect "$image" >/dev/null 2>&1
+}
+
+# Start the container, building only when the image is missing (fast path for
+# 'aidc up' and the agent commands — routine restarts skip the multi-minute
+# rebuild). 'aidc rebuild'/'aidc rescan' always force a build and bypass this.
+# AIDC_NO_BUILD=1 forbids building entirely: fail fast if the image is missing.
+aidc::compose_up() {
+  local workspace="$1"
+  if [[ "${AIDC_NO_BUILD:-0}" == "1" ]]; then
+    if ! aidc::image_exists "$workspace"; then
+      aidc::die "AIDC_NO_BUILD=1 but no image for $(basename "$workspace"); run 'aidc up' once or 'aidc rebuild'"
+    fi
+    aidc::compose "$workspace" up -d workspace
+  elif aidc::image_exists "$workspace"; then
+    aidc::compose "$workspace" up -d workspace
+  else
+    aidc::compose "$workspace" up -d --build workspace
+  fi
+}
+
 aidc::export_compose_env() {
   local workspace="$1"
   # Capture any CLI/ambient overrides before project.env is sourced, so
@@ -571,6 +609,12 @@ aidc::export_compose_env() {
   # base image; this layer adds grype/syft/checkov/bandit when requested).
   export AIDC_SECURITY_TOOLS
   AIDC_SECURITY_TOOLS="${AIDC_SECURITY_TOOLS:-}"
+  # Coding agents baked into the image (AIDC_AGENTS opt-in). Comma-separated
+  # (claude,codex,opencode,cursor-agent,grok); 'aidc <tool>' seeds this to just
+  # that tool for a first build (see run_tool). Unset/empty here means a plain
+  # 'aidc up' bakes in all agents ('all') for back-compat.
+  export AIDC_AGENTS
+  AIDC_AGENTS="${AIDC_AGENTS:-all}"
 
   # VM isolation: when active, point DOCKER_HOST at the per-project VM's
   # Docker daemon so all compose commands run inside the VM transparently.

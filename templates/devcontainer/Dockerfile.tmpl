@@ -13,7 +13,6 @@ USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       bubblewrap \
-      build-essential \
       ca-certificates \
       curl \
       dnsutils \
@@ -35,11 +34,6 @@ RUN apt-get update \
       xz-utils \
       zip \
       zsh \
-    && mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends nodejs \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
@@ -333,10 +327,16 @@ RUN pmg setup install \
 # first" invariant above still holds. Grok's binary is forced into
 # ~/.local/bin via GROK_BIN_DIR so the grok_home volume mounted at ~/.grok at
 # runtime cannot shadow it.
+# AIDC_AGENTS opt-in (issue #8): install only the requested agents so a project
+# that only uses one doesn't pay ~1 GB for all five. Comma-separated; "all"
+# (the default, for back-compat) installs every agent. aidc seeds this from the
+# tool being run on a first build. Version pins and the fetch-to-file (never
+# piped) contract are unchanged — only the selection is conditional.
 ARG CLAUDE_VERSION=2.1.201
 ARG CODEX_VERSION=0.142.5
 ARG OPENCODE_VERSION=1.17.13
 ARG GROK_VERSION=0.2.87
+ARG AIDC_AGENTS="all"
 RUN mkdir -p \
       /home/vscode/.local/bin \
       /home/vscode/.claude \
@@ -344,17 +344,30 @@ RUN mkdir -p \
       /home/vscode/.config/opencode \
       /home/vscode/.cursor-agent \
       /home/vscode/.grok \
-    && curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
-    && bash /tmp/install-claude.sh "$CLAUDE_VERSION" \
-    && curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
-    && sh /tmp/install-codex.sh --release "$CODEX_VERSION" \
-    && curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh \
-    && VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path \
-    && curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh \
-    && bash /tmp/install-cursor.sh \
-    && { cursor-agent --version || true; } \
-    && curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
-    && GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" \
+    && agents="${AIDC_AGENTS:-all}" \
+    && if [ "$agents" = "all" ]; then agents="claude,codex,opencode,cursor-agent,grok"; fi \
+    && for agent in $(echo "$agents" | tr ',' ' '); do \
+         case "$agent" in \
+           claude) \
+             curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh && \
+             bash /tmp/install-claude.sh "$CLAUDE_VERSION" ;; \
+           codex) \
+             curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh && \
+             sh /tmp/install-codex.sh --release "$CODEX_VERSION" ;; \
+           opencode) \
+             curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
+             VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path ;; \
+           cursor-agent) \
+             curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh && \
+             bash /tmp/install-cursor.sh && \
+             { cursor-agent --version || true; } ;; \
+           grok) \
+             curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh && \
+             GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" ;; \
+           *) \
+             echo "aidc: unknown agent '$agent' (skipped)" >&2 ;; \
+         esac; \
+       done \
     && rm -f /tmp/install-*.sh
 
 # Auto-detected toolchains. aidc fills AIDC_TOOLCHAINS by scanning the
@@ -371,6 +384,8 @@ RUN if [ -n "$AIDC_TOOLCHAINS" ]; then \
             GOBIN=/home/vscode/.local/bin GOPATH=/tmp/gopath GOCACHE=/tmp/go-build go install github.com/securego/gosec/v2/cmd/gosec@latest && \
             rm -rf /tmp/gopath /tmp/go-build ;; \
           rust) \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends build-essential && \
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path && \
             mkdir -p /home/vscode/.local/bin && \
@@ -395,7 +410,11 @@ RUN if [ -n "$AIDC_TOOLCHAINS" ]; then \
             sudo apt-get update && \
             sudo apt-get install -y --no-install-recommends shellcheck ;; \
           node) \
-            echo "aidc: node 22 already in base (npm/pnpm/yarn/bun via pmg shims; npm audit built-in)" ;; \
+            sudo mkdir -p /etc/apt/keyrings && \
+            curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+            echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" | sudo tee /etc/apt/sources.list.d/nodesource.list >/dev/null && \
+            sudo apt-get update && \
+            sudo apt-get install -y --no-install-recommends nodejs ;; \
           python) \
             UV_TOOL_BIN_DIR="$HOME/.local/bin" \
             UV_TOOL_DIR="$HOME/.local/share/uv-tools" \
