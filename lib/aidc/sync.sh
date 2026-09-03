@@ -7,7 +7,7 @@ aidc::cmd_sync_config() {
   local workspace
   workspace="$(aidc::default_workspace)"
   local tool="${1:-}"
-  [[ -n "$tool" ]] || aidc::die "usage: aidc sync-config <claude|codex|opencode|grok|all>"
+  [[ -n "$tool" ]] || aidc::die "usage: aidc sync-config <claude|codex|opencode|grok|omp|all>"
   aidc::ensure_container_running "$workspace"
   aidc::compose "$workspace" exec workspace /workspace/.devcontainer/scripts/bootstrap-state.sh sync "$tool"
   aidc::log "synced $tool config into the container volume"
@@ -22,8 +22,8 @@ aidc::cmd_sync_sessions() {
   aidc::ensure_container_running "$workspace"
 
   case "$tool" in
-    claude|codex|opencode|grok|all) ;;
-    *) aidc::die "usage: aidc sync-sessions [claude|codex|opencode|grok|all]" ;;
+    claude|codex|opencode|grok|omp|all) ;;
+    *) aidc::die "usage: aidc sync-sessions [claude|codex|opencode|grok|omp|all]" ;;
   esac
 
   if [[ "$tool" == "all" ]]; then
@@ -31,6 +31,7 @@ aidc::cmd_sync_sessions() {
     aidc::sync_session_tool "$workspace" codex
     aidc::sync_session_tool "$workspace" opencode
     aidc::sync_session_tool "$workspace" grok
+    aidc::sync_session_tool "$workspace" omp
   else
     aidc::sync_session_tool "$workspace" "$tool"
   fi
@@ -57,6 +58,12 @@ aidc::sync_session_tool() {
     grok)
       container_src="/home/vscode/.grok/sessions"
       host_dst="$HOME/.grok/sessions"
+      ;;
+    omp)
+      # omp (oh-my-pi) stores conversations as JSONL under
+      # ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl.
+      container_src="/home/vscode/.omp/agent/sessions"
+      host_dst="$HOME/.omp/agent/sessions"
       ;;
     *)
       aidc::die "unknown session tool: $tool"
@@ -104,14 +111,14 @@ aidc::auto_sync_sessions() {
 
   if [[ "$tool" == "all" ]]; then
     local t
-    for t in claude codex opencode grok; do
+    for t in claude codex opencode grok omp; do
       aidc::sync_session_tool "$workspace" "$t" || true
     done
     return 0
   fi
 
   case "$tool" in
-    claude|codex|opencode|grok)
+    claude|codex|opencode|grok|omp)
       aidc::sync_session_tool "$workspace" "$tool" || true
       ;;
     *)

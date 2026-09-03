@@ -102,6 +102,8 @@ pin_agents() {
   [[ -n "$v" ]] && { add_pin "CODEX_VERSION" "$v"; note "codex -> $v"; }
   v="$(latest_tag anomalyco/opencode)"; v="${v#v}"
   [[ -n "$v" ]] && { add_pin "OPENCODE_VERSION" "$v"; note "opencode -> $v"; }
+  v="$(latest_tag can1357/oh-my-pi)"; v="${v#v}"
+  [[ -n "$v" ]] && { add_pin "OMP_VERSION" "$v"; note "omp -> $v"; }
   v="$(curl -fsSL https://x.ai/cli/stable 2>/dev/null || true)"
   if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     add_pin "GROK_VERSION" "$v"; note "grok -> $v"

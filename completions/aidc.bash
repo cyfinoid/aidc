@@ -7,7 +7,7 @@
 # completion idiom; all candidate words here are space-free by construction.
 # shellcheck disable=SC2207
 
-_aidc_commands="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
+_aidc_commands="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
 
 _aidc_profiles() {
   local dir="${AIDC_CLAUDE_PROFILE_ROOT:-$HOME/.config/aidc/providers/claude}"
@@ -50,7 +50,7 @@ _aidc() {
     licenses)
       COMPREPLY=($(compgen -W "--fail" -- "$cur")) ;;
     sync-config|sync-sessions)
-      COMPREPLY=($(compgen -W "claude codex opencode grok all" -- "$cur")) ;;
+      COMPREPLY=($(compgen -W "claude codex opencode grok omp all" -- "$cur")) ;;
     claude)
       case "$prev" in
         --profile|--provider)

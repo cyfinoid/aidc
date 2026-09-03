@@ -141,7 +141,7 @@ Designed to be invisible when things are fine:
 
 Outcomes log to `.ai-container/scan-hook.log`; `aidc insights` summarizes
 them (clean passes / blocked / infra errors). Coverage matrix: Claude Code —
-enforced via hook; codex/opencode/grok — prose guardrail in AGENTS.md only
+enforced via hook; codex/opencode/grok/omp — prose guardrail in AGENTS.md only
 (their runtimes lack an equivalent hook point today).
 
 ## MCP servers
@@ -159,7 +159,7 @@ The scaffold writes a "Security guardrails (non-negotiable)" block into `CLAUDE.
 
 ## Supply-chain guardrails (always on)
 
-The container ships with SafeDep's [`pmg`](https://github.com/safedep/pmg) and [`vet`](https://github.com/safedep/vet) baked in. `pmg setup install` runs at image build **before any user-level package install**, and interception rides on the `~/.pmg/bin` PATH shims — which are first on the image `ENV PATH` for both build and runtime. It is deliberately **not** dependent on the shell aliases pmg also writes to `~/.zshrc`/`~/.bashrc`: Docker build `RUN` steps and exec'd agent subprocesses never source rc files, so only the PATH shims reliably gate package managers. The shims intercept `npm`, `pnpm`, `yarn`, `bun`, `npx`, `pnpx`, `pip`, `pip3`, `uv`, and `poetry` — including subprocess calls from agents (Claude, Codex, OpenCode, Grok, Cursor Agent). Malicious packages are blocked before install.
+The container ships with SafeDep's [`pmg`](https://github.com/safedep/pmg) and [`vet`](https://github.com/safedep/vet) baked in. `pmg setup install` runs at image build **before any user-level package install**, and interception rides on the `~/.pmg/bin` PATH shims — which are first on the image `ENV PATH` for both build and runtime. It is deliberately **not** dependent on the shell aliases pmg also writes to `~/.zshrc`/`~/.bashrc`: Docker build `RUN` steps and exec'd agent subprocesses never source rc files, so only the PATH shims reliably gate package managers. The shims intercept `npm`, `pnpm`, `yarn`, `bun`, `npx`, `pnpx`, `pip`, `pip3`, `uv`, and `poetry` — including subprocess calls from agents (Claude, Codex, OpenCode, Grok, omp, Cursor Agent). Malicious packages are blocked before install.
 
 The coding agents themselves are installed as **native prebuilt binaries**, not `npm install -g`, so there is no agent-install step for pmg to vet and no Node runtime dependency for the agents. The `NPM_CONFIG_*` hardening in the image still governs any npm the agents or project toolchains invoke at runtime, which the pmg shims gate.
 
@@ -233,7 +233,9 @@ floating branch or unpinned `latest`:
   is fetched to a file and executed (never piped): `claude` (positional
   version; the installer verifies the binary against its manifest SHA256),
   `codex` (`--release`, artifacts from the vendor's GitHub releases),
-  `opencode` (`VERSION` env, GitHub releases), `grok` (positional version).
+  `opencode` (`VERSION` env, GitHub releases), `grok` (positional version),
+  `omp` (`--binary --ref v<X.Y.Z>` → pinned `github.com/can1357/oh-my-pi`
+  release binary, installed to `~/.local/bin/omp`).
 
 **Documented exceptions** (no pinnable artifact offered by the vendor):
 
@@ -241,6 +243,9 @@ floating branch or unpinned `latest`:
   installed version is logged during the build (`cursor-agent --version`).
 - `grok` — version-pinned, but the vendor publishes no artifact checksums
   (TLS + version pin only).
+- `omp` — version-pinned via `--ref` (exact release tag), but the installer
+  fetches the release binary without an embedded checksum (TLS + version pin
+  only); the installer smoke-tests `omp --version` before reporting success.
 - `rustup` (only when the Rust toolchain is auto-detected) — installed via the
   official `sh.rustup.rs` bootstrap, which self-verifies its downloads.
 - Debian/NodeSource packages — verified by apt's GPG signature chain instead.
@@ -272,8 +277,9 @@ read-only at `/host-seed/<tool>`) into the agent's per-repo volume:
 | Codex | `~/.codex` | `~/.codex` | `auth.json`, `config.toml`, `AGENTS.md`, `rules/`, `skills/` |
 | OpenCode | `~/.config/opencode` | `~/.config/opencode` | `opencode.json`, `plugins/` |
 | Grok | `~/.grok` | `~/.grok` | `config.toml` / `user-settings.json` / `auth.json` (whichever exists) |
+| omp | `~/.omp` | `~/.omp` | `agent/config.yml`, `agent/agent.db` (whichever exists) |
 
-Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|all>`.
+Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|omp|all>`.
 Because the seed is read-only and only specific files are copied, the agents
 reuse your existing logins without the container being able to write back to the
 host. After interactive login *inside* the container, credentials persist in the

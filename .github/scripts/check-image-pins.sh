@@ -57,6 +57,7 @@ check claude     CLAUDE_VERSION     claude
 check codex      CODEX_VERSION      codex
 check opencode   OPENCODE_VERSION   opencode
 check grok       GROK_VERSION       grok
+check omp        OMP_VERSION        omp
 # cursor-agent: no vendor version pin — logged at build time instead.
 
 if [[ "$failures" -gt 0 ]]; then

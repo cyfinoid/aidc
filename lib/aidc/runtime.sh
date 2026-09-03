@@ -455,6 +455,10 @@ aidc::cmd_grok() {
   aidc::run_tool "grok" "" "$@"
 }
 
+aidc::cmd_omp() {
+  aidc::run_tool "omp" "" "$@"
+}
+
 aidc::cmd_cursor_agent() {
   aidc::run_tool "cursor-agent" "" "$@"
 }
@@ -561,6 +565,11 @@ aidc::run_tool() {
       # like the other agents. Grok Build has operating modes (e.g. plan/auto);
       # append the full-autonomy mode flag here once confirmed against the CLI.
       command=("grok")
+      ;;
+    omp)
+      # omp (oh-my-pi) defaults to the "yolo" approval mode (auto-allow), so it
+      # runs non-interactively in the container with no extra flag, like grok.
+      command=("omp")
       ;;
     cursor-agent)
       command=("cursor-agent" "--sandbox" "disabled" "-f")
@@ -901,6 +910,8 @@ aidc::export_compose_env() {
   AIDC_HOST_SEED_OPENCODE="$(aidc::mount_dir_or_empty "$HOME/.config/opencode" "opencode")"
   export AIDC_HOST_SEED_GROK
   AIDC_HOST_SEED_GROK="$(aidc::mount_dir_or_empty "$HOME/.grok" "grok")"
+  export AIDC_HOST_SEED_OMP
+  AIDC_HOST_SEED_OMP="$(aidc::mount_dir_or_empty "$HOME/.omp" "omp")"
   export AIDC_GITCONFIG_SOURCE
   AIDC_GITCONFIG_SOURCE="$(aidc::mount_file_or_empty "$HOME/.gitconfig" "gitconfig")"
   # Host-clipboard bridge is opt-in (off by default). When disabled, mount an
@@ -920,9 +931,9 @@ aidc::export_compose_env() {
   export AIDC_SECURITY_TOOLS
   AIDC_SECURITY_TOOLS="${AIDC_SECURITY_TOOLS:-}"
   # Coding agents baked into the image (AIDC_AGENTS opt-in). Comma-separated
-  # (claude,codex,opencode,cursor-agent,grok); 'aidc <tool>' seeds this to just
-  # that tool for a first build (see run_tool). Unset/empty here means a plain
-  # 'aidc up' bakes in all agents ('all') for back-compat.
+  # (claude,codex,opencode,cursor-agent,grok,omp); 'aidc <tool>' seeds this to
+  # just that tool for a first build (see run_tool). Unset/empty here means a
+  # plain 'aidc up' bakes in all agents ('all') for back-compat.
   export AIDC_AGENTS
   AIDC_AGENTS="${AIDC_AGENTS:-all}"
 

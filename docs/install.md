@@ -52,6 +52,7 @@ aidc up            # build + start container
 | `aidc codex` | start OpenAI Codex |
 | `aidc opencode` | start OpenCode |
 | `aidc grok` | start Grok Build |
+| `aidc omp` | start omp (oh-my-pi) |
 | `aidc cursor-agent` | start Cursor Agent |
 | `aidc cursor` | open host Cursor on the repo |
 | `aidc status` | container + config/mounts status for this folder |
@@ -72,8 +73,9 @@ aidc up            # build + start container
 /home/vscode/.codex              Codex state (named volume)
 /home/vscode/.config/opencode    OpenCode state (named volume)
 /home/vscode/.grok               Grok state (named volume)
+/home/vscode/.omp                omp (oh-my-pi) state (named volume)
 /commandhistory                  bash + zsh history (named volume)
-/host-seed/{claude,codex,opencode,grok,gitconfig}   read-only host seeds
+/host-seed/{claude,codex,opencode,grok,omp,gitconfig}   read-only host seeds
 ```
 
 `GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).

@@ -48,6 +48,7 @@ if [[ "\$want_redirect" -eq 1 ]]; then
     */rtk-ai/rtk/*)                printf 'https://github.com/rtk-ai/rtk/releases/tag/v0.50.0' ;;
     */openai/codex/*)              printf 'https://github.com/openai/codex/releases/tag/rust-v1.0.0' ;;
     */anomalyco/opencode/*)        printf 'https://github.com/anomalyco/opencode/releases/tag/v2.0.0' ;;
+    */can1357/oh-my-pi/*)          printf 'https://github.com/can1357/oh-my-pi/releases/tag/v18.0.0' ;;
     *) exit 22 ;;
   esac
   exit 0
@@ -116,6 +117,7 @@ ARG CLAUDE_VERSION=2.1.201
 ARG CODEX_VERSION=0.142.5
 ARG OPENCODE_VERSION=1.17.13
 ARG GROK_VERSION=0.2.87
+ARG OMP_VERSION=18.1.5
 EOF
 
 passed=0
@@ -150,6 +152,7 @@ expect "ARG CLAUDE_VERSION=3.0.0"
 expect "ARG CODEX_VERSION=1.0.0"
 expect "ARG OPENCODE_VERSION=2.0.0"
 expect "ARG GROK_VERSION=1.2.3"
+expect "ARG OMP_VERSION=18.0.0"
 
 # 2. Print mode does not modify the Dockerfile.
 if grep -q '^ARG PMG_VERSION=v0.21.3$' "$FIXTURE_DF"; then

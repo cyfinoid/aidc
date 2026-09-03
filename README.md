@@ -4,7 +4,7 @@
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 [![macOS only](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#prereqs)
 
-**aidc** — short for **AI Dev Container** — is a one-command devcontainer wrapper for AI coding agents (`claude`, `codex`, `opencode`, `grok`, `cursor-agent`). It scaffolds a hardened Linux container per repo, mounts your code at `/workspace`, persists agent state in named Docker volumes (so agents don't read your `~/.ssh` or your shell history), and bakes in always-on security scanners and supply-chain guardrails.
+**aidc** — short for **AI Dev Container** — is a one-command devcontainer wrapper for AI coding agents (`claude`, `codex`, `opencode`, `grok`, `omp`, `cursor-agent`). It scaffolds a hardened Linux container per repo, mounts your code at `/workspace`, persists agent state in named Docker volumes (so agents don't read your `~/.ssh` or your shell history), and bakes in always-on security scanners and supply-chain guardrails.
 
 If you're already running these agents directly on your Mac and have been quietly nervous about it, this is for you.
 
@@ -37,7 +37,7 @@ aidc init          # one-time scaffold; writes .devcontainer/, .ai-container/, C
 aidc claude        # auto-runs `aidc up` if needed, then drops you into Claude Code in the container
 ```
 
-Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `cursor-agent`) auto-bootstrap the container on first run.
+Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `omp` / `cursor-agent`) auto-bootstrap the container on first run.
 
 ## Claude authentication
 
@@ -62,7 +62,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 
 - creates local-only `.devcontainer/`, `.ai-container/`, `CLAUDE.md`, `AGENTS.md`, and `.cursor/rules/00-core-logics.mdc`
 - mounts project code only at `/workspace`; overlays `/workspace/.devcontainer` read-only inside the container
-- installs the coding agents (`claude`, `codex`, `opencode`, `grok`) as native prebuilt binaries — no npm-global, no Node runtime dependency for the agents themselves
+- installs the coding agents (`claude`, `codex`, `opencode`, `grok`, `omp`) as native prebuilt binaries — no npm-global, no Node runtime dependency for the agents themselves
 - persists tool state in per-repo Docker volumes instead of mounting whole host homes
 - seeds selected config from host read-only mounts on first startup
 - creates one `CORE_LOGICS` git worktree per repo and mounts it at `/opt/CORE_LOGICS` for shared cross-repo notes
@@ -105,11 +105,12 @@ aidc codex [-- ...]
 aidc opencode [-- ...]
 aidc opencode-web [--port N] [--no-auth] [--username NAME] [-- ...]
 aidc grok [-- ...]
+aidc omp [-- ...]
 aidc cursor-agent [-- ...]
 aidc cursor
 aidc sync-claude-aliases
-aidc sync-config <claude|codex|opencode|grok|all>
-aidc sync-sessions [claude|codex|opencode|grok|all]
+aidc sync-config <claude|codex|opencode|grok|omp|all>
+aidc sync-sessions [claude|codex|opencode|grok|omp|all]
 aidc sbom
 aidc licenses [--fail]
 aidc scan [--all|--staged|paths...] [--json]

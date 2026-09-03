@@ -187,6 +187,16 @@ sync_grok() {
   copy_file_from_seed "/host-seed/grok/auth.json" "$home_dir/.grok/auth.json" "0600"
 }
 
+sync_omp() {
+  ensure_dir "$home_dir/.omp/agent"
+  # omp (oh-my-pi) keeps its global config and auth store under ~/.omp/agent
+  # (config.yml + agent.db). Seed whichever the host provides — copy_file_from_seed
+  # is a no-op when the source is absent. Session transcripts live under
+  # ~/.omp/agent/sessions and persist via the omp_home volume (not seeded here).
+  copy_file_from_seed "/host-seed/omp/agent/config.yml" "$home_dir/.omp/agent/config.yml" "0600"
+  copy_file_from_seed "/host-seed/omp/agent/agent.db" "$home_dir/.omp/agent/agent.db" "0600"
+}
+
 sync_gitconfig_overlay() {
   local overlay="$home_dir/.gitconfig.local"
   if [[ ! -f "$overlay" && -f /host-seed/gitconfig ]]; then
@@ -274,11 +284,15 @@ sync_tool() {
     grok)
       sync_grok
       ;;
+    omp)
+      sync_omp
+      ;;
     all)
       sync_claude
       sync_codex
       sync_opencode
       sync_grok
+      sync_omp
       ;;
     *)
       echo "unsupported tool: $1" >&2
@@ -305,7 +319,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
       sync_tool "$tool"
       ;;
     *)
-      echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|all]" >&2
+      echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|omp|all]" >&2
       exit 1
       ;;
   esac

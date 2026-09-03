@@ -53,6 +53,7 @@ ARG CLAUDE_VERSION=2.1.201
 ARG CODEX_VERSION=0.142.5
 ARG OPENCODE_VERSION=1.17.13
 ARG GROK_VERSION=0.2.87
+ARG OMP_VERSION=18.1.5
 EOF
 
 # Version map matching the pins exactly.
@@ -70,6 +71,7 @@ claude=2.1.201
 codex=0.142.5
 opencode=1.17.13
 grok=0.2.87
+omp=18.1.5
 EOF
 
 passed=0

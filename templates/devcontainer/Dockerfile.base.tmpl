@@ -329,6 +329,9 @@ RUN pmg setup install \
 #   codex:    --release X.Y.Z → github.com/openai/codex release rust-vX.Y.Z.
 #   opencode: VERSION env var → github.com/anomalyco/opencode release.
 #   grok:     positional arg X.Y.Z (no vendor checksum — TLS + version pin only).
+#   omp:      --binary --ref v<X.Y.Z> → pinned github.com/can1357/oh-my-pi
+#             release binary (omp-linux-<arch>), installed to ~/.local/bin/omp;
+#             the installer smoke-tests `omp --version` (no vendor checksum).
 #   cursor:   NO version pin available from the vendor — documented exception,
 #             see docs/security.md (Image supply chain).
 # No npm dependency resolution here, so pmg has nothing to vet; the "pmg
@@ -345,6 +348,7 @@ ARG CLAUDE_VERSION=2.1.201
 ARG CODEX_VERSION=0.142.5
 ARG OPENCODE_VERSION=1.17.13
 ARG GROK_VERSION=0.2.87
+ARG OMP_VERSION=18.1.5
 ARG AIDC_AGENTS="all"
 RUN mkdir -p \
       /home/vscode/.local/bin \
@@ -353,8 +357,9 @@ RUN mkdir -p \
       /home/vscode/.config/opencode \
       /home/vscode/.cursor-agent \
       /home/vscode/.grok \
+      /home/vscode/.omp \
     && agents="${AIDC_AGENTS:-all}" \
-    && if [ "$agents" = "all" ]; then agents="claude,codex,opencode,cursor-agent,grok"; fi \
+    && if [ "$agents" = "all" ]; then agents="claude,codex,opencode,cursor-agent,grok,omp"; fi \
     && for agent in $(echo "$agents" | tr ',' ' '); do \
          case "$agent" in \
            claude) \
@@ -374,6 +379,9 @@ RUN mkdir -p \
            grok) \
              curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh && \
              GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" ;; \
+           omp) \
+             curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh && \
+             PI_INSTALL_DIR=/home/vscode/.local/bin sh /tmp/install-omp.sh --binary --ref "v$OMP_VERSION" ;; \
            *) \
              echo "aidc: unknown agent '$agent' (skipped)" >&2 ;; \
          esac; \

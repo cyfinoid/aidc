@@ -96,6 +96,9 @@ aidc::main() {
     grok)
       aidc::cmd_grok "$@"
       ;;
+    omp)
+      aidc::cmd_omp "$@"
+      ;;
     cursor-agent)
       aidc::cmd_cursor_agent "$@"
       ;;
@@ -148,7 +151,7 @@ aidc::main() {
 # first letter) before pointing at help and doctor.
 aidc::suggest_command() {
   local cmd="$1"
-  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
+  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
   local suggestions="" k
   for k in $known; do
     case "$k" in
@@ -185,11 +188,12 @@ Usage:
   aidc opencode [-- ...]
   aidc opencode-web [--port N] [--no-auth] [--username NAME] [-- ...]
   aidc grok [-- ...]
+  aidc omp [-- ...]
   aidc cursor-agent [-- ...]
   aidc cursor
   aidc sync-claude-aliases
-  aidc sync-config <claude|codex|opencode|grok|all>
-  aidc sync-sessions [claude|codex|opencode|grok|all]
+  aidc sync-config <claude|codex|opencode|grok|omp|all>
+  aidc sync-sessions [claude|codex|opencode|grok|omp|all]
   aidc sbom [-- ...]
   aidc licenses [--fail] [-- ...]
   aidc scan [--all|--staged|paths...] [--json]

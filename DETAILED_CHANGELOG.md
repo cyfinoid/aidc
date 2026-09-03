@@ -8,6 +8,77 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-03 — `omp` (oh-my-pi) added as a supported coding agent (issue #24)
+
+**Summary:** Wire `omp` — the oh-my-pi terminal AI coding agent
+(`github.com/can1357/oh-my-pi`, home `https://omp.sh/`) — in as a first-class
+agent alongside claude/codex/opencode/grok/cursor-agent. `aidc omp` runs it in
+the container; its state persists and its config/sessions seed and sync like the
+others.
+
+**Why:** Issue #24 ("support https://omp.sh/") asks for omp support. omp is the
+same class of tool aidc already wraps, so "support" = the standard agent
+integration, mirroring `grok` (native binary in `~/.local/bin`, single state
+home `~/.omp`).
+
+**Decisions (confirmed with user):**
+- omp joins the default `AIDC_AGENTS=all` set so `aidc omp` works out of the box.
+  It is the largest agent (~197 MB glibc binary); slim it via `AIDC_AGENTS`.
+- Installed via the **vendor installer** (`https://omp.sh/install`), fetched to a
+  file and run (never piped) like the other agents. Pinned with `--binary --ref
+  v$OMP_VERSION`, which downloads the exact release asset `omp-linux-x64` to
+  `~/.local/bin/omp` and smoke-tests `omp --version` (verified by reading the
+  installer). Fallback URL if omp.sh ever stops proxying the flags:
+  `raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh`.
+
+**On-disk layout (researched):** everything lives under `~/.omp/agent` —
+`config.yml` (global config), `agent.db` (auth store), and sessions as JSONL at
+`~/.omp/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl`. Default approval mode is
+"yolo" (auto-allow), so `omp` runs non-interactively with no extra flag.
+
+**What changed (mirrors `grok` everywhere an agent is wired):**
+- `templates/devcontainer/Dockerfile.base.tmpl`: `ARG OMP_VERSION=18.1.5`, `~/.omp`
+  in the mkdir list, `omp` appended to the `all` expansion, new `omp)` install arm,
+  version-contract comment updated.
+- `lib/aidc.sh`: dispatcher arm, `known` list, `aidc omp` usage, sync usage strings.
+- `lib/aidc/runtime.sh`: `aidc::cmd_omp`, `run_tool` command case, `AIDC_HOST_SEED_OMP`
+  export, all-agents comment.
+- `lib/aidc/config.sh`: `$AIDC_EMPTY_ROOT/omp` empty-seed dir.
+- `lib/aidc/sync.sh`: omp in sync-config/sync-sessions validation, the `all`
+  loops, and `sync_session_tool` (`~/.omp/agent/sessions`), plus `auto_sync_sessions`.
+- `templates/devcontainer/scripts/bootstrap-state.sh.tmpl`: `sync_omp` (surgical
+  seed of `config.yml` + `agent.db`), dispatch + `all` + usage.
+- `lib/aidc/status.sh`: `/host-seed/omp` mount row.
+- `templates/devcontainer/compose.yaml.tmpl`: `/host-seed/omp` bind, `omp_home` →
+  `~/.omp` volume, `omp_home:` declaration. (The generated `.devcontainer/compose.yaml`
+  is gitignored, read-only dogfood scaffold — regenerated on the host by `aidc upgrade`.)
+- `completions/aidc.bash`: `omp` command + sync candidate list.
+- `scripts/update-pins.sh`: `OMP_VERSION` in `pin_agents` (latest tag from
+  can1357/oh-my-pi). `.github/scripts/check-image-pins.sh`: `check omp OMP_VERSION omp`.
+- Docs: README (agent lists, Commands), `docs/security.md` (supply-chain +
+  credential table + scan-hook matrix), `docs/install.md` (command + volume + seeds).
+
+**Tests:** `tests/check-image-pins.test.sh` and `tests/update-pins.test.sh` gained
+`OMP_VERSION` fixtures (and the update-pins `curl` stub gained a
+`can1357/oh-my-pi` release-tag redirect, else `pin_agents` aborts under `set -e`).
+`tests/cli-errors.test.sh` drift guard now covers `omp` (30 dispatcher commands).
+
+**Commands run / verification:**
+- Full suite (`for t in tests/*.test.sh`) — all green.
+- `shellcheck` on the changed shell files — clean.
+- `scripts/update-pins.sh` (review) prints `ARG OMP_VERSION=`; `bin/aidc help |
+  grep omp` shows the command; `bin/aidc ompp` suggests `omp`.
+- `aidc-scan` on the changed files (guardrail).
+
+**Notes / not done here:** full end-to-end (image build with omp, `aidc exec --
+omp --version` = 18.1.5, `aidc omp` launch, `omp_home` persistence) needs Docker
+on the host — not runnable from inside the read-only `.devcontainer` dev
+container. The seed uses the default `~/.omp/agent` paths; if a user relocates
+via `PI_CODING_AGENT_DIR` or an `OMP_PROFILE`, the seed/sync would need the same
+override (documented follow-up, not wired).
+
+---
+
 ## 2026-09-03 — `aidc opencode-web`: the opencode "desktop feeling" (issue #5)
 
 **Summary:** New `aidc opencode-web` command runs opencode's browser UI

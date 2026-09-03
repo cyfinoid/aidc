@@ -422,6 +422,7 @@ aidc::status_config() {
   aidc::status_mount_row "/host-seed/codex" "$AIDC_HOST_SEED_CODEX" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/opencode" "$AIDC_HOST_SEED_OPENCODE" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/grok" "$AIDC_HOST_SEED_GROK" "$c_dim" "$c_rst"
+  aidc::status_mount_row "/host-seed/omp" "$AIDC_HOST_SEED_OMP" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/gitconfig" "$AIDC_GITCONFIG_SOURCE" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-clipboard" "$AIDC_CLIPBOARD_DIR_SOURCE" "$c_dim" "$c_rst"
 

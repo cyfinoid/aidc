@@ -63,6 +63,10 @@ services:
         target: /host-seed/grok
         read_only: true
       - type: bind
+        source: ${AIDC_HOST_SEED_OMP}
+        target: /host-seed/omp
+        read_only: true
+      - type: bind
         source: ${AIDC_GITCONFIG_SOURCE}
         target: /host-seed/gitconfig
         read_only: true
@@ -88,6 +92,9 @@ services:
       - type: volume
         source: grok_home
         target: /home/vscode/.grok
+      - type: volume
+        source: omp_home
+        target: /home/vscode/.omp
       # Shared read-only toolchain store (issue #9): one copy of Go/Rust/JDK
       # (+ gosec/cargo-audit) serves all projects, populated by
       # 'aidc tools install'. Read-only so agents can't tamper with the shared
@@ -109,3 +116,4 @@ volumes:
   opencode_home:
   cursor_agent_home:
   grok_home:
+  omp_home:
