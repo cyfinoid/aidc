@@ -20,7 +20,8 @@ WS="$TMP_ROOT/ws"
 mkdir -p "$WS/.devcontainer"
 touch "$WS/.devcontainer/compose.yaml" \
       "$WS/.devcontainer/compose.firewall.yaml" \
-      "$WS/.devcontainer/compose.hardened.yaml"
+      "$WS/.devcontainer/compose.hardened.yaml" \
+      "$WS/.devcontainer/compose.opencode-web.yaml"
 
 passed=0
 failed=0
@@ -96,6 +97,35 @@ if [[ "$(args_str)" == "-f compose.yaml" ]]; then
 else
   fail "old scaffold: got '$(args_str)'"
 fi
+
+# 6. opencode-web on (others off): the web override joins.
+unset AIDC_ENABLE_EGRESS_FIREWALL AIDC_NO_NEW_PRIVILEGES 2>/dev/null || true
+AIDC_OPENCODE_WEB=1
+aidc::compose_file_args "$WS"
+if [[ "$(args_str)" == "-f compose.yaml -f compose.opencode-web.yaml" ]]; then
+  ok "opencode-web=1 adds compose.opencode-web.yaml"
+else
+  fail "opencode-web: got '$(args_str)'"
+fi
+
+# 7. opencode-web off: base only (no accidental publish).
+AIDC_OPENCODE_WEB=0
+aidc::compose_file_args "$WS"
+if [[ "$(args_str)" == "-f compose.yaml" ]]; then
+  ok "opencode-web=0 leaves base only"
+else
+  fail "opencode-web off: got '$(args_str)'"
+fi
+
+# 8. opencode-web on but the override file is missing: degrade to base only.
+AIDC_OPENCODE_WEB=1
+aidc::compose_file_args "$WS2"
+if [[ "$(args_str)" == "-f compose.yaml" ]]; then
+  ok "opencode-web missing override degrades to base only"
+else
+  fail "opencode-web old scaffold: got '$(args_str)'"
+fi
+unset AIDC_OPENCODE_WEB 2>/dev/null || true
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [[ "$failed" -eq 0 ]]

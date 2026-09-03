@@ -193,6 +193,30 @@ All knobs live host-wide in `~/.config/aidc/config.env` or per project in
 `devcontainer.json` flow uses the base compose file only — the conditional
 overrides apply on the `aidc` CLI path.
 
+## Exposing the opencode web UI (`aidc opencode-web`)
+
+`aidc opencode-web` runs opencode's browser UI (`opencode web`) inside the
+container. This is the **only** aidc feature that publishes a container port to
+the host, so its posture is deliberately conservative:
+
+- **Loopback-only host publish.** The `compose.opencode-web.yaml` override (added
+  only when `AIDC_OPENCODE_WEB=1`, which `aidc opencode-web` sets) publishes
+  `127.0.0.1:<port>:<port>` — the host's own browser can reach it, but the LAN
+  cannot. opencode itself binds `0.0.0.0` *inside* the container, which is
+  required for the forwarded port to reach it; keeping the **host** publish on
+  `127.0.0.1` is what keeps the agent off the network.
+- **Auth on by default.** A random `OPENCODE_SERVER_PASSWORD` is generated,
+  delivered to the container by env-key reference (never on any argv), and
+  printed once for you to use. Export your own `OPENCODE_SERVER_PASSWORD`
+  beforehand to pin it; `--username` overrides the default `opencode` user.
+- **`--no-auth`** removes the password. It is safe *only* because the publish is
+  loopback-only; do not pair it with any host-side reverse proxy or port
+  re-forward that would widen the exposure.
+- **Port default 4096** (`--port N` or `AIDC_OPENCODE_WEB_PORT`; validated to
+  1024–65535). Opting in (re)creates the container to attach the port, and a
+  later plain `aidc <tool>` recreates it back without the port — the same
+  ephemeral-override behavior as the firewall/hardened files above.
+
 ## Image supply chain
 
 Everything fetched during the image build is pinned; nothing installs from a

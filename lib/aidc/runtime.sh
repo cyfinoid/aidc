@@ -326,6 +326,131 @@ aidc::cmd_opencode() {
   aidc::run_tool "opencode" "" "$@"
 }
 
+# 'aidc opencode-web' — the opencode "desktop feeling" (issue #5). Runs
+# `opencode web` (headless server + browser UI) inside the container and
+# publishes its port on the HOST LOOPBACK (127.0.0.1) via the
+# compose.opencode-web.yaml override, so the host browser reaches the agent
+# while the LAN cannot. opencode binds 0.0.0.0 *inside* the container (needed
+# for the forwarded port to reach it). Auth is on by default: a random
+# OPENCODE_SERVER_PASSWORD is generated (unless one is already set or --no-auth
+# is passed) and delivered by env-key reference (never on any argv).
+#   --port N        listen/publish port (default 4096; 1024-65535)
+#   --no-auth       start without a server password (LAN-safe only via loopback)
+#   --username NAME HTTP basic-auth username (default: opencode)
+#   -- <args...>    extra flags passed through to `opencode web`
+aidc::cmd_opencode_web() {
+  local port="${AIDC_OPENCODE_WEB_PORT:-4096}"
+  local auth=1
+  local username=""
+  local args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --port)
+        [[ $# -ge 2 ]] || aidc::die "missing value for --port"
+        port="$2"
+        shift 2
+        ;;
+      --no-auth)
+        auth=0
+        shift
+        ;;
+      --username)
+        [[ $# -ge 2 ]] || aidc::die "missing value for --username"
+        username="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        args+=("$@")
+        break
+        ;;
+      *)
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  # Validate the port before it reaches compose interpolation / the exec argv.
+  case "$port" in
+    ''|*[!0-9]*) aidc::die "invalid --port '$port' (want an integer 1024-65535)" ;;
+  esac
+  if (( port < 1024 || port > 65535 )); then
+    aidc::die "invalid --port '$port' (want an integer 1024-65535)"
+  fi
+
+  local workspace
+  workspace="$(aidc::default_workspace)"
+
+  # Activate the port-publishing override for every compose call below.
+  export AIDC_OPENCODE_WEB=1
+  export AIDC_OPENCODE_WEB_PORT="$port"
+
+  # Bring the container up with the loopback port published. compose recreates
+  # it when the port publish is a new config diff (e.g. it was previously up
+  # without the web override); a container already carrying the port is a no-op.
+  aidc::ensure_workspace_ready "$workspace"
+  if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
+    aidc::vm_ensure "$workspace"
+  fi
+  aidc::ensure_base_image "$workspace"
+  aidc::ensure_toolchain_volumes "$workspace"
+  aidc::compose_up "$workspace"
+  aidc::auto_sync_sessions "$workspace" all
+  aidc::ensure_scan_link "$workspace"
+
+  AIDC_EXEC_ENV_ARGS=()
+  aidc::append_passthrough_env_args
+
+  if [[ "$auth" -eq 1 ]]; then
+    # Generate a password only if the caller hasn't supplied one. Kept out of
+    # any xtrace; delivered to the exec by env-key reference, never on argv.
+    aidc::secret_begin
+    if [[ -z "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+      OPENCODE_SERVER_PASSWORD="$(aidc::gen_web_password)"
+      export OPENCODE_SERVER_PASSWORD
+    fi
+    aidc::secret_end
+    AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_SERVER_PASSWORD")
+    if [[ -n "$username" ]]; then
+      export OPENCODE_SERVER_USERNAME="$username"
+      AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_SERVER_USERNAME")
+    fi
+    aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only)"
+    aidc::log "  username: ${username:-opencode}"
+    aidc::secret_begin
+    aidc::log "  password: $OPENCODE_SERVER_PASSWORD"
+    aidc::secret_end
+  else
+    aidc::warn "opencode web starting WITHOUT auth (--no-auth): anyone who can reach 127.0.0.1:$port on this host can drive the agent"
+    aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only, no auth)"
+  fi
+
+  local -a command=("opencode" "web" "--port" "$port" "--hostname" "0.0.0.0")
+  if [[ ${#args[@]} -gt 0 ]]; then
+    command+=("${args[@]}")
+  fi
+
+  local rc=0
+  aidc::compose_exec "$workspace" "${command[@]}" || rc=$?
+  aidc::auto_sync_sessions "$workspace" opencode
+  return "$rc"
+}
+
+# Random 32-hex-char secret for OPENCODE_SERVER_PASSWORD. Prefers openssl; falls
+# back to /dev/urandom so it works on hosts without openssl. The fallback reads a
+# fixed 16 bytes with head as the *consumer* (head -c 16 /dev/urandom | …) so it
+# can't trip the SIGPIPE that `tr </dev/urandom | head` raises under
+# `set -o pipefail`. Caller suppresses xtrace around this.
+aidc::gen_web_password() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 16
+  else
+    head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'
+  fi
+}
+
 aidc::cmd_grok() {
   aidc::run_tool "grok" "" "$@"
 }
@@ -527,6 +652,12 @@ aidc::compose_file_args() {
     else
       AIDC_COMPOSE_FILE_ARGS+=(-f "$workspace/.devcontainer/compose.hardened.yaml")
     fi
+  fi
+  # 'aidc opencode-web' sets AIDC_OPENCODE_WEB=1 to publish the web-UI port on the
+  # host loopback (127.0.0.1) so the host browser can reach opencode inside the
+  # container. Degrades to base-only on an older scaffold that lacks the file.
+  if [[ "${AIDC_OPENCODE_WEB:-0}" == "1" && -f "$workspace/.devcontainer/compose.opencode-web.yaml" ]]; then
+    AIDC_COMPOSE_FILE_ARGS+=(-f "$workspace/.devcontainer/compose.opencode-web.yaml")
   fi
 }
 

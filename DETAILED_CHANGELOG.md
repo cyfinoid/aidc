@@ -8,6 +8,75 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-03 — `aidc opencode-web`: the opencode "desktop feeling" (issue #5)
+
+**Summary:** New `aidc opencode-web` command runs opencode's browser UI
+(`opencode web`) inside the per-repo container and exposes it to the host
+browser, giving the "desktop feeling" the linked article
+([Keep the OpenCode Desktop Feeling Inside a Devcontainer](https://medium.com/codex/keep-the-opencode-desktop-feelinginside-a-devcontainer-d264ea853d86))
+describes — adapted from that article's VS Code `postAttachCommand`/`forwardPorts`
+recipe to aidc's `docker compose` CLI model.
+
+**Why:** aidc is a compose wrapper, not the VS Code attach flow. `aidc opencode`
+already runs the TUI via `compose exec`, and opencode is already installed
+(`OPENCODE_VERSION=1.17.13`, confirmed to ship the `web` subcommand). What was
+missing was a way to reach opencode's *browser* UI from the host, since aidc
+publishes no ports by default.
+
+**What changed:**
+- `templates/devcontainer/compose.opencode-web.yaml.tmpl` (new): a gated compose
+  override that publishes `127.0.0.1:${AIDC_OPENCODE_WEB_PORT:-4096}:…` — **host
+  loopback only**, so the host browser reaches it and the LAN does not. Mirrors
+  the `compose.firewall.yaml`/`compose.hardened.yaml` override pattern. The
+  generated `.devcontainer/` copy is gitignored dogfood scaffold (regenerated on
+  the host by `aidc upgrade`), so only the template is tracked.
+- `lib/aidc/runtime.sh`:
+  - `aidc::compose_file_args` joins the override when `AIDC_OPENCODE_WEB=1`
+    (degrades to base-only if the file is absent — old scaffold).
+  - New `aidc::cmd_opencode_web`: parses `--port N` (validated 1024–65535),
+    `--no-auth`, `--username NAME`, and `--` passthrough; exports
+    `AIDC_OPENCODE_WEB=1`/`AIDC_OPENCODE_WEB_PORT`; (re)creates the container with
+    the port via `compose_up`; generates+delivers `OPENCODE_SERVER_PASSWORD` by
+    env-key reference (never on argv, xtrace-suppressed) unless one is set or
+    `--no-auth`; then runs `opencode web --port N --hostname 0.0.0.0` in the
+    foreground and syncs sessions on exit.
+  - New `aidc::gen_web_password`: `openssl rand -hex 16`, falling back to
+    `head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n'` (head-as-consumer to
+    avoid the SIGPIPE that `tr </dev/urandom | head` raises under `pipefail`).
+- `lib/aidc.sh`: dispatcher arm, `known` suggestion list, help usage + note.
+- `lib/aidc/common.sh`: added the override to `AIDC_MANAGED_PATHS` and
+  `AIDC_OVERWRITE_TEMPLATE_MAP` so `aidc init`/`upgrade` scaffold and refresh it.
+- `completions/aidc.bash`: `opencode-web` in the command table + flag completion.
+- Docs: README command table + a usage paragraph; `docs/security.md` § "Exposing
+  the opencode web UI" (loopback-only rationale, auth defaults, `--no-auth`
+  caveat).
+
+**Security posture (decisions confirmed with the user):** host publish is
+loopback-only (no LAN exposure); auth on by default with a generated password
+delivered off-argv; `--no-auth` documented as loopback-safe only. opencode binds
+`0.0.0.0` *inside* the container solely so the forwarded port reaches it.
+
+**Commands run / verification:**
+- `bash tests/opencode-web.test.sh` — 13/13 (default command, `--port`, auth
+  default, `--username`, `--no-auth` + warning, `--` passthrough, bad-port die).
+- `bash tests/compose-file-args.test.sh` — 9/9 (override joins iff
+  `AIDC_OPENCODE_WEB=1`; missing file degrades to base).
+- `bash tests/cli-errors.test.sh` — 8/8 (completion+suggestion drift guard covers
+  the new command; 29 dispatcher commands).
+- Full suite (`tests/*.test.sh`) — all green.
+- `shellcheck lib/aidc/runtime.sh lib/aidc.sh lib/aidc/common.sh` — only
+  pre-existing info notes, none in the new code.
+- `opencode web --help` inside the container confirms the subcommand + `--port`/
+  `--hostname` flags exist in the pinned 1.17.13 (no version bump needed).
+- `aidc-scan` on the changed files (guardrail).
+
+**Notes / not done here:** full end-to-end (`docker ps` showing
+`127.0.0.1:4096->4096/tcp`, browser login) needs Docker on the host — it can't
+run from inside the read-only-`.devcontainer` dev container. The unit tests and
+`opencode web --help` cover the wiring; the host smoke is listed in the plan.
+
+---
+
 ## 2026-09-02 — Version bump 0.2.0 + agent-availability fixes (Wave 3 follow-up)
 
 **Summary:** Bump `AIDC_VERSION` to 0.2.0 (so existing projects detect as stale

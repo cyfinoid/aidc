@@ -90,6 +90,9 @@ aidc::main() {
     opencode)
       aidc::cmd_opencode "$@"
       ;;
+    opencode-web)
+      aidc::cmd_opencode_web "$@"
+      ;;
     grok)
       aidc::cmd_grok "$@"
       ;;
@@ -145,7 +148,7 @@ aidc::main() {
 # first letter) before pointing at help and doctor.
 aidc::suggest_command() {
   local cmd="$1"
-  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode grok cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
+  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
   local suggestions="" k
   for k in $known; do
     case "$k" in
@@ -180,6 +183,7 @@ Usage:
   aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
   aidc codex [-- ...]
   aidc opencode [-- ...]
+  aidc opencode-web [--port N] [--no-auth] [--username NAME] [-- ...]
   aidc grok [-- ...]
   aidc cursor-agent [-- ...]
   aidc cursor
@@ -211,6 +215,12 @@ Notes:
   - aidc init refuses to run if the repo already has a file at an aidc-managed
     path (e.g. its own scripts/ci/*.sh). Pass -f/--force to adopt the directory
     anyway, overwriting those managed files with the current templates.
+  - aidc opencode-web runs opencode's browser UI inside the container and
+    publishes it on the host loopback (http://127.0.0.1:4096, --port to change),
+    so a host browser gets the "desktop feeling" while the LAN never sees it.
+    Auth is on by default (a random OPENCODE_SERVER_PASSWORD is generated and
+    printed); --no-auth disables it. Opting in (re)creates the container to add
+    the port; a later plain 'aidc <tool>' recreates it back without the port.
   - Plain 'aidc claude' keeps the default Anthropic path.
   - aidc cursor opens the host Cursor app; reopen the repo in the devcontainer.
   - aidc destroy removes the container, named volumes, and image by default.

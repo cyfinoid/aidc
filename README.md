@@ -103,6 +103,7 @@ aidc exec -- <command>...
 aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
 aidc codex [-- ...]
 aidc opencode [-- ...]
+aidc opencode-web [--port N] [--no-auth] [--username NAME] [-- ...]
 aidc grok [-- ...]
 aidc cursor-agent [-- ...]
 aidc cursor
@@ -126,6 +127,8 @@ aidc version
 Session transcripts auto-sync from the container to the host on container start, agent exit, `aidc down`, and `aidc destroy` (before its volumes are removed), so `/insights` on the host stays current without a manual `aidc sync-sessions`. The start sync is the safety net for ungraceful exits (crash / `docker kill`) that the on-exit hooks miss — it catches up anything left in the volume.
 
 Toggle it with `AIDC_AUTO_SYNC_SESSIONS`: set it host-wide in `~/.config/aidc/config.env` (universal default for every project) or per project in `.ai-container/project.env` (overrides the global default). `0` disables auto-sync; manual `aidc sync-sessions` always works regardless.
+
+`aidc opencode-web` gives opencode its "desktop feeling" inside the container: it runs opencode's browser UI (`opencode web`) and publishes it on the **host loopback** at `http://127.0.0.1:4096/` (change with `--port N` or `AIDC_OPENCODE_WEB_PORT`), so a host browser drives an agent that lives in the reproducible container — while the LAN never sees it (opencode binds `0.0.0.0` *inside* the container; the host publish is `127.0.0.1`-only). Auth is on by default: a random `OPENCODE_SERVER_PASSWORD` is generated and printed (set your own by exporting it first; `--username` overrides the default `opencode` user). `--no-auth` disables it — safe only because the port is loopback-only. Opting in (re)creates the container to add the port, exactly like the firewall/hardened overrides; a later plain `aidc <tool>` recreates it back without the port.
 
 `--provider` remains as a compatibility alias for `--profile`.
 
