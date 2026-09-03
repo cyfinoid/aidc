@@ -120,3 +120,108 @@ aidc::apply_docker_provider() {
       ;;
   esac
 }
+
+# True when the Docker engine is reachable at the current/DOCKER_HOST endpoint.
+# `docker info` is the authoritative "daemon responding" check (the CLI alone is
+# not enough — socktainer/OrbStack/etc. all present as `docker`).
+aidc::docker_is_usable() {
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+# True on an interactive terminal (stdin+stdout are TTYs). Factored out so the
+# provider prompt is skippable in tests and never fires in CI/piped runs.
+aidc::is_interactive() {
+  [[ -t 0 && -t 1 ]]
+}
+
+# Print the space-separated set of *alternative* container engines available on
+# this host, most-preferred first. This is the provider registry: each engine
+# aidc can drive via a Docker-API endpoint gets one arm here. All alternatives
+# still require the `docker` CLI + compose plugin (aidc is a docker-compose tool);
+# they differ only in the engine/socket behind it. Add a provider by adding an
+# availability probe below and a matching arm in aidc::apply_docker_provider.
+aidc::detect_alt_providers() {
+  local out=""
+  command -v docker >/dev/null 2>&1 || { printf ''; return 0; }
+  # apple: Apple's `container` runtime via socktainer's Docker-API socket.
+  local apple_sock="${AIDC_APPLE_CONTAINER_SOCKET:-$HOME/.socktainer/container.sock}"
+  if command -v container >/dev/null 2>&1 && [[ -S "$apple_sock" ]]; then
+    out+="${out:+ }apple"
+  fi
+  # (extend here: e.g. `podman` when a docker-compatible podman.sock is present.)
+  printf '%s' "$out"
+}
+
+# Remember an auto-selected provider in the host-wide config so the prompt is a
+# one-time event. Replaces an existing active line, else appends. Atomic;
+# never fatal (a failed write just means we'll ask again next time).
+aidc::persist_docker_provider() {
+  local name="$1"
+  local cfg="$AIDC_GLOBAL_CONFIG"
+  mkdir -p "$(dirname "$cfg")" 2>/dev/null || true
+  [[ -f "$cfg" ]] || : >"$cfg" 2>/dev/null || return 0
+  local tmp="$cfg.aidc-tmp.$$"
+  if grep -Eq '^[[:space:]]*AIDC_DOCKER_PROVIDER=' "$cfg" 2>/dev/null; then
+    sed "s|^[[:space:]]*AIDC_DOCKER_PROVIDER=.*|AIDC_DOCKER_PROVIDER=$name|" "$cfg" >"$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$cfg" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 0; }
+  else
+    { cat "$cfg"; printf 'AIDC_DOCKER_PROVIDER=%s\n' "$name"; } >"$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$cfg" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 0; }
+  fi
+}
+
+# Resolve which container engine aidc uses, once per invocation. Called from the
+# compose gateway (export_compose_env), so it runs only for container-touching
+# commands and (via the AIDC_PROVIDER_RESOLVED guard) prompts at most once.
+#
+# Precedence: an explicit AIDC_DOCKER_PROVIDER is honored verbatim (no probe, no
+# prompt). Otherwise the default is Docker; only when Docker's engine is NOT
+# reachable do we look for alternatives and — interactively — offer to switch.
+aidc::ensure_docker_provider() {
+  if [[ -n "${AIDC_PROVIDER_RESOLVED:-}" ]]; then
+    aidc::apply_docker_provider
+    return 0
+  fi
+  export AIDC_PROVIDER_RESOLVED=1
+
+  # Explicit choice wins outright.
+  if [[ -n "${AIDC_DOCKER_PROVIDER:-}" ]]; then
+    aidc::apply_docker_provider
+    return 0
+  fi
+
+  # Default path: Docker works → use it (no DOCKER_HOST change).
+  if aidc::docker_is_usable; then
+    return 0
+  fi
+
+  # Docker unreachable — is anything else available to offer?
+  local alts
+  alts="$(aidc::detect_alt_providers)"
+  if [[ -z "$alts" ]]; then
+    return 0  # let the normal flow fail with the (provider-aware) docker error
+  fi
+
+  if ! aidc::is_interactive; then
+    aidc::warn "Docker engine unavailable; detected provider(s): $alts — set AIDC_DOCKER_PROVIDER=<name> to use one (see docs/apple-container.md)"
+    return 0
+  fi
+
+  local choice reply
+  for choice in $alts; do
+    printf '[aidc] Docker is not available, but %s is. Use %s for this and future runs? [y/N] ' "$choice" "$choice" >&2
+    read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES)
+        export AIDC_DOCKER_PROVIDER="$choice"
+        aidc::apply_docker_provider
+        aidc::persist_docker_provider "$choice"
+        aidc::log "using '$choice' (saved AIDC_DOCKER_PROVIDER to $AIDC_GLOBAL_CONFIG; edit/remove it there to change)"
+        return 0
+        ;;
+      *) : ;;  # decline this one, offer the next
+    esac
+  done
+  aidc::warn "continuing with Docker (no alternative accepted); 'aidc doctor' has details"
+  return 0
+}

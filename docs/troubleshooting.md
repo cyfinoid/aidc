@@ -8,9 +8,11 @@ names the fix. Each entry below: symptom → cause → fix.
 **`docker: CLI not found` / `daemon not responding` (doctor FAIL)**
 Docker isn't installed or isn't running. Start Docker Desktop / OrbStack /
 Colima; `docker info` should succeed before any `aidc` command that touches
-containers. (Using `AIDC_DOCKER_PROVIDER=apple`? See
-[apple-container.md](apple-container.md) — the `apple-container`/`socktainer`
-doctor rows point at the fix, usually a stopped or version-mismatched socktainer.)
+containers. If an alternative engine is available (e.g. Apple `container` +
+socktainer on macOS 26), aidc offers to switch on the next container command
+(and doctor flags it) — see [apple-container.md](apple-container.md). Using
+`AIDC_DOCKER_PROVIDER=apple` already? The `apple-container`/`socktainer` doctor
+rows point at the fix, usually a stopped or version-mismatched socktainer.
 
 **`container name already in use` on `aidc up`**
 A previous container wasn't cleaned up (e.g. after a crash).

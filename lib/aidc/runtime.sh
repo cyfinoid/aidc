@@ -1009,10 +1009,12 @@ aidc::export_compose_env() {
     esac
   fi
 
-  # Route docker/compose at the selected engine (no-op for the default 'docker'
-  # provider; sets DOCKER_HOST to the socktainer socket for 'apple'). After the
-  # isolate-vm block so an explicit provider choice is applied last.
-  aidc::apply_docker_provider
+  # Resolve/route the container engine (once per invocation). Default 'docker';
+  # if Docker's engine is unreachable and an alternative (e.g. Apple container via
+  # socktainer) is available, this interactively offers to switch. An explicit
+  # AIDC_DOCKER_PROVIDER is honored without probing. After the isolate-vm block so
+  # the provider choice is applied last.
+  aidc::ensure_docker_provider
 }
 
 # True when the workspace contains shell scripts worth linting with shellcheck.

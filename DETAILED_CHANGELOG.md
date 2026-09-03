@@ -8,6 +8,56 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-03 — Auto-detect the container engine (Docker → offer alternatives)
+
+**Summary:** Make the `AIDC_DOCKER_PROVIDER` switch automatic. aidc defaults to
+Docker; when Docker's engine is unreachable and an alternative provider is
+available, it interactively offers to switch (and remembers the choice). Builds
+directly on the manual switch below.
+
+**Why:** the manual switch required knowing to set `apple`. The user wanted aidc
+to notice Docker is down, see what else is present, and offer it after
+confirmation — extensible to future providers.
+
+**Key nuance:** socktainer (and every alternative here) still needs the `docker`
+CLI + compose plugin; only the engine/daemon differs. So detection probes the
+**daemon** (`docker info`), and the realistic fallback is "docker CLI present,
+daemon down."
+
+**What changed (`lib/aidc/config.sh`):**
+- `aidc::docker_is_usable` (`command -v docker` + `docker info`), `aidc::is_interactive`
+  (`[ -t 0 ] && [ -t 1 ]`, factored for testability).
+- `aidc::detect_alt_providers` — extensible registry; concrete `apple` (docker CLI
+  + `container` CLI + socktainer socket present).
+- `aidc::persist_docker_provider` — atomically write/replace
+  `AIDC_DOCKER_PROVIDER=<name>` in `~/.config/aidc/config.env` (one-time prompt).
+- `aidc::ensure_docker_provider` — once-guarded (`AIDC_PROVIDER_RESOLVED`):
+  explicit provider honored (no probe/prompt) → Docker usable → else detect alts →
+  none: fall through to the normal (provider-aware) error; non-interactive: warn +
+  hint; interactive: prompt per alt, on yes apply+persist+log, on decline continue.
+- `aidc::apply_docker_provider` unchanged (pure apply), reused by the above + doctor.
+
+**Wiring:** `export_compose_env` (`lib/aidc/runtime.sh`) now calls
+`ensure_docker_provider` instead of `apply_docker_provider` (once-guarded → one
+probe/prompt per invocation, scoped to container-touching commands). `cmd_doctor`
+(`lib/aidc/status.sh`) sets `AIDC_PROVIDER_RESOLVED=1` after its report-only
+`apply_docker_provider` so `doctor_check_container` never prompts; `doctor_check_docker`
+adds an "alternative engine available" WARN when Docker is down and an alt exists.
+
+**Tests:** `tests/docker-provider.test.sh` extended to 20 cases — `docker_is_usable`,
+`detect_alt_providers` (real fake-`docker`/`container` on PATH + a real unix
+socket), `persist_docker_provider` (append + replace), and every
+`ensure_docker_provider` branch (explicit honored/no-probe; docker-usable stays;
+non-interactive hint; interactive y switches+applies+persists; n declines;
+once-guard).
+
+**Verification:** full suite green; shellcheck clean; `aidc-scan` clean. The
+`export_compose_env` change is safe in hermetic tests because the non-interactive
++ empty-alternatives guards short-circuit without prompting. End-to-end
+Docker-down→Apple-container remains a macOS-26 maintainer check.
+
+---
+
 ## 2026-09-03 — Apple `container` as an experimental Docker provider (issue #25)
 
 **Summary:** Add `AIDC_DOCKER_PROVIDER` (`docker` default | `apple`) so aidc can

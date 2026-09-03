@@ -47,6 +47,13 @@ aidc::doctor_check_docker() {
     aidc::doctor_report ok docker "CLI + daemon responding"
   else
     aidc::doctor_report fail docker "daemon not responding — start Docker Desktop / OrbStack / Colima"
+    # Auto-provider (AIDC_DOCKER_PROVIDER unset): if an alternative engine is
+    # ready, aidc will offer it on the next container command — surface that here.
+    local alts
+    alts="$(aidc::detect_alt_providers)"
+    if [[ -n "$alts" ]]; then
+      aidc::doctor_report warn provider "alternative engine available: $alts — aidc will offer it on the next container command, or set AIDC_DOCKER_PROVIDER (see docs/apple-container.md)"
+    fi
   fi
 }
 
@@ -199,6 +206,9 @@ aidc::cmd_doctor() {
   # probe at socktainer. project.env (per-folder override) is sourced later.
   aidc::load_global_config
   aidc::apply_docker_provider
+  # doctor is report-only: mark the provider resolved so the later
+  # doctor_check_container (which reaches export_compose_env) never prompts.
+  export AIDC_PROVIDER_RESOLVED=1
 
   printf '%s\n\n' "$(aidc::cmd_version)"
   printf 'host\n'

@@ -35,8 +35,24 @@ transparently — the same mechanism aidc uses for Lima under `--isolate-vm`. Th
 1. Install and start `apple/container`; confirm `container system status`.
 2. Install and start `socktainer`; note its socket (default
    `~/.socktainer/container.sock`).
-3. Tell aidc to use it — host-wide in `~/.config/aidc/config.env` (recommended)
-   or per project in `.ai-container/project.env`:
+3. Point aidc at it. Two ways:
+
+   **Automatic (default).** Leave `AIDC_DOCKER_PROVIDER` unset. When you run a
+   container command and Docker's engine isn't reachable, aidc detects that
+   `container` + socktainer are available and **asks** whether to use Apple
+   container:
+
+   ```
+   [aidc] Docker is not available, but apple is. Use apple for this and future runs? [y/N]
+   ```
+
+   Answer `y` and aidc switches for this run **and saves
+   `AIDC_DOCKER_PROVIDER=apple` to `~/.config/aidc/config.env`** so it won't ask
+   again (edit/remove that line to revert). In non-interactive/CI runs aidc
+   never prompts — it prints a hint and stays on Docker.
+
+   **Explicit.** Set it yourself, host-wide in `~/.config/aidc/config.env`
+   (recommended) or per project in `.ai-container/project.env`:
 
    ```sh
    AIDC_DOCKER_PROVIDER=apple
@@ -44,10 +60,21 @@ transparently — the same mechanism aidc uses for Lima under `--isolate-vm`. Th
    # AIDC_APPLE_CONTAINER_SOCKET=$HOME/.socktainer/container.sock
    ```
 
-   An explicit `DOCKER_HOST` in your environment always wins over this switch.
+   An explicit value (or an explicit `DOCKER_HOST` in your environment) is
+   honored verbatim — aidc neither probes nor prompts.
 4. `aidc doctor` — confirms the `container` CLI, the socktainer socket, and that
-   the Docker API responds through it (and prints the experimental WARN).
+   the Docker API responds through it (and prints the experimental WARN). With
+   the automatic path, doctor also flags when an alternative engine is available
+   while Docker is down.
 5. `aidc up` / `aidc claude` (etc.) as usual.
+
+### Adding another provider
+
+Detection is a small registry in `aidc::detect_alt_providers` (`lib/aidc/config.sh`)
+paired with an arm in `aidc::apply_docker_provider`. To add e.g. `podman`, add a
+probe (docker CLI + a docker-compatible `podman.sock`) that prints the name, and
+an `apply` arm that exports `DOCKER_HOST` at that socket. Everything else — the
+prompt, persistence, doctor — is provider-agnostic.
 
 `aidc status` shows a `provider` line while a non-default provider is active.
 
