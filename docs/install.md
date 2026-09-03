@@ -4,7 +4,9 @@
 
 - macOS (primary platform) or Linux (experimental — see the matrix below)
 - Docker running (Docker Desktop / OrbStack / Colima on macOS; the docker
-  engine + compose plugin on Linux)
+  engine + compose plugin on Linux). Experimentally, Apple's native `container`
+  runtime via socktainer with `AIDC_DOCKER_PROVIDER=apple` — see
+  [apple-container.md](apple-container.md).
 - git
 
 ### Platform support

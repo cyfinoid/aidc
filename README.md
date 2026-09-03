@@ -15,7 +15,7 @@ Pre-1.0, rolling-release, personal-ish. The author uses it daily; the API may st
 ## Prereqs
 
 - **macOS** (host-side bits assume Mac — Keychain, LaunchAgent, `pbpaste`, `~/.local/bin` aliases)
-- **Docker** running (Docker Desktop / OrbStack / Colima)
+- **Docker** running (Docker Desktop / OrbStack / Colima) — or, experimentally, Apple's native `container` runtime via socktainer (see [docs/apple-container.md](docs/apple-container.md))
 - **git**
 - *(optional, high-security mode)* **Lima** on macOS or **Firecracker** on Linux — only needed if you enable `--isolate-vm`
 
@@ -155,6 +155,8 @@ aidc runs in one of two isolation modes. **Normal mode is the default and is wha
 Runs your project inside a Docker container. On macOS, Docker Desktop/OrbStack/Colima already wraps that container inside a Linux VM — your code is isolated from the host by both the container boundary *and* the VM boundary. All aidc containers share the same Docker VM, so they're isolated from each other by standard container namespacing (PID, network, filesystem, IPC) but not by a hypervisor boundary.
 
 **This is fine for practically everyone.** The container + VM double boundary on macOS, combined with aidc's always-on scanners, read-only mounts, named volumes (no host home directory access), and optional egress firewall, already provides strong isolation between the AI agent and your host system.
+
+> **Experimental: Apple `container` provider.** On macOS 26 + Apple Silicon you can point aidc at Apple's native [`container`](https://github.com/apple/container) runtime (via the socktainer Docker-API shim) with `AIDC_DOCKER_PROVIDER=apple`. It runs **each container in its own lightweight VM**, so it provides per-container VM isolation without `--isolate-vm`. Unverified end-to-end — see [docs/apple-container.md](docs/apple-container.md).
 
 ### High-security mode (`--isolate-vm`)
 

@@ -193,6 +193,13 @@ All knobs live host-wide in `~/.config/aidc/config.env` or per project in
 `devcontainer.json` flow uses the base compose file only — the conditional
 overrides apply on the `aidc` CLI path.
 
+**Apple `container` provider (experimental).** On macOS 26 + Apple Silicon,
+`AIDC_DOCKER_PROVIDER=apple` routes aidc through Apple's native `container`
+runtime (via a socktainer Docker-API socket). `container` runs **each container
+in its own lightweight VM**, so it gives per-container hypervisor isolation
+without the `--isolate-vm` mode (which aidc then ignores, with a warning). Not
+yet validated end-to-end — see `docs/apple-container.md`.
+
 ## Exposing the opencode web UI (`aidc opencode-web`)
 
 `aidc opencode-web` runs opencode's browser UI (`opencode web`) inside the

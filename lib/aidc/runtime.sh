@@ -980,9 +980,17 @@ aidc::export_compose_env() {
   export AIDC_AGENTS
   AIDC_AGENTS="${AIDC_AGENTS:-all}"
 
+  # Apple `container` already runs each container in its own lightweight VM, so
+  # the per-project Lima/Firecracker VM is redundant — and its DOCKER_HOST would
+  # collide with the socktainer socket. Warn once and skip isolate-vm.
+  if [[ "${AIDC_ISOLATE_VM:-0}" == "1" && "${AIDC_DOCKER_PROVIDER:-docker}" == "apple" ]]; then
+    if [[ -z "${AIDC_ISOLATE_VM_APPLE_WARNED:-}" ]]; then
+      aidc::warn "AIDC_ISOLATE_VM ignored with AIDC_DOCKER_PROVIDER=apple: Apple container already isolates each container in its own VM"
+      export AIDC_ISOLATE_VM_APPLE_WARNED=1
+    fi
   # VM isolation: when active, point DOCKER_HOST at the per-project VM's
   # Docker daemon so all compose commands run inside the VM transparently.
-  if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
+  elif [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
     local backend
     backend="$(aidc::vm_backend)"
     local vm_name
@@ -1000,6 +1008,11 @@ aidc::export_compose_env() {
         ;;
     esac
   fi
+
+  # Route docker/compose at the selected engine (no-op for the default 'docker'
+  # provider; sets DOCKER_HOST to the socktainer socket for 'apple'). After the
+  # isolate-vm block so an explicit provider choice is applied last.
+  aidc::apply_docker_provider
 }
 
 # True when the workspace contains shell scripts worth linting with shellcheck.

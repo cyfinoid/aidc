@@ -86,5 +86,37 @@ aidc::ensure_global_config() {
 # above LOW in the changed files. Mechanical version of the CLAUDE.md
 # guardrail; fails open on scanner errors. Set 0 to disable.
 # AIDC_ENFORCE_SCAN_HOOK=1
+
+# Container engine ("Docker provider"). Default 'docker' uses your ambient Docker
+# (Docker Desktop / OrbStack / Colima). Set 'apple' to route aidc through Apple's
+# native `container` runtime via a socktainer Docker-API socket — macOS 26 +
+# Apple Silicon, EXPERIMENTAL/unverified (see docs/apple-container.md). An
+# explicit DOCKER_HOST in your environment always wins.
+# AIDC_DOCKER_PROVIDER=docker
+# AIDC_APPLE_CONTAINER_SOCKET=$HOME/.socktainer/container.sock
 EOF
+}
+
+# Route aidc's docker/compose/build/volume calls at the selected engine. aidc
+# always shells out to `docker`/`docker compose` with the inherited environment,
+# so setting DOCKER_HOST here transparently redirects every call — no per-call
+# change needed. Default 'docker' is a no-op (ambient Docker context). 'apple'
+# points DOCKER_HOST at the socktainer socket bridging Apple's `container`
+# runtime to the Docker API. An explicit DOCKER_HOST always wins. Idempotent.
+aidc::apply_docker_provider() {
+  local provider="${AIDC_DOCKER_PROVIDER:-docker}"
+  case "$provider" in
+    docker)
+      : # ambient Docker; nothing to do
+      ;;
+    apple)
+      local socket="${AIDC_APPLE_CONTAINER_SOCKET:-$HOME/.socktainer/container.sock}"
+      if [[ -z "${DOCKER_HOST:-}" ]]; then
+        export DOCKER_HOST="unix://$socket"
+      fi
+      ;;
+    *)
+      aidc::warn "unknown AIDC_DOCKER_PROVIDER='$provider' (valid: docker, apple); using ambient Docker"
+      ;;
+  esac
 }

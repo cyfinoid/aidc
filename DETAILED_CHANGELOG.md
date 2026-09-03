@@ -8,6 +8,55 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-03 — Apple `container` as an experimental Docker provider (issue #25)
+
+**Summary:** Add `AIDC_DOCKER_PROVIDER` (`docker` default | `apple`) so aidc can
+run on Apple's native `container` runtime via a socktainer Docker-API socket,
+instead of only Docker Desktop/OrbStack/Colima. Ships **experimental/unverified**
+(needs macOS 26 + Apple Silicon to validate).
+
+**Why / approach:** Apple `container` is a Docker *replacement* (own CLI, no
+native compose/Docker-API), but OCI-compatible, and `socktainer` exposes a
+Docker-API Unix socket for it. aidc already shells out to `docker`/`docker compose`
+with the inherited environment, so pointing `DOCKER_HOST` at that socket routes
+every call transparently — the same mechanism `vm.sh` uses for Lima. So this is a
+provider switch, not an orchestration rewrite. User chose full enablement now,
+accepting that the hardware-dependent behavior can't be verified here.
+
+**What changed:**
+- `lib/aidc/config.sh`: new `aidc::apply_docker_provider` — `apple` exports
+  `DOCKER_HOST=unix://<socket>` (default `~/.socktainer/container.sock`, override
+  `AIDC_APPLE_CONTAINER_SOCKET`) **only when DOCKER_HOST is unset** (explicit host
+  value wins); `docker` no-op; unknown warns. Two commented knobs added to the
+  seeded global `config.env`.
+- `lib/aidc/runtime.sh`: `export_compose_env` calls `apply_docker_provider` after
+  the isolate-vm block (so it's applied last for every container/build/volume
+  path); when provider=apple, `AIDC_ISOLATE_VM` is ignored with a one-time warning
+  (Apple `container` already runs each container in its own VM).
+- `lib/aidc/status.sh`: `doctor_check_docker` is provider-aware; new
+  `doctor_check_apple_container` (experimental WARN + `container` CLI + socktainer
+  socket + Docker-API probe rows); `cmd_doctor` loads the global config and
+  resolves the provider before the docker check; `aidc status` shows a `provider`
+  line when non-default.
+- Docs: new `docs/apple-container.md` (setup, requirements, compatibility matrix,
+  validation checklist, caveats); README (prereqs + isolation-modes note),
+  `docs/install.md`, `docs/troubleshooting.md`, `docs/security.md` (per-container-VM
+  isolation note).
+- Tests: `tests/docker-provider.test.sh` (7 cases — routing, custom socket,
+  explicit-DOCKER_HOST-wins, no-op default, unknown-warns, doctor dispatch).
+
+**Commands / verification:**
+- `bash tests/docker-provider.test.sh` — 7/7; full suite green; shellcheck clean;
+  `aidc-scan` clean. Provider routing asserted hermetically (no daemon).
+
+**Notes / not done here:** end-to-end validation (bind mounts, `compose exec` TTY,
+volumes, port publish, `/dev/shm`, caps) requires macOS 26 + Apple Silicon and is
+tracked as a maintainer checklist in `docs/apple-container.md`; the doctor note
+stays "experimental/unverified" until that runs. The `apple-container` git branch
+was inspected and holds no prior art (its one commit is an early "cursor support").
+
+---
+
 ## 2026-09-03 — Cursor: host-IDE→container flow + `cursor-agent` path fix/seed
 
 **Summary:** Two related tracks so Cursor (and VS Code) work well with aidc:

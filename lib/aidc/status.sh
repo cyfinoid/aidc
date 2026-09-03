@@ -35,14 +35,43 @@ aidc::doctor_check_git() {
 }
 
 aidc::doctor_check_docker() {
+  if [[ "${AIDC_DOCKER_PROVIDER:-docker}" == "apple" ]]; then
+    aidc::doctor_check_apple_container
+    return 0
+  fi
   if ! command -v docker >/dev/null 2>&1; then
-    aidc::doctor_report fail docker "CLI not found — install Docker Desktop / OrbStack / Colima"
+    aidc::doctor_report fail docker "CLI not found — install Docker Desktop / OrbStack / Colima (or set AIDC_DOCKER_PROVIDER=apple; see docs/apple-container.md)"
     return 0
   fi
   if docker info >/dev/null 2>&1; then
     aidc::doctor_report ok docker "CLI + daemon responding"
   else
     aidc::doctor_report fail docker "daemon not responding — start Docker Desktop / OrbStack / Colima"
+  fi
+}
+
+# EXPERIMENTAL: Apple `container` reached via socktainer's Docker-API socket
+# (macOS 26 + Apple Silicon; socktainer must match the `container` version).
+# See docs/apple-container.md.
+aidc::doctor_check_apple_container() {
+  local socket="${AIDC_APPLE_CONTAINER_SOCKET:-$HOME/.socktainer/container.sock}"
+  aidc::doctor_report warn provider "AIDC_DOCKER_PROVIDER=apple — experimental/unverified (docs/apple-container.md)"
+  if command -v container >/dev/null 2>&1; then
+    aidc::doctor_report ok apple-container "'container' CLI present"
+  else
+    aidc::doctor_report fail apple-container "'container' CLI not found — install github.com/apple/container (macOS 26 + Apple Silicon)"
+  fi
+  if [[ -S "$socket" ]]; then
+    aidc::doctor_report ok socktainer "socket present: $socket"
+  else
+    aidc::doctor_report fail socktainer "no socket at $socket — start socktainer (version-matched to 'container')"
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    aidc::doctor_report fail docker "CLI not found — socktainer still needs the docker CLI + compose plugin"
+  elif DOCKER_HOST="unix://$socket" docker info >/dev/null 2>&1; then
+    aidc::doctor_report ok docker "Docker API responds via socktainer"
+  else
+    aidc::doctor_report warn docker "Docker API not responding via $socket — start/version-match socktainer"
   fi
 }
 
@@ -164,6 +193,12 @@ aidc::doctor_check_isolate_vm() {
 aidc::cmd_doctor() {
   AIDC_DOCTOR_FAILS=0
   AIDC_DOCTOR_WARNS=0
+
+  # Resolve the host-wide Docker provider before the docker check so
+  # AIDC_DOCKER_PROVIDER=apple (typically set in the global config) routes the
+  # probe at socktainer. project.env (per-folder override) is sourced later.
+  aidc::load_global_config
+  aidc::apply_docker_provider
 
   printf '%s\n\n' "$(aidc::cmd_version)"
   printf 'host\n'
@@ -405,6 +440,11 @@ aidc::status_config() {
   aidc::status_kv "workspace" "$workspace" "$c_lbl" "$c_rst"
   aidc::status_kv "slug" "$AIDC_REPO_SLUG" "$c_lbl" "$c_rst"
   aidc::status_kv "compose" "$COMPOSE_PROJECT_NAME" "$c_lbl" "$c_rst"
+  # Only surface the Docker provider when it's not the default, so normal setups
+  # stay uncluttered. 'apple' routes via socktainer (see docs/apple-container.md).
+  if [[ "${AIDC_DOCKER_PROVIDER:-docker}" != "docker" ]]; then
+    aidc::status_kv "provider" "${AIDC_DOCKER_PROVIDER} (${DOCKER_HOST:-ambient})" "$c_lbl" "$c_rst"
+  fi
   aidc::status_kv "branch" "$AIDC_CORE_BRANCH" "$c_lbl" "$c_rst"
   aidc::status_kv "worktree" "$AIDC_CORE_WORKTREE" "$c_lbl" "$c_rst"
   # Passive posture line — the open-network default is by design, not a
