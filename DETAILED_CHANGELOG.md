@@ -8,6 +8,69 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-03 — Cursor: host-IDE→container flow + `cursor-agent` path fix/seed
+
+**Summary:** Two related tracks so Cursor (and VS Code) work well with aidc:
+(1) make "Dev Containers: Reopen in Container" actually function, giving the
+"UI on host, all activity in the aidc container" model; (2) fix cursor-agent's
+state path (it uses `~/.cursor`, not `~/.cursor-agent`) so logins persist, and
+seed/sync it like the other agents.
+
+**Track 1 — host-Cursor → container.** The scaffolded `devcontainer.json` already
+pointed the Dev Containers extension at aidc's compose file, but a bare
+`docker compose up` (which the extension runs itself, without aidc's exported
+env) left seven no-default `${AIDC_*}` bind sources empty → the container failed
+to come up. It also wouldn't pre-build the shared `aidc-base:<hash>` image or
+create the `external` `aidc_toolchains` volume.
+- `lib/aidc/runtime.sh`: new `aidc::write_devcontainer_env` writes a git-excluded
+  `.devcontainer/.env` (`KEY=value`, `0600`, atomic temp+`mv`, bash-3.2-safe
+  indirect read) with `COMPOSE_PROJECT_NAME` + every var the compose file
+  references (resolved `AIDC_BASE_IMAGE`, the six `AIDC_HOST_SEED_*`, workspace/
+  devcontainer/core paths, gitconfig/clipboard sources, toolchains/agents/limits).
+  Compose auto-loads a `.env` next to the compose file, so the extension's own
+  `up` now resolves the same values and — via `COMPOSE_PROJECT_NAME` — joins the
+  same project. Called from `cmd_up`/`cmd_rebuild`/`cmd_rescan` after
+  `ensure_base_image`.
+- `templates/devcontainer/devcontainer.json.tmpl`: `"initializeCommand":
+  "bash -lc 'aidc up'"` (runs on the host before create → writes `.env`, builds
+  the base image, creates the toolchain volume, starts the container; `bash -lc`
+  fixes the macOS GUI-PATH gotcha). A `//initializeCommand` sibling documents it.
+- `lib/aidc/runtime.sh` `cmd_cursor`: message now points at "Reopen in Container".
+
+**Track 2 — cursor-agent uses `~/.cursor`.** Per Cursor's CLI docs, config +
+login live at `~/.cursor/cli-config.json`; aidc mounted the volume at
+`~/.cursor-agent`, so nothing persisted. Fixed by mirroring `grok` at the right
+path:
+- `Dockerfile.base.tmpl`: `mkdir ~/.cursor` (was `~/.cursor-agent`).
+- `compose.yaml.tmpl`: retarget the `cursor_agent_home` volume to
+  `/home/vscode/.cursor` (name kept, so no orphan churn), add a `/host-seed/cursor`
+  ro bind.
+- `runtime.sh`: export `AIDC_HOST_SEED_CURSOR` (`$HOME/.cursor`). `config.sh`:
+  empty-seed dir. `bootstrap-state.sh.tmpl`: `sync_cursor` seeds `cli-config.json`
+  (auth is account-based — not seedable; persists now via the `~/.cursor` volume
+  or `CURSOR_API_KEY`). `sync.sh`/`lib/aidc.sh`: `cursor` in `sync-config` usage.
+  `status.sh`: `/host-seed/cursor` row. `completions/aidc.bash`: `cursor` in the
+  `sync-config` candidates (kept out of `sync-sessions`, which cursor doesn't
+  support — its session path under `~/.cursor` is undocumented; transcripts
+  persist in the volume).
+
+**Tests / verification:**
+- New `tests/devcontainer-env.test.sh` (8 cases): `.env` created `0600`, has
+  `COMPOSE_PROJECT_NAME` + all no-default vars with resolved values + the real
+  base-image hash, unset limit vars emit empty (no `set -u` crash), atomic (no
+  temp left), missing `.devcontainer` is a no-op.
+- `devcontainer.json.tmpl` still valid JSON (`initializeCommand` parses).
+- Full suite green; shellcheck clean; `aidc-scan` clean.
+
+**Notes / not done here (need Docker + Cursor on a host):** the full Reopen-in-
+Container round-trip, project-name alignment against the extension's own
+override, and the `cursor-agent login` persistence across `aidc down`/`up` are
+listed for host validation — not runnable from inside the read-only
+`.devcontainer` dev container. cursor-agent session **host**-sync remains
+unwired (undocumented on-disk path).
+
+---
+
 ## 2026-09-03 — `omp` (oh-my-pi) added as a supported coding agent (issue #24)
 
 **Summary:** Wire `omp` — the oh-my-pi terminal AI coding agent

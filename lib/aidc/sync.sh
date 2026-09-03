@@ -7,7 +7,7 @@ aidc::cmd_sync_config() {
   local workspace
   workspace="$(aidc::default_workspace)"
   local tool="${1:-}"
-  [[ -n "$tool" ]] || aidc::die "usage: aidc sync-config <claude|codex|opencode|grok|omp|all>"
+  [[ -n "$tool" ]] || aidc::die "usage: aidc sync-config <claude|codex|opencode|grok|omp|cursor|all>"
   aidc::ensure_container_running "$workspace"
   aidc::compose "$workspace" exec workspace /workspace/.devcontainer/scripts/bootstrap-state.sh sync "$tool"
   aidc::log "synced $tool config into the container volume"

@@ -278,8 +278,9 @@ read-only at `/host-seed/<tool>`) into the agent's per-repo volume:
 | OpenCode | `~/.config/opencode` | `~/.config/opencode` | `opencode.json`, `plugins/` |
 | Grok | `~/.grok` | `~/.grok` | `config.toml` / `user-settings.json` / `auth.json` (whichever exists) |
 | omp | `~/.omp` | `~/.omp` | `agent/config.yml`, `agent/agent.db` (whichever exists) |
+| Cursor | `~/.cursor` | `~/.cursor` | `cli-config.json` (auth is account-login-in-container or `CURSOR_API_KEY`) |
 
-Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|omp|all>`.
+Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|omp|cursor|all>`.
 Because the seed is read-only and only specific files are copied, the agents
 reuse your existing logins without the container being able to write back to the
 host. After interactive login *inside* the container, credentials persist in the

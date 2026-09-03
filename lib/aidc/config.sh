@@ -38,7 +38,7 @@ aidc::load_project_env() {
 
 aidc::ensure_host_config_dirs() {
   mkdir -p "$AIDC_HOST_CONFIG_ROOT" "$AIDC_EMPTY_ROOT" "$AIDC_CLAUDE_PROFILE_ROOT"
-  mkdir -p "$AIDC_EMPTY_ROOT/claude" "$AIDC_EMPTY_ROOT/codex" "$AIDC_EMPTY_ROOT/opencode" "$AIDC_EMPTY_ROOT/grok" "$AIDC_EMPTY_ROOT/omp" "$AIDC_EMPTY_ROOT/clipboard"
+  mkdir -p "$AIDC_EMPTY_ROOT/claude" "$AIDC_EMPTY_ROOT/codex" "$AIDC_EMPTY_ROOT/opencode" "$AIDC_EMPTY_ROOT/grok" "$AIDC_EMPTY_ROOT/omp" "$AIDC_EMPTY_ROOT/cursor" "$AIDC_EMPTY_ROOT/clipboard"
   touch "$AIDC_EMPTY_ROOT/gitconfig"
   aidc::ensure_global_config
 }

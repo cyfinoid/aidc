@@ -133,6 +133,19 @@ Toggle it with `AIDC_AUTO_SYNC_SESSIONS`: set it host-wide in `~/.config/aidc/co
 
 `--provider` remains as a compatibility alias for `--profile`.
 
+## Cursor / VS Code as the UI, aidc as the container
+
+You can keep the **IDE running on your host** and have all the actual work — editing, terminals, builds, agents, scanners — happen **inside the aidc container**:
+
+1. `aidc cursor` (or open the folder in Cursor/VS Code).
+2. Command Palette → **Dev Containers: Reopen in Container**.
+
+aidc's scaffolded `devcontainer.json` handles the setup the Dev Containers extension doesn't do on its own: its `initializeCommand` runs `aidc up` on the host first, which writes `.devcontainer/.env` (so the extension's own `docker compose up` resolves the same `AIDC_*` bind sources and `COMPOSE_PROJECT_NAME` aidc uses), builds the shared base image, and creates the toolchain volume. Then the extension attaches to that same container. The integrated terminal is the aidc zsh, `/workspace` is your repo, and the security guardrails all apply.
+
+`aidc cursor-agent` runs Cursor's CLI agent inside the container instead. Its config/login live under `~/.cursor` (persisted in a named volume; seed host settings with `aidc sync-config cursor`, or authenticate with `cursor-agent login` in the container / a `CURSOR_API_KEY`).
+
+> macOS note: `initializeCommand` uses `bash -lc 'aidc up'` so `~/.local/bin/aidc` is found even when the IDE is launched from the GUI. If it still isn't found, edit `initializeCommand` in `.devcontainer/devcontainer.json` to aidc's absolute path.
+
 ## Isolation modes
 
 aidc runs in one of two isolation modes. **Normal mode is the default and is what most people should use.**

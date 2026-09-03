@@ -67,6 +67,10 @@ services:
         target: /host-seed/omp
         read_only: true
       - type: bind
+        source: ${AIDC_HOST_SEED_CURSOR}
+        target: /host-seed/cursor
+        read_only: true
+      - type: bind
         source: ${AIDC_GITCONFIG_SOURCE}
         target: /host-seed/gitconfig
         read_only: true
@@ -86,9 +90,12 @@ services:
       - type: volume
         source: opencode_home
         target: /home/vscode/.config/opencode
+      # Cursor CLI (cursor-agent) stores config + login under ~/.cursor
+      # (~/.cursor/cli-config.json), NOT ~/.cursor-agent — so the volume mounts
+      # there to persist logins across container recreation.
       - type: volume
         source: cursor_agent_home
-        target: /home/vscode/.cursor-agent
+        target: /home/vscode/.cursor
       - type: volume
         source: grok_home
         target: /home/vscode/.grok

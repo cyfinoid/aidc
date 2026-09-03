@@ -197,6 +197,14 @@ sync_omp() {
   copy_file_from_seed "/host-seed/omp/agent/agent.db" "$home_dir/.omp/agent/agent.db" "0600"
 }
 
+sync_cursor() {
+  ensure_dir "$home_dir/.cursor"
+  # Cursor CLI (cursor-agent) reads global settings from ~/.cursor/cli-config.json.
+  # Auth is account-based (interactive `cursor-agent login`, persisted in the
+  # ~/.cursor volume) or via CURSOR_API_KEY passthrough — not seeded here.
+  copy_file_from_seed "/host-seed/cursor/cli-config.json" "$home_dir/.cursor/cli-config.json" "0600"
+}
+
 sync_gitconfig_overlay() {
   local overlay="$home_dir/.gitconfig.local"
   if [[ ! -f "$overlay" && -f /host-seed/gitconfig ]]; then
@@ -287,12 +295,16 @@ sync_tool() {
     omp)
       sync_omp
       ;;
+    cursor)
+      sync_cursor
+      ;;
     all)
       sync_claude
       sync_codex
       sync_opencode
       sync_grok
       sync_omp
+      sync_cursor
       ;;
     *)
       echo "unsupported tool: $1" >&2
@@ -319,7 +331,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
       sync_tool "$tool"
       ;;
     *)
-      echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|omp|all]" >&2
+      echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|omp|cursor|all]" >&2
       exit 1
       ;;
   esac

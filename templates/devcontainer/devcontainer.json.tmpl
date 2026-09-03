@@ -7,6 +7,8 @@
   "shutdownAction": "stopCompose",
   "overrideCommand": false,
   "remoteUser": "vscode",
+  "//initializeCommand": "Runs on the HOST before the container is created. 'aidc up' writes .devcontainer/.env (so this compose file resolves the same AIDC_* bind sources + COMPOSE_PROJECT_NAME the aidc CLI uses), builds the shared base image, and creates the external toolchain volume — setup the Dev Containers extension does not do on its own. 'bash -lc' sources your login profile so ~/.local/bin/aidc is on PATH even when the IDE is launched from the GUI; if aidc still isn't found, replace with its absolute path.",
+  "initializeCommand": "bash -lc 'aidc up'",
   "customizations": {
     "vscode": {
       "extensions": [

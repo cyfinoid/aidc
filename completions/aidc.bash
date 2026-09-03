@@ -49,7 +49,9 @@ _aidc() {
       COMPREPLY=($(compgen -W "--since" -- "$cur")) ;;
     licenses)
       COMPREPLY=($(compgen -W "--fail" -- "$cur")) ;;
-    sync-config|sync-sessions)
+    sync-config)
+      COMPREPLY=($(compgen -W "claude codex opencode grok omp cursor all" -- "$cur")) ;;
+    sync-sessions)
       COMPREPLY=($(compgen -W "claude codex opencode grok omp all" -- "$cur")) ;;
     claude)
       case "$prev" in

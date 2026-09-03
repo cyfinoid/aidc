@@ -192,7 +192,7 @@ Usage:
   aidc cursor-agent [-- ...]
   aidc cursor
   aidc sync-claude-aliases
-  aidc sync-config <claude|codex|opencode|grok|omp|all>
+  aidc sync-config <claude|codex|opencode|grok|omp|cursor|all>
   aidc sync-sessions [claude|codex|opencode|grok|omp|all]
   aidc sbom [-- ...]
   aidc licenses [--fail] [-- ...]
