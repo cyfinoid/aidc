@@ -175,6 +175,11 @@ sync_opencode() {
   ensure_dir "$home_dir/.config/opencode"
   copy_file_from_seed "/host-seed/opencode/opencode.json" "$home_dir/.config/opencode/opencode.json" "0600"
   copy_dir_from_seed "/host-seed/opencode/plugins" "$home_dir/.config/opencode/plugins"
+  # opencode stores provider credentials in the XDG *data* dir, not the config
+  # dir: ~/.local/share/opencode/auth.json. Seed it (and it persists via the
+  # opencode_data_home volume) so a host `opencode auth login` is inherited.
+  ensure_dir "$home_dir/.local/share/opencode"
+  copy_file_from_seed "/host-seed/opencode-data/auth.json" "$home_dir/.local/share/opencode/auth.json" "0600"
 }
 
 sync_grok() {
@@ -199,9 +204,11 @@ sync_omp() {
 
 sync_cursor() {
   ensure_dir "$home_dir/.cursor"
-  # Cursor CLI (cursor-agent) reads global settings from ~/.cursor/cli-config.json.
-  # Auth is account-based (interactive `cursor-agent login`, persisted in the
-  # ~/.cursor volume) or via CURSOR_API_KEY passthrough — not seeded here.
+  # Cursor CLI (cursor-agent) reads global *settings* from ~/.cursor/cli-config.json
+  # (seeded here). Its interactive-login *token* lives in the macOS Keychain, not a
+  # file, so it CANNOT be seeded/inherited into a Linux container. For containers,
+  # authenticate with CURSOR_API_KEY (forwarded via AIDC_PASSTHROUGH_ENV_KEYS) —
+  # see docs/security.md.
   copy_file_from_seed "/host-seed/cursor/cli-config.json" "$home_dir/.cursor/cli-config.json" "0600"
 }
 

@@ -40,6 +40,7 @@ AIDC_CORE_LOGICS_WORKTREE="$TMP_ROOT/core"
 AIDC_HOST_SEED_CLAUDE="$TMP_ROOT/seed/claude"
 AIDC_HOST_SEED_CODEX="$TMP_ROOT/seed/codex"
 AIDC_HOST_SEED_OPENCODE="$TMP_ROOT/seed/opencode"
+AIDC_HOST_SEED_OPENCODE_DATA="$TMP_ROOT/seed/opencode-data"
 AIDC_HOST_SEED_GROK="$TMP_ROOT/seed/grok"
 AIDC_HOST_SEED_OMP="$TMP_ROOT/seed/omp"
 AIDC_HOST_SEED_CURSOR="$TMP_ROOT/seed/cursor"
@@ -64,6 +65,7 @@ for line in \
   "AIDC_HOST_SEED_CLAUDE=$TMP_ROOT/seed/claude" \
   "AIDC_HOST_SEED_CODEX=$TMP_ROOT/seed/codex" \
   "AIDC_HOST_SEED_OPENCODE=$TMP_ROOT/seed/opencode" \
+  "AIDC_HOST_SEED_OPENCODE_DATA=$TMP_ROOT/seed/opencode-data" \
   "AIDC_HOST_SEED_GROK=$TMP_ROOT/seed/grok" \
   "AIDC_HOST_SEED_OMP=$TMP_ROOT/seed/omp" \
   "AIDC_HOST_SEED_CURSOR=$TMP_ROOT/seed/cursor" \

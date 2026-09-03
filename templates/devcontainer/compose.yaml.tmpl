@@ -59,6 +59,10 @@ services:
         target: /host-seed/opencode
         read_only: true
       - type: bind
+        source: ${AIDC_HOST_SEED_OPENCODE_DATA}
+        target: /host-seed/opencode-data
+        read_only: true
+      - type: bind
         source: ${AIDC_HOST_SEED_GROK}
         target: /host-seed/grok
         read_only: true
@@ -90,6 +94,11 @@ services:
       - type: volume
         source: opencode_home
         target: /home/vscode/.config/opencode
+      # opencode keeps its auth (auth.json) in the XDG *data* dir, not the config
+      # dir — persist it so logins survive container recreation.
+      - type: volume
+        source: opencode_data_home
+        target: /home/vscode/.local/share/opencode
       # Cursor CLI (cursor-agent) stores config + login under ~/.cursor
       # (~/.cursor/cli-config.json), NOT ~/.cursor-agent — so the volume mounts
       # there to persist logins across container recreation.
@@ -121,6 +130,7 @@ volumes:
   claude_home:
   codex_home:
   opencode_home:
+  opencode_data_home:
   cursor_agent_home:
   grok_home:
   omp_home:

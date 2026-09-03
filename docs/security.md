@@ -282,10 +282,10 @@ read-only at `/host-seed/<tool>`) into the agent's per-repo volume:
 |---|---|---|---|
 | Claude | `~/.claude` | `~/.claude` | `settings.json`, `CLAUDE.md` |
 | Codex | `~/.codex` | `~/.codex` | `auth.json`, `config.toml`, `AGENTS.md`, `rules/`, `skills/` |
-| OpenCode | `~/.config/opencode` | `~/.config/opencode` | `opencode.json`, `plugins/` |
+| OpenCode | `~/.config/opencode` + `~/.local/share/opencode` | same | `opencode.json`, `plugins/`, **`auth.json`** (opencode keeps credentials in the XDG *data* dir) |
 | Grok | `~/.grok` | `~/.grok` | `config.toml` / `user-settings.json` / `auth.json` (whichever exists) |
 | omp | `~/.omp` | `~/.omp` | `agent/config.yml`, `agent/agent.db` (whichever exists) |
-| Cursor | `~/.cursor` | `~/.cursor` | `cli-config.json` (auth is account-login-in-container or `CURSOR_API_KEY`) |
+| Cursor | `~/.cursor` | `~/.cursor` | `cli-config.json` **(settings only)** — the login token is in the macOS Keychain and can't be seeded; use `CURSOR_API_KEY` |
 
 Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|omp|cursor|all>`.
 Because the seed is read-only and only specific files are copied, the agents
@@ -294,13 +294,24 @@ host. After interactive login *inside* the container, credentials persist in the
 named volume across restarts (and are wiped by `aidc destroy`).
 
 **2. Environment-variable passthrough.** For headless/API-key auth, `aidc`
-forwards a fixed set of host env vars into the agent process when present:
-`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
-`CURSOR_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL`. OpenCode and Grok can
-both speak to multiple providers, so these shared keys let all the agents reuse
-the same host credentials. For xAI specifically, either log in interactively
-(persisted in `~/.grok`) or export the xAI key on the host and add it to the
-passthrough list in `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc.sh`) before launching.
+forwards a set of host env vars into the agent process **when set** (unset keys
+are skipped): `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,
+`OPENAI_BASE_URL`, `CURSOR_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`,
+`GEMINI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GROQ_API_KEY`,
+`MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `PERPLEXITY_API_KEY`. OpenCode and omp are
+multi-provider, so these shared keys let the agents reuse your host credentials
+without an interactive login. Narrow or extend the list per host/project by
+reassigning `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc/common.sh`) in
+`~/.config/aidc/config.env` or `.ai-container/project.env`.
+
+**Which agents inherit a host login automatically?** With a host login present,
+Claude (Keychain → tmpfs token), Codex (`~/.codex/auth.json`), Grok
+(`~/.grok/auth.json`), omp (`~/.omp/agent/agent.db`), and OpenCode
+(`~/.local/share/opencode/auth.json`) are all seeded on first `aidc up`, and any
+in-container login persists in the agent's named volume. **Cursor is the
+exception** — its interactive-login token is stored in the macOS Keychain (not a
+copyable file), so it can't be seeded; authenticate cursor-agent in containers
+with `CURSOR_API_KEY` (forwarded above).
 
 Only env vars actually set in `aidc`'s own process are forwarded — the value is
 read at exec time and lives only for the duration of that `docker compose exec`,

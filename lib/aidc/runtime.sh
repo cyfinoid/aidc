@@ -701,7 +701,7 @@ aidc::write_devcontainer_env() {
     AIDC_PIDS_LIMIT AIDC_MEM_LIMIT AIDC_CPU_LIMIT
     AIDC_WORKSPACE AIDC_DEVCONTAINER_DIR AIDC_CORE_LOGICS_WORKTREE
     AIDC_HOST_SEED_CLAUDE AIDC_HOST_SEED_CODEX AIDC_HOST_SEED_OPENCODE
-    AIDC_HOST_SEED_GROK AIDC_HOST_SEED_OMP AIDC_HOST_SEED_CURSOR
+    AIDC_HOST_SEED_OPENCODE_DATA AIDC_HOST_SEED_GROK AIDC_HOST_SEED_OMP AIDC_HOST_SEED_CURSOR
     AIDC_GITCONFIG_SOURCE AIDC_CLIPBOARD_DIR_SOURCE
   )
   local tmp="$dir/.env.aidc-tmp.$$"
@@ -949,6 +949,8 @@ aidc::export_compose_env() {
   AIDC_HOST_SEED_CODEX="$(aidc::mount_dir_or_empty "$HOME/.codex" "codex")"
   export AIDC_HOST_SEED_OPENCODE
   AIDC_HOST_SEED_OPENCODE="$(aidc::mount_dir_or_empty "$HOME/.config/opencode" "opencode")"
+  export AIDC_HOST_SEED_OPENCODE_DATA
+  AIDC_HOST_SEED_OPENCODE_DATA="$(aidc::mount_dir_or_empty "$HOME/.local/share/opencode" "opencode-data")"
   export AIDC_HOST_SEED_GROK
   AIDC_HOST_SEED_GROK="$(aidc::mount_dir_or_empty "$HOME/.grok" "grok")"
   export AIDC_HOST_SEED_OMP

@@ -471,6 +471,7 @@ aidc::status_config() {
   aidc::status_mount_row "/host-seed/claude" "$AIDC_HOST_SEED_CLAUDE" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/codex" "$AIDC_HOST_SEED_CODEX" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/opencode" "$AIDC_HOST_SEED_OPENCODE" "$c_dim" "$c_rst"
+  aidc::status_mount_row "/host-seed/opencode-data" "$AIDC_HOST_SEED_OPENCODE_DATA" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/grok" "$AIDC_HOST_SEED_GROK" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/omp" "$AIDC_HOST_SEED_OMP" "$c_dim" "$c_rst"
   aidc::status_mount_row "/host-seed/cursor" "$AIDC_HOST_SEED_CURSOR" "$c_dim" "$c_rst"

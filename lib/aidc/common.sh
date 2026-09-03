@@ -112,13 +112,26 @@ AIDC_PROFILE_LOADED_KEYS=()
 # bootstrap and launch execs in aidc::run_tool.
 AIDC_CLAUDE_TOKEN_SNIPPET='f=/dev/shm/aidc-oauth-token; if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" && -f "$f" ]]; then CLAUDE_CODE_OAUTH_TOKEN="$(cat "$f")"; export CLAUDE_CODE_OAUTH_TOKEN; fi'
 
+# Host env vars forwarded into the agent process when present (only if set, so a
+# long list is safe — unset keys are skipped by append_passthrough_env_args).
+# These let API-key auth "just work" without an interactive login: Anthropic +
+# Claude OAuth, OpenAI (codex), xAI (grok), Cursor, and the common multi-provider
+# keys opencode/omp accept. Narrow or extend it per host/project via
+# AIDC_PASSTHROUGH_ENV_KEYS in config.env / project.env (see docs/security.md).
 AIDC_PASSTHROUGH_ENV_KEYS=(
   "ANTHROPIC_API_KEY"
   "CLAUDE_CODE_OAUTH_TOKEN"
   "OPENAI_API_KEY"
-  "CURSOR_API_KEY"
-  "OPENROUTER_API_KEY"
   "OPENAI_BASE_URL"
+  "CURSOR_API_KEY"
+  "XAI_API_KEY"
+  "OPENROUTER_API_KEY"
+  "GEMINI_API_KEY"
+  "GOOGLE_GENERATIVE_AI_API_KEY"
+  "GROQ_API_KEY"
+  "MISTRAL_API_KEY"
+  "DEEPSEEK_API_KEY"
+  "PERPLEXITY_API_KEY"
 )
 
 # Host-set knobs forwarded into the container for `aidc sbom` / `aidc licenses`

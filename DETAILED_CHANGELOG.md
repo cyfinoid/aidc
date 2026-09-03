@@ -8,6 +8,48 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-03 — Agents inherit host login automatically (opencode fix + passthrough)
+
+**Summary:** Reduce hand-configuring agent auth in containers. aidc already had
+per-agent volumes (login survives restarts), host-seed of credential files, and
+env passthrough. This closes the gaps so a host login flows into containers.
+
+**Findings:** codex/grok/omp/claude were already automatic (their auth files/dbs
+are volumed + seeded). Two gaps + one non-file case:
+- **opencode (bug):** stores auth at `~/.local/share/opencode/auth.json` (XDG data
+  dir), but aidc only volumed/seeded `~/.config/opencode` (config dir) → login lost
+  on recreation and never inherited. Same class as the earlier cursor path bug.
+- **passthrough:** `XAI_API_KEY` (grok) and other common provider keys weren't
+  forwarded.
+- **cursor:** interactive-login token is in the macOS Keychain (headless login
+  fails to store it); the CLI reads its own keychain entry, not an injectable env
+  token. Supported container path is `CURSOR_API_KEY` (already forwarded) — so no
+  file-seed/Keychain-read inheritance is possible; documented instead.
+
+**What changed:**
+- opencode data dir: `Dockerfile.base.tmpl` mkdir `~/.local/share/opencode`;
+  `compose.yaml.tmpl` new `opencode_data_home` volume + `/host-seed/opencode-data`
+  bind; `runtime.sh` exports `AIDC_HOST_SEED_OPENCODE_DATA` and adds it to the
+  `.devcontainer/.env` writer; `config.sh` empty-seed dir; `bootstrap-state.sh.tmpl`
+  `sync_opencode` seeds `auth.json` there; `status.sh` mount row.
+- `common.sh` `AIDC_PASSTHROUGH_ENV_KEYS`: added `XAI_API_KEY`, `GEMINI_API_KEY`,
+  `GOOGLE_GENERATIVE_AI_API_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`,
+  `DEEPSEEK_API_KEY`, `PERPLEXITY_API_KEY` (unset keys skipped; still overridable).
+- cursor: `sync_cursor` comment + `docs/security.md` state the Keychain reality +
+  `CURSOR_API_KEY` path; new "which agents inherit a host login" summary.
+
+**Tests:** new `tests/agent-auth-seed.test.sh` (sources the source-safe
+`bootstrap-state.sh.tmpl`; stubs `/host-seed/*` with fake creds; asserts
+`sync_opencode` lands `auth.json` at `~/.local/share/opencode/`, codex/grok/omp
+land theirs, cursor seeds only `cli-config.json`). `tests/devcontainer-env.test.sh`
+gains `AIDC_HOST_SEED_OPENCODE_DATA`. Full suite green; shellcheck + aidc-scan clean.
+
+**Notes:** end-to-end (host `opencode auth login` inherited; `aidc down/up`
+persistence; `XAI_API_KEY`/`CURSOR_API_KEY` reaching the agents) needs a Docker
+host and is a maintainer check.
+
+---
+
 ## 2026-09-03 — Auto-detect the container engine (Docker → offer alternatives)
 
 **Summary:** Make the `AIDC_DOCKER_PROVIDER` switch automatic. aidc defaults to
