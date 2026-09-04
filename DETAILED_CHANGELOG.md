@@ -8,6 +8,85 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-04 — Claude global config (`.claude.json`) persists across recreation
+
+**Summary:** Follow-up to the opencode "state outside the persisted dir" fix.
+The reporter noted opencode syncs `~/.local/share/opencode/` and asked to
+confirm every other supported agent is sorted. A per-agent audit found one
+analogous gap — Claude Code — and fixed it; the rest are self-contained.
+
+**Why:** Claude Code writes its *global* config to `~/.claude.json`, a **sibling
+file** of `~/.claude` in `$HOME` — not inside it. The `claude_home` volume mounts
+only `~/.claude`, so `~/.claude.json` lived in the ephemeral container layer and
+was wiped on every recreation, losing MCP-server registrations, project-trust
+decisions, onboarding state, and session metadata. This is the same class of bug
+as opencode's XDG data dir and the earlier cursor `~/.cursor-agent` path.
+
+**Audit of all six agents** (config vs auth/data/session dirs on Linux; verified
+against upstream docs + this repo's existing mappings):
+- **claude** — SPLIT: `~/.claude/` (volumed) **and sibling `~/.claude.json`**
+  (NOT volumed) → the gap fixed here. Credentials on Linux are
+  `~/.claude/.credentials.json` (already inside the volume).
+- **codex** — SINGLE: everything under `~/.codex/` (auth.json, config.toml,
+  sessions, history, log). Volumed. OK.
+- **opencode** — SPLIT, already fixed: `~/.config/opencode/` +
+  `~/.local/share/opencode/` (auth + sessions), each with its own volume.
+- **grok** — SINGLE: `~/.grok/` (config.toml, auth.json, sessions, skills).
+  Volumed. OK.
+- **omp** — SINGLE (default): `~/.omp/` (agent/config.yml, agent.db, sessions).
+  Volumed. OK. (XDG-relocatable via `XDG_DATA_HOME`/`OMP_PROFILE`, which the
+  container does not set.)
+- **cursor** — file state under `~/.cursor/` (volumed); the interactive-login
+  **token is in the OS keyring**, not a file, so it can't be seeded — documented
+  exception, use `CURSOR_API_KEY`. No file-dir gap.
+
+**Fix (chosen approach):** set `CLAUDE_CONFIG_DIR=/home/vscode/.claude` in the
+compose `environment:`. When set, Claude keeps its global config
+(`.claude.json`, `.credentials.json`, `projects/`, `settings.json`) inside that
+directory — which is exactly the `claude_home` volume mount — so `.claude.json`
+now persists. Chosen over a `~/.claude.json` → volume **symlink** because Claude
+may write the file via atomic tmp-file+rename, which would clobber a symlink;
+pointing the whole config dir at the volume is rename-safe. The value equals
+Claude's historical default dir, so the only behavioral change is `.claude.json`
+moving from `$HOME/.claude.json` into `$HOME/.claude/.claude.json`.
+
+**What changed:**
+- `templates/devcontainer/compose.yaml.tmpl`: add `CLAUDE_CONFIG_DIR:
+  /home/vscode/.claude` to the service `environment:` (with rationale comment).
+- `templates/devcontainer/Dockerfile.base.tmpl`: `aidc-bootstrap-claude` (the
+  onboarding-skip helper) derived its target from a hard-coded
+  `$HOME/.claude.json`; it now honors `CLAUDE_CONFIG_DIR`
+  (`config="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}"; config="${config:-$HOME/.claude.json}"`),
+  so the onboarding flag is written/checked where Claude actually reads it.
+- `docs/security.md`: new "state outside the single dir" note covering opencode,
+  Claude (this fix), and cursor.
+- `docs/install.md`: volume list annotates `~/.claude` (CLAUDE_CONFIG_DIR) and
+  adds the previously-missing `~/.local/share/opencode` data-dir line.
+- `tests/claude-config-dir.test.sh` (new): asserts compose sets
+  `CLAUDE_CONFIG_DIR` to the `claude_home` mount target, and evals the exact
+  shipped `config=` derivation to prove it honors the var when set and falls back
+  to `$HOME/.claude.json` when unset.
+
+**Not changed:** no new volume is needed (the target already exists); seeding is
+untouched — the host's `~/.claude.json` is *not* seeded (it holds every host
+project's paths/history); this only persists the *container's* own `.claude.json`
+across recreation. `sync_session_tool claude` still reads `~/.claude/projects`
+(unchanged path under `CLAUDE_CONFIG_DIR`).
+
+**Commands / verification:**
+- `bash tests/claude-config-dir.test.sh` → 5 passed, 0 failed.
+- Regression: `bash tests/validate-scaffold.test.sh` (6/0),
+  `tests/devcontainer-env.test.sh` (8/0), `tests/agent-auth-seed.test.sh` (7/0).
+- `shellcheck tests/claude-config-dir.test.sh` → clean.
+- `aidc-scan` on the changed files → no findings above LOW.
+
+**Notes:** `CLAUDE_CONFIG_DIR` is under-documented upstream, but its documented
+effect (centralize global config, incl. `.claude.json`, into the given dir) is
+exactly what's wanted; project-level `.claude/` dirs are unaffected. The
+generated `.devcontainer/` is gitignored and rebuilt from templates on `aidc
+up`/`rebuild`, so the compose env change lands on the next (re)build; the
+Dockerfile change needs an image rebuild.
+
 ## 2026-09-03 — Agents inherit host login automatically (opencode fix + passthrough)
 
 **Summary:** Reduce hand-configuring agent auth in containers. aidc already had

@@ -272,14 +272,17 @@ RUN printf '#!/usr/bin/env bash\nexec socat - UNIX-CONNECT:/host-clipboard/clipb
     && ln -sf /usr/local/bin/aidc-clipboard-recv /usr/local/bin/wl-paste
 
 # Bootstrap Claude OAuth + skip the first-run welcome screen when a token
-# is present. Idempotent: returns immediately if ~/.claude.json already has
-# hasCompletedOnboarding=true. Invoked by aidc::run_tool before 'aidc claude'.
+# is present. Idempotent: returns immediately if the Claude global config already
+# has hasCompletedOnboarding=true. Invoked by aidc::run_tool before 'aidc claude'.
 COPY --chown=root:root <<'EOF' /usr/local/bin/aidc-bootstrap-claude
 #!/usr/bin/env bash
 set -euo pipefail
 [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] || exit 0
 
-config="$HOME/.claude.json"
+# Honor CLAUDE_CONFIG_DIR (compose points it at the persisted ~/.claude volume so
+# .claude.json survives recreation); fall back to Claude's default when unset.
+config="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}"
+config="${config:-$HOME/.claude.json}"
 if [[ -f "$config" ]] && python3 - "$config" <<'PY' 2>/dev/null
 import json, sys
 try:

@@ -293,6 +293,21 @@ reuse your existing logins without the container being able to write back to the
 host. After interactive login *inside* the container, credentials persist in the
 named volume across restarts (and are wiped by `aidc destroy`).
 
+A couple of agents keep state *outside* the single dir you'd naively persist, so
+the volume mounts are placed deliberately:
+
+- **OpenCode** splits config (`~/.config/opencode`) from auth + sessions
+  (`~/.local/share/opencode`, the XDG *data* dir) — both get their own named
+  volume, else logins and history would vanish on recreation.
+- **Claude Code** writes its global config to `~/.claude.json`, a *sibling* file
+  of `~/.claude` and thus outside the `claude_home` volume. The container sets
+  `CLAUDE_CONFIG_DIR=/home/vscode/.claude` so `.claude.json` (and, on Linux,
+  `.credentials.json`) land inside that volume and persist across recreation
+  along with the rest of Claude's state.
+- **cursor-agent** keeps file state under `~/.cursor` (persisted), but its
+  interactive-login token lives in the OS keyring, not a file — see the Cursor
+  note above; use `CURSOR_API_KEY` in containers.
+
 **2. Environment-variable passthrough.** For headless/API-key auth, `aidc`
 forwards a set of host env vars into the agent process **when set** (unset keys
 are skipped): `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`,

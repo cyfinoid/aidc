@@ -31,6 +31,14 @@ services:
       AIDC_CONTAINER_HOME: /home/vscode
       AIDC_CORE_LOGICS_DIR: /opt/CORE_LOGICS
       AIDC_WORKSPACE_DIR: /workspace
+      # Claude Code writes its global config to ~/.claude.json — a *sibling* of
+      # ~/.claude, so OUTSIDE the claude_home volume below. Left at the default it
+      # lives in the container layer and is wiped on every recreation, losing MCP
+      # registrations, project-trust and onboarding (the same class of bug that
+      # bit opencode's XDG data dir). Pointing CLAUDE_CONFIG_DIR at the volume dir
+      # relocates .claude.json (and .credentials.json) INSIDE it, so all of
+      # Claude's global state persists like every other agent's.
+      CLAUDE_CONFIG_DIR: /home/vscode/.claude
     command:
       - /bin/bash
       - -lc
