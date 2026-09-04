@@ -41,6 +41,14 @@ aidc::sync_session_tool() {
   local workspace="$1"
   local tool="$2"
   local container_src host_dst
+  # Per-tool tar excludes (currently only opencode needs any): flags applied
+  # to the *creation* side inside the container, so the GNU-tar exclude
+  # semantics (dir pattern prunes its contents too) are what matters.
+  local -a src_excludes=()
+  # Existence probe run inside the container before anything is copied, plus
+  # the human-readable reason used in the "nothing to sync" message.
+  local -a gate=()
+  local gate_desc
 
   case "$tool" in
     claude)
@@ -52,8 +60,29 @@ aidc::sync_session_tool() {
       host_dst="$HOME/.codex/sessions"
       ;;
     opencode)
-      container_src="/home/vscode/.config/opencode/projects"
-      host_dst="$HOME/.config/opencode/projects"
+      # opencode keeps sessions in the XDG *data* dir — never under
+      # ~/.config/opencode (that is config only). Older builds wrote JSON
+      # transcripts to storage/; current builds keep everything in a SQLite
+      # opencode.db (+ -wal/-shm sidecars). The host's own opencode uses the
+      # same data-dir path, so synced copies MUST land in an aidc-owned
+      # subtree — extracting over ~/.local/share/opencode would clobber the
+      # host's own database with the container's (data loss, not a merge).
+      container_src="/home/vscode/.local/share/opencode"
+      host_dst="$HOME/.local/share/aidc/sessions/opencode/$(aidc::repo_slug "${workspace:-/workspace}")"
+      # Session artifacts only: credentials never leave the container, and
+      # log/repos/snapshot/tool-output/bin are caches, not sessions.
+      src_excludes=(
+        --exclude=./auth.json
+        --exclude=./log
+        --exclude=./repos
+        --exclude=./snapshot
+        --exclude=./tool-output
+        --exclude=./bin
+      )
+      # The data dir itself always exists (named volume mounts there), so
+      # probe for actual session artifacts in either on-disk format.
+      gate=(test -d "$container_src/storage" -o -f "$container_src/opencode.db")
+      gate_desc="no session artifacts in $container_src"
       ;;
     grok)
       container_src="/home/vscode/.grok/sessions"
@@ -70,13 +99,20 @@ aidc::sync_session_tool() {
       ;;
   esac
 
-  if ! aidc::compose_capture "$workspace" exec -T workspace test -d "$container_src" >/dev/null 2>&1; then
+  if [[ ${#gate[@]} -gt 0 ]]; then
+    if ! aidc::compose_capture "$workspace" exec -T workspace "${gate[@]}" >/dev/null 2>&1; then
+      aidc::log "no $tool sessions to sync ($gate_desc)"
+      return
+    fi
+  elif ! aidc::compose_capture "$workspace" exec -T workspace test -d "$container_src" >/dev/null 2>&1; then
     aidc::log "no $tool sessions to sync ($container_src missing)"
     return
   fi
 
   mkdir -p "$host_dst"
-  aidc::compose "$workspace" exec -T workspace tar -C "$container_src" -cf - . \
+  # ${arr[@]+...} guard: empty-array expansion under `set -u` (bash 3.2) errors.
+  aidc::compose "$workspace" exec -T workspace \
+    tar -C "$container_src" -cf - ${src_excludes[@]+"${src_excludes[@]}"} . \
     | tar -C "$host_dst" --no-same-owner --no-same-permissions -xf -
 
   # Agent transcripts record absolute paths from inside the container, where the

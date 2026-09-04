@@ -84,6 +84,8 @@ aidc up            # build + start container
 
 `GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).
 
+Session transcripts sync **back to the host** (`aidc sync-sessions`, plus auto-sync on container start / agent exit / `down` / `destroy`): claude → `~/.claude/projects/`, codex → `~/.codex/sessions/`, grok → `~/.grok/sessions/`, omp → `~/.omp/agent/sessions/`, and opencode → `~/.local/share/aidc/sessions/opencode/<repo-slug>/` — opencode deliberately does **not** sync into `~/.local/share/opencode/` itself, because the host's own opencode database lives there and would be clobbered; the aidc copy is read-only-for-you, excludes `auth.json` (credentials never leave the container), and keeps `opencode.db` (or `storage/` on older builds) per project.
+
 ## Per-project customisation
 
 ### Automatic toolchain detection

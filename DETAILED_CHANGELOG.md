@@ -8,6 +8,94 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-04 — opencode session sync read the wrong directory (config dir, not XDG data dir)
+
+**Summary:** `aidc sync-sessions opencode` — and the automatic sync on
+container start / agent exit / `down` / `destroy` — always reported
+`no opencode sessions to sync (/home/vscode/.config/opencode/projects missing)`,
+even after real opencode usage in the container. The sync source path was
+simply wrong: opencode never creates `~/.config/opencode/projects`.
+
+**Why:** opencode splits config (`~/.config/opencode` — `opencode.json`,
+`plugins/`) from data (`~/.local/share/opencode`, the XDG *data* dir). Sessions
+live in the data dir, in one of two on-disk formats depending on version:
+older builds wrote JSON transcripts under `storage/`; current builds keep
+everything in a SQLite `opencode.db` (+ `-wal`/`-shm` sidecars). The previous
+fix (6f4df26 / the "config vs data-dir split" pattern) corrected *seeding and
+persistence* (the `opencode_data_home` volume + `auth.json` seed) but the
+session-sync mapping in `lib/aidc/sync.sh` was never touched — it still pointed
+at the config dir. Evidence from the live container: `~/.local/share/opencode/
+opencode.db` held real sessions while `~/.config/opencode/projects` did not
+exist. This is the same pattern class as the cursor `~/.cursor-agent` mispath:
+*verify each of config / auth / sessions separately per agent*.
+
+**The subtle hazard this fix avoids:** the host runs opencode too, and its own
+data dir is the very same path (`~/.local/share/opencode`, e.g. a 154 MB
+`opencode.db` with 144 sessions on the reporting host). The naive "fix" —
+syncing the container's data dir to the host's data dir — would extract the
+container's small db **over the host's live database** and destroy host
+sessions. So synced copies land in an aidc-owned, per-project namespaced
+subtree: `~/.local/share/aidc/sessions/opencode/<repo-slug>/`.
+
+**How:**
+- `lib/aidc/sync.sh` (`aidc::sync_session_tool`, opencode case):
+  - source: `/home/vscode/.local/share/opencode`; destination:
+    `$HOME/.local/share/aidc/sessions/opencode/$(aidc::repo_slug <workspace>)`
+    (namespaced per project so two workspaces never overwrite each other);
+  - tar excludes on the creation side: `auth.json` (credentials never leave
+    the container), `log/`, `repos/`, `snapshot/`, `tool-output/`, `bin/`
+    (caches, not sessions);
+  - existence gate: the data dir *always* exists (the named volume mounts
+    there), so the old `test -d` said nothing — the gate now probes for actual
+    session artifacts, `test -d storage -o -f opencode.db`, covering both the
+    legacy JSON and current SQLite layouts;
+  - the generic gate/excludes are new per-tool plumbing (`gate`/`gate_desc`/
+    `src_excludes`) so other tools keep the simple `test -d` behavior;
+  - the `/workspace`→host rewrite only matches `*.json`/`*.jsonl`, so the
+    binary `opencode.db` passes through byte-for-byte (sed-rewriting a SQLite
+    file would corrupt it);
+  - the empty-array expansion uses the repo's `${arr[@]+...}` guard so the
+    module stays safe under `set -u` (bash 3.2) callers.
+- `tests/sync-sessions.test.sh`: the stub layer was upgraded from
+  "compose_capture always succeeds" to actually executing the gate/tar argv
+  against a local fixture that mirrors the container's `/home/vscode` layout
+  (paths translated prefix-wise). New cases: (5) data-dir sync with excludes —
+  db + `storage/` land, `auth.json`/`log/` don't, no `SECRET` string reaches
+  the host, host's own `~/.local/share/opencode` untouched, JSON rewritten,
+  binary db byte-identical; (6) the gate — data dir present but no session
+  artifacts → nothing synced, no host dirs created; (7) legacy `storage/`-only
+  layout still syncs and rewrites. The four pre-existing rewrite cases were
+  kept (fixtures moved under `.claude/projects/` to match the real container
+  layout the new stub exposes).
+- Docs: `lib/aidc.sh` help, `docs/claude-profiles.md` (tool list),
+  `docs/install.md` (where each agent's sessions land on the host, and why
+  opencode deliberately does not sync into `~/.local/share/opencode`).
+
+**Verification:**
+- `bash tests/sync-sessions.test.sh` → 10 passed, 0 failed.
+- Full suite: all 29 `tests/*.test.sh` pass.
+- `shellcheck lib/aidc/sync.sh tests/sync-sessions.test.sh` → clean.
+- `aidc-scan` → no findings above LOW (see session log).
+- Live spot-check in this container: `~/.local/share/opencode/opencode.db`
+  (244K, active `-wal`) contains the real session rows; the gate now matches
+  it, so the next sync pulls it instead of reporting "missing".
+
+**Commands:**
+```bash
+bash tests/sync-sessions.test.sh
+for t in tests/*.test.sh; do bash "$t"; done
+shellcheck lib/aidc/sync.sh tests/sync-sessions.test.sh
+aidc-scan
+```
+
+**Notes / rollback:** single-file behavioral change (`lib/aidc/sync.sh`) plus
+tests/docs; revert the commit to restore the old (broken) mapping. The
+`~/.local/share/aidc/` host subtree is entirely aidc-owned — safe to `rm -rf`
+to "unsync". If a future opencode build renames `opencode.db` again, only the
+gate probe needs updating (it deliberately checks both known layouts).
+
+---
+
 ## 2026-09-04 — Claude global config (`.claude.json`) persists across recreation
 
 **Summary:** Follow-up to the opencode "state outside the persisted dir" fix.

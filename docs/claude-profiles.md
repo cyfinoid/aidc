@@ -109,5 +109,5 @@ aidc exec -- printenv CLAUDE_CODE_OAUTH_TOKEN | head -c 12 && echo "..."
 The host's Claude Code `/insights` only reads `~/.claude/projects/` on the host. Container sessions live in a Docker volume. Run:
 
 ```bash
-aidc sync-sessions claude     # or: codex, opencode, all
+aidc sync-sessions claude     # or: codex, grok, omp, opencode, all
 ```
