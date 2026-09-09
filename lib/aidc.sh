@@ -236,11 +236,14 @@ Notes:
     status' shows what's installed. Detected go/rust/java toolchains are
     populated automatically on 'aidc up'.
   - aidc sync-sessions pulls in-container session logs back to the host
-    (claude → ~/.claude/projects; opencode →
-    ~/.local/share/aidc/sessions/opencode/<repo>/, never over the host's own
-    opencode data dir) so '/insights' on the host can see them. Sessions also
-    auto-sync on container start, agent exit, 'down', and 'destroy' unless
-    AIDC_AUTO_SYNC_SESSIONS=0.
+    (claude → ~/.claude/projects; opencode → ~/.local/share/aidc/sessions/
+    opencode/<repo>/) so '/insights' on the host can see them. opencode
+    sessions are ALSO merged additively into the host's own data dir
+    (~/.local/share/opencode) so viewers reading the default path see them —
+    host rows always win, and the host db is snapshotted + schema-checked
+    first, so it is never overwritten (needs sqlite3 on the host; opt out with
+    AIDC_OPENCODE_MERGE_TO_BASE=0). Sessions also auto-sync on container start,
+    agent exit, 'down', and 'destroy' unless AIDC_AUTO_SYNC_SESSIONS=0.
   - The host-clipboard bridge is off by default. Enable it at (re)create time
     with 'aidc up --clipboard' or 'aidc rebuild --clipboard'.
   - Per-project VM isolation is off by default due to resource cost. Enable it

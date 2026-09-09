@@ -140,7 +140,10 @@ printf 'SECRET' >"$oc_data/auth.json"
 printf 'logline\n' >"$oc_data/log/debug.log"
 printf '{"cwd":"/workspace/app"}\n' >"$oc_data/storage/session/s1.json"
 ws="/home/alice/projects/app"
-aidc::sync_session_tool "$ws" opencode
+# Opt out of the host-db merge here so this case exercises ONLY the quarantine
+# step (and proves AIDC_OPENCODE_MERGE_TO_BASE=0 leaves the host's own data dir
+# untouched). The merge itself is covered by the sqlite cases below.
+AIDC_OPENCODE_MERGE_TO_BASE=0 aidc::sync_session_tool "$ws" opencode
 # Expected host dst: ~/.local/share/aidc/sessions/opencode/<repo-slug>/ —
 # resolve the slug dir via glob (one repo synced into this HOME).
 oc_dst="$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)"
@@ -152,11 +155,11 @@ if [[ -f "$oc_dst/opencode.db" && -f "$oc_dst/storage/session/s1.json" ]] \
 else
   fail "opencode sync layout wrong: $(find "$HOME/.local/share/aidc" -mindepth 1 2>/dev/null | head -20)"
 fi
-# ...and the host's own opencode data dir is never a target:
+# ...and with the merge opted out the host's own data dir is never a target:
 if [[ ! -e "$HOME/.local/share/opencode" ]]; then
-  ok "opencode: host's own ~/.local/share/opencode untouched"
+  ok "opencode: AIDC_OPENCODE_MERGE_TO_BASE=0 leaves host data dir untouched"
 else
-  fail "opencode sync wrote into the host's own data dir"
+  fail "opencode sync wrote into the host's own data dir despite opt-out"
 fi
 # JSON transcripts still get the /workspace rewrite…
 if grep -q '"cwd":"/home/alice/projects/app/app"' "$oc_dst/storage/session/s1.json"; then
@@ -195,6 +198,108 @@ if [[ -f "$oc_dst/storage/session/old.json" ]] \
   ok "opencode: legacy storage/ layout synced + rewritten"
 else
   fail "legacy storage/ sync failed: $(find "$HOME/.local/share/aidc" -type f 2>/dev/null)"
+fi
+# legacy storage/ is additively folder-merged into the host's own data dir too
+# (the merge model that mirrors claude's simple folder sync).
+base_old="$HOME/.local/share/opencode/storage/session/old.json"
+if [[ -f "$base_old" ]] && grep -Fq '"info":"/home/alice/app/x"' "$base_old"; then
+  ok "opencode: legacy storage/ merged into host ~/.local/share/opencode"
+else
+  fail "legacy storage/ not merged into host base: $(find "$HOME/.local/share/opencode" -type f 2>/dev/null)"
+fi
+
+# ── opencode.db SQLite merge cases (require sqlite3) ──────────────────────────
+# These exercise aidc::opencode_merge_to_base's row-merge into the host's own
+# opencode.db: additive, host-rows-win, schema-gated, never overwriting.
+if command -v sqlite3 >/dev/null 2>&1; then
+
+  # Minimal opencode-like schema: id PK + JSON `data` column (where opencode
+  # keeps absolute paths). mk_db <file> <sql...> builds a db from statements.
+  mk_session_db() {
+    local db="$1"; shift
+    sqlite3 "$db" "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);"
+    local stmt
+    for stmt in "$@"; do sqlite3 "$db" "$stmt"; done
+  }
+
+  # ── 8. additive merge: container rows added, host rows untouched, paths fixed
+  setup_case oc-merge-additive
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  mk_session_db "$oc_data/opencode.db" \
+    "INSERT INTO session VALUES ('contB', '{\"cwd\":\"/workspace/proj\"}');"
+  mkdir -p "$HOME/.local/share/opencode"
+  mk_session_db "$HOME/.local/share/opencode/opencode.db" \
+    "INSERT INTO session VALUES ('hostA', '{\"cwd\":\"/home/alice/app/host\"}');"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  got_b="$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")"
+  got_a="$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='hostA';")"
+  if [[ "$got_a" == '{"cwd":"/home/alice/app/host"}' \
+     && "$got_b" == '{"cwd":"/home/alice/app/proj"}' ]]; then
+    ok "opencode.db: container row merged in (path rewritten), host row intact"
+  else
+    fail "opencode.db additive merge wrong: hostA=$got_a contB=$got_b"
+  fi
+  if [[ ! -e "$bdb.aidc-bak" && ! -e "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/).opencode.merge.db" ]]; then
+    ok "opencode.db: merge backup + temp copy cleaned up on success"
+  else
+    fail "opencode.db merge left scratch files behind"
+  fi
+
+  # ── 9. primary-key collision keeps the HOST row (INSERT OR IGNORE) ──────────
+  setup_case oc-merge-collision
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  mk_session_db "$oc_data/opencode.db" \
+    "INSERT INTO session VALUES ('dup', 'CONTAINERVERSION');"
+  mkdir -p "$HOME/.local/share/opencode"
+  mk_session_db "$HOME/.local/share/opencode/opencode.db" \
+    "INSERT INTO session VALUES ('dup', 'HOSTVERSION');"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  got="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT data FROM session WHERE id='dup';")"
+  if [[ "$got" == "HOSTVERSION" ]]; then
+    ok "opencode.db: id collision keeps the host row"
+  else
+    fail "opencode.db collision clobbered host row: $got"
+  fi
+
+  # ── 10. schema drift → merge skipped, host db untouched ─────────────────────
+  setup_case oc-merge-schema-drift
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT, extra TEXT);"
+  sqlite3 "$oc_data/opencode.db" "INSERT INTO session VALUES ('contB', '{}', 'x');"
+  mkdir -p "$HOME/.local/share/opencode"
+  mk_session_db "$HOME/.local/share/opencode/opencode.db" \
+    "INSERT INTO session VALUES ('hostA', '{}');"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
+  if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
+    ok "opencode.db: schema drift skips merge, host db untouched, quarantine kept"
+  else
+    fail "opencode.db schema-drift not skipped safely: host session count=$n"
+  fi
+
+  # ── 11. no sqlite3 on host → merge skipped, host db untouched ───────────────
+  setup_case oc-merge-no-sqlite
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  mk_session_db "$oc_data/opencode.db" \
+    "INSERT INTO session VALUES ('contB', '{}');"
+  mkdir -p "$HOME/.local/share/opencode"
+  mk_session_db "$HOME/.local/share/opencode/opencode.db" \
+    "INSERT INTO session VALUES ('hostA', '{}');"
+  AIDC_SQLITE3="/nonexistent/sqlite3-xyz" aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
+  if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
+    ok "opencode.db: absent sqlite3 skips merge, host db untouched, quarantine kept"
+  else
+    fail "opencode.db no-sqlite3 not skipped safely: host session count=$n"
+  fi
+
+else
+  printf 'skip: opencode.db SQLite merge cases (sqlite3 not installed)\n'
 fi
 
 printf '\n%d passed, %d failed\n' "$passed" "$failed"

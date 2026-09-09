@@ -64,9 +64,12 @@ aidc::sync_session_tool() {
       # ~/.config/opencode (that is config only). Older builds wrote JSON
       # transcripts to storage/; current builds keep everything in a SQLite
       # opencode.db (+ -wal/-shm sidecars). The host's own opencode uses the
-      # same data-dir path, so synced copies MUST land in an aidc-owned
-      # subtree — extracting over ~/.local/share/opencode would clobber the
-      # host's own database with the container's (data loss, not a merge).
+      # same data-dir path, so the container copy first lands in an aidc-owned
+      # quarantine subtree — a raw tar extract over ~/.local/share/opencode
+      # would clobber the host's own database (data loss, not a merge). The
+      # merge INTO the host's default data dir happens afterwards, additively
+      # and safety-gated, in aidc::opencode_merge_to_base (see the hook at the
+      # end of this function).
       container_src="/home/vscode/.local/share/opencode"
       host_dst="$HOME/.local/share/aidc/sessions/opencode/$(aidc::repo_slug "${workspace:-/workspace}")"
       # Session artifacts only: credentials never leave the container, and
@@ -130,6 +133,196 @@ aidc::sync_session_tool() {
   fi
 
   aidc::log "synced $tool sessions to $host_dst"
+
+  # opencode's quarantined copy is additionally merged into the host's OWN
+  # opencode data dir (the default ~/.local/share/opencode path) so session
+  # viewers reading that default location see container sessions too. The
+  # merge is additive and never overwrites host data — see the function.
+  if [[ "$tool" == "opencode" ]]; then
+    aidc::opencode_merge_to_base "$workspace" "$host_dst"
+  fi
+}
+
+# Promote the quarantined opencode sessions (in $quarantine) into the host's
+# own opencode data dir so tools reading the default ~/.local/share/opencode
+# path see them — WITHOUT ever overwriting or corrupting the host's data.
+#
+# Two layouts, two strategies:
+#   - legacy storage/ JSON: per-session files → a plain additive file copy
+#     merges cleanly (the same model that makes claude's folder sync trivial).
+#   - current opencode.db (SQLite): a single binary file can't be folder-merged,
+#     so rows are merged with INSERT OR IGNORE (existing host rows always win).
+#
+# Every SQLite step is gated so the host db is only touched when it is provably
+# safe; on any doubt we bail and leave the quarantine copy as the record:
+#   - sqlite3 must be present on the host;
+#   - the host db is snapshotted first (rollback + a liveness/lock probe);
+#   - table schemas must match between the container's and host's opencode
+#     builds (schema drift → skip rather than risk a partial/failed insert).
+# The actual insert runs in one transaction with a busy_timeout, so against the
+# host-native filesystem it is atomic even if the host's opencode is running.
+#
+# Opt out entirely (keep only the aidc quarantine) with
+# AIDC_OPENCODE_MERGE_TO_BASE=0. Override the sqlite3 binary with AIDC_SQLITE3.
+aidc::opencode_merge_to_base() {
+  local workspace="$1"
+  local quarantine="$2"
+  [[ "${AIDC_OPENCODE_MERGE_TO_BASE:-1}" == "0" ]] && return 0
+
+  local base="$HOME/.local/share/opencode"
+
+  # 1. Legacy storage/ JSON layout — additive per-file copy (paths in the
+  #    quarantine copy were already /workspace-rewritten by the caller).
+  if [[ -d "$quarantine/storage" ]]; then
+    mkdir -p "$base/storage"
+    if cp -R "$quarantine/storage/." "$base/storage/" 2>/dev/null; then
+      aidc::log "merged opencode JSON sessions into $base/storage"
+    else
+      aidc::warn "could not copy opencode JSON sessions into $base/storage (kept at $quarantine)"
+    fi
+  fi
+
+  # 2. SQLite opencode.db.
+  local qdb="$quarantine/opencode.db"
+  [[ -f "$qdb" ]] || return 0
+
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  if ! command -v "$sqlite" >/dev/null 2>&1; then
+    aidc::log "sqlite3 not on host; opencode.db sessions kept at $quarantine (install sqlite3 to merge into $base)"
+    return 0
+  fi
+
+  # Work on a private copy so the host db only ever receives path-corrected
+  # rows, and a failed merge never disturbs the quarantine copy people inspect.
+  local mdb="$quarantine/.opencode.merge.db"
+  rm -f "$mdb"
+  if ! cp "$qdb" "$mdb" 2>/dev/null; then
+    aidc::warn "could not stage opencode.db for merge (kept at $quarantine)"
+    return 0
+  fi
+  if [[ -n "$workspace" && "$workspace" != "/workspace" ]]; then
+    aidc::opencode_db_rewrite_paths "$mdb" "$workspace"
+  fi
+
+  mkdir -p "$base"
+  local bdb="$base/opencode.db"
+
+  # Host has no db yet → nothing to merge into; install our copy wholesale.
+  if [[ ! -f "$bdb" ]]; then
+    if cp "$mdb" "$bdb" 2>/dev/null; then
+      aidc::log "created $bdb from container opencode sessions"
+    else
+      aidc::warn "could not create $bdb (sessions kept at $quarantine)"
+    fi
+    rm -f "$mdb"
+    return 0
+  fi
+
+  # Schema drift between the two opencode builds makes a blind row merge
+  # unsafe — skip rather than risk a partial/failed insert.
+  if ! aidc::opencode_db_schema_match "$mdb" "$bdb"; then
+    aidc::log "opencode.db schema differs between container and host; skipping merge (sessions kept at $quarantine)"
+    rm -f "$mdb"
+    return 0
+  fi
+
+  # Snapshot the host db first (VACUUM INTO = a consistent copy + an implicit
+  # lock/readability probe). Restored verbatim if the merge somehow fails.
+  local bak="$bdb.aidc-bak"
+  rm -f "$bak"
+  local bak_sql="${bak//\'/\'\'}"
+  if ! "$sqlite" "$bdb" "PRAGMA busy_timeout=3000; VACUUM INTO '$bak_sql';" >/dev/null 2>&1; then
+    aidc::log "host opencode.db busy or unreadable; skipping merge (sessions kept at $quarantine)"
+    rm -f "$mdb" "$bak"
+    return 0
+  fi
+
+  if aidc::opencode_db_merge "$mdb" "$bdb"; then
+    aidc::log "merged opencode sessions into $bdb"
+    rm -f "$bak"
+  else
+    mv -f "$bak" "$bdb" 2>/dev/null || true
+    aidc::warn "opencode.db merge failed and was rolled back; sessions kept at $quarantine"
+  fi
+  rm -f "$mdb"
+}
+
+# List the mergeable user tables of a SQLite db: everything except sqlite's own
+# bookkeeping (sqlite_*) and Drizzle's migration tables (__*).
+aidc::opencode_db_tables() {
+  local db="$1"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  "$sqlite" "$db" \
+    "SELECT name FROM sqlite_master WHERE type='table' \
+       AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
+       AND name NOT LIKE '\\_\\_%' ESCAPE '\\';" 2>/dev/null
+}
+
+# Rewrite the in-container mount root (/workspace) to the host workspace inside
+# a db copy. opencode stores absolute paths in each row's JSON `data` column;
+# rewriting the string there mirrors the *.json/*.jsonl sed the caller runs.
+aidc::opencode_db_rewrite_paths() {
+  local db="$1"
+  local ws="$2"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  local ws_sql="${ws//\'/\'\'}"
+  local t
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    [[ -n "$("$sqlite" "$db" "SELECT 1 FROM pragma_table_info('${t//\'/\'\'}') WHERE name='data' LIMIT 1;" 2>/dev/null)" ]] || continue
+    "$sqlite" "$db" \
+      "UPDATE \"$t\" SET data=replace(data,'/workspace','$ws_sql') WHERE data LIKE '%/workspace%';" \
+      >/dev/null 2>&1 || true
+  done < <(aidc::opencode_db_tables "$db")
+}
+
+# True when every table the destination db shares with the source has an
+# identical column layout (cid+name+type, in order). Tables present in only one
+# db are ignored — the merge simply skips those.
+aidc::opencode_db_schema_match() {
+  local src="$1"
+  local dst="$2"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  local t sa sb
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    local tq="${t//\'/\'\'}"
+    sa="$("$sqlite" "$src" "SELECT group_concat(cid||':'||name||':'||type,'|') FROM pragma_table_info('$tq');" 2>/dev/null)"
+    [[ -n "$sa" ]] || continue  # table absent in src → nothing to merge for it
+    sb="$("$sqlite" "$dst" "SELECT group_concat(cid||':'||name||':'||type,'|') FROM pragma_table_info('$tq');" 2>/dev/null)"
+    [[ "$sa" == "$sb" ]] || return 1
+  done < <(aidc::opencode_db_tables "$dst")
+  return 0
+}
+
+# Additively merge every shared table from src into dst with INSERT OR IGNORE
+# (host rows win on primary-key collision). One transaction, foreign keys off:
+# additive inserts can't orphan rows (a conflicting parent is already present),
+# so table order is irrelevant. Returns non-zero on any SQLite error.
+aidc::opencode_db_merge() {
+  local src="$1"
+  local dst="$2"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  local src_sql="${src//\'/\'\'}"
+  local sql t
+  # busy_timeout as SQL (not the .timeout dot-command, which is silently
+  # ignored — and aborts the rest — when passed as a command-line argument).
+  sql="PRAGMA busy_timeout=5000;
+PRAGMA foreign_keys=OFF;
+ATTACH DATABASE '$src_sql' AS aidc_src;
+BEGIN IMMEDIATE;
+"
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    # Only merge tables the source db also has.
+    [[ -n "$("$sqlite" "$src" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
+    sql+="INSERT OR IGNORE INTO \"$t\" SELECT * FROM aidc_src.\"$t\";
+"
+  done < <(aidc::opencode_db_tables "$dst")
+  sql+="COMMIT;
+DETACH DATABASE aidc_src;
+"
+  "$sqlite" "$dst" "$sql" >/dev/null 2>&1
 }
 
 # Best-effort session sync wired into the agent/lifecycle paths so transcripts

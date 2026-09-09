@@ -8,6 +8,101 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-09 — opencode sessions merge into the host's own data dir (not just the aidc quarantine)
+
+**Summary:** After the 2026-09-04 fix, synced opencode sessions landed only in
+the aidc-owned quarantine subtree
+(`~/.local/share/aidc/sessions/opencode/<repo-slug>/`). That kept the host's
+own opencode database safe, but a user pointed out the sync's *purpose* — so
+tools like agent-sessions ("agentsviewer") can see container sessions — was
+defeated, because those tools read the default `~/.local/share/opencode` path.
+They asked, correctly, why we couldn't do what claude does: sync into the
+tool's own folder. This change makes opencode sessions **also merge into
+`~/.local/share/opencode`**, additively and non-destructively.
+
+**Why not just extract there (the original hazard):** opencode ≥ v1.2 keeps
+all sessions in a single SQLite file `~/.local/share/opencode/opencode.db`
+(older builds: per-file JSON under `storage/`). The host runs opencode at the
+*same* path, so a raw `tar` extract would overwrite the host's live db
+byte-for-byte — data loss, the exact reason the 2026-09-04 fix quarantined it.
+claude is trivial only because it stores one file per session (a folder copy
+*is* a merge). The fix is to reproduce that additive property for opencode:
+per-file copy for the JSON layout, and a row-level `INSERT OR IGNORE` merge for
+the SQLite layout.
+
+**Design (decisions confirmed with the user):**
+- **Additive, host-wins.** `INSERT OR IGNORE INTO <t> SELECT * FROM src.<t>`
+  for every table shared by both dbs — existing host rows always win on a
+  primary-key (session-id) collision. No UPSERT, so the host's own edits are
+  never clobbered.
+- **Safety gates before the host db is touched** (any failure → log + skip,
+  leaving the quarantine copy as the record):
+  1. `sqlite3` must be present on the **host** (the merge runs host-side, after
+     the `tar | tar` pull; overridable via `AIDC_SQLITE3`).
+  2. The host db is snapshotted first with `VACUUM INTO` a `.aidc-bak` sidecar
+     — both a rollback point and an implicit busy/lock probe (a locked or
+     unreadable host db aborts the merge cleanly).
+  3. Table schemas of the container's and host's opencode builds must match
+     (`pragma_table_info` cid+name+type); on drift we skip rather than risk a
+     partial/failed `SELECT *` insert.
+  - If the host has no db yet, the container copy is installed wholesale (no
+    merge needed).
+- **Path rewrite on a private copy.** `/workspace` → host workspace is applied
+  to a throwaway `.opencode.merge.db` (via `UPDATE … replace(data,…)` on the
+  JSON `data` column) *before* merging, so the host db only ever receives
+  path-corrected rows and a failed merge never disturbs the inspectable
+  quarantine copy.
+- **Opt-out:** `AIDC_OPENCODE_MERGE_TO_BASE=0` keeps the pre-change behavior
+  (quarantine only).
+- **Concurrency/corruption:** opencode issue #14194 (SQLITE_CORRUPT) is about a
+  *bind-mounted* db shared between host and container where file locking is
+  unreliable. This merge runs host-side against the host-native db, where
+  SQLite's locking + our single `BEGIN IMMEDIATE` transaction (with
+  `PRAGMA busy_timeout`) are ACID — safe even if the host's opencode is running.
+
+**How:** `lib/aidc/sync.sh` — `aidc::sync_session_tool` unchanged for the
+quarantine step; a new hook calls `aidc::opencode_merge_to_base` afterwards for
+opencode. New helpers: `aidc::opencode_merge_to_base` (orchestration + gates),
+`aidc::opencode_db_tables` (mergeable user tables, excluding `sqlite_%` and
+Drizzle `__%`), `aidc::opencode_db_rewrite_paths`, `aidc::opencode_db_schema_match`,
+`aidc::opencode_db_merge`.
+
+**Bug found & fixed mid-implementation:** the merge initially inserted nothing
+(rc 0, no rows). Root cause: the merge script began with `.timeout 5000` — a
+sqlite3 **dot-command**, which is silently ignored *and aborts the rest of the
+script* when passed as a command-line SQL argument (dot-commands only work in
+interactive/stdin mode). Replaced with `PRAGMA busy_timeout=5000;` (real SQL).
+Same substitution in the `VACUUM INTO` backup call.
+
+**Commands:**
+
+```
+sudo apt-get update && sudo apt-get install -y sqlite3   # host-side dep for the merge + tests
+bash tests/sync-sessions.test.sh                          # 16 passed, 0 failed
+for t in tests/*.test.sh; do bash "$t"; done              # all green
+shellcheck lib/aidc/sync.sh tests/sync-sessions.test.sh   # clean
+aidc-scan                                                 # no findings above LOW
+```
+
+**Verification:** `tests/sync-sessions.test.sh` gains five SQLite cases
+(guarded to skip cleanly where `sqlite3` is absent) that build real opencode-like
+dbs and drive the full sync path: additive merge with the container row's
+`/workspace` path rewritten and the host row untouched; id-collision keeps the
+host row; schema drift skips the merge with the host db intact and the
+quarantine copy kept; absent `sqlite3` skips likewise; and the legacy `storage/`
+JSON layout merged into the host base. The existing data-dir case now also
+asserts `AIDC_OPENCODE_MERGE_TO_BASE=0` leaves the host data dir untouched.
+
+**Notes:**
+- `.devcontainer/project-setup.sh` (the natural place for the `sqlite3` test
+  dep) is a read-only virtiofs mount in this environment, so it was left
+  unchanged; the SQLite test cases skip gracefully when `sqlite3` is missing.
+- The reusable guidance in `/opt/CORE_LOGICS/patternlist.md` was extended: the
+  "never extract over the host's own data dir" rule now documents the *safe
+  additive-merge* refinement (per-file copy for JSON stores; ATTACH +
+  `INSERT OR IGNORE` under one transaction for SQLite, with the schema/lock/
+  backup gates and the `.timeout`-dot-command trap called out).
+
 ## 2026-09-04 — opencode session sync read the wrong directory (config dir, not XDG data dir)
 
 **Summary:** `aidc sync-sessions opencode` — and the automatic sync on
