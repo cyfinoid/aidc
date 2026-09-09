@@ -4,11 +4,25 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-09
+
 ### Fixed
 
 - **opencode session merge no longer false-positives on "schema differs" between same-epoch builds.** The merge gate compared column *position* (`cid`) in `pragma_table_info`, so a long-lived host `opencode.db` grown through `ALTER TABLE … ADD COLUMN` (columns appended at the end) was rejected against a fresh container db laid out in definition order — same logical schema, different physical order — even though both dbs run the identical migration set (the schema is frozen across opencode v1.17.10–v1.18.30; see `docs/opencode-schema-epochs.md`). The gate now compares columns order-independently (`name:type` subset) and enforces schema *epochs* via opencode's own `migration` journal: a container db from a newer epoch (or outright column/type drift) still skips to quarantine, while a host db migrated ahead merges fine. The insert itself is now **name-qualified** (`INSERT OR IGNORE INTO t (c1,c2,…) SELECT c1,c2,…`), never a positional `SELECT *` — a positional insert would have silently swapped values between the reordered columns had the gate been relaxed alone. Covered by new cases in `tests/sync-sessions.test.sh` (reordered schema, host-extra column, journal ahead/behind/one-sided, plus the existing drift/no-sqlite3 skips).
 
+### Changed
+
+- **All image pins refreshed to current upstream releases** (`scripts/update-pins.sh --write`): git-delta 0.18.2→0.19.2, pmg v0.21.3→v0.28.1, vet v1.17.3→v1.19.0, trufflehog v3.95.8→v3.97.4, syft v1.18.1→v1.51.1, grype v0.87.0→v0.118.0, rtk v0.43.0→v0.48.0, claude 2.1.201→2.1.266, codex 0.142.5→0.153.4, opencode 1.17.13→1.18.30, grok 0.2.87→1.0.24 (major), omp 18.1.5→18.1.15. `gitleaks` stays v8.30.1 (already latest; hashes refreshed). The base-image content hash changes, so the next `aidc up`/`rebuild` rebuilds the shared base image once. **Also fixed:** `scripts/update-pins.sh` still targeted the pre-split `Dockerfile.tmpl`; it now defaults to `Dockerfile.base.tmpl` (where the pins have lived since the base/thin-image split — until now a `--write` run updated nothing while claiming success).
+
+### Upgrade notes
+
+- Version jumps 0.2.0 → 2.0.1 (1.0 marked the stable CLI surface post lib-split; see `docs/releasing.md`). Existing project scaffolds will report as stale and are refreshed via `aidc upgrade`.
+- grok 0.2.87 → 1.0.24 is a vendor major; if the grok CLI behaves differently in-container, relogin may be required (`grok` login state persists in the `grok_home` volume).
+
+## [2.0.0] - 2026-09-09
+
 ### Added
+
 
 - **Claude's global config now persists across container recreation.** Claude Code writes `~/.claude.json` (MCP-server registrations, project trust, onboarding, session metadata) as a *sibling* of `~/.claude` — so **outside** the `claude_home` volume, in the container layer that's wiped on every rebuild (the same "state outside the persisted dir" class as the earlier opencode XDG-data-dir fix). The container now sets `CLAUDE_CONFIG_DIR=/home/vscode/.claude`, relocating `.claude.json` (and, on Linux, `.credentials.json`) *inside* the volume so all of Claude's global state survives recreation like every other agent's. `aidc-bootstrap-claude` honors the same variable. A sweep of the other agents (codex `~/.codex`, grok `~/.grok`, omp `~/.omp`, cursor `~/.cursor`) confirmed each is self-contained in its already-persisted volume. Covered by `tests/claude-config-dir.test.sh`.
 - **Agents inherit your host login automatically (less hand-config).** Building on the per-agent volumes + host-seed, aidc now seeds/persists each agent's *actual* credential store so a host login flows into containers without re-authenticating: **fixed opencode** — its credentials live in `~/.local/share/opencode/auth.json` (the XDG *data* dir), which aidc previously neither persisted nor seeded (login was lost on every rebuild); it now has its own volume + `/host-seed/opencode-data` seed of `auth.json`. Codex/Grok/omp/Claude were already covered. The env-passthrough set gained the common provider keys (`XAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `PERPLEXITY_API_KEY`) so API-key users skip interactive login (unset keys are skipped; list stays overridable). **Cursor is documented as the exception** — its login token is in the macOS Keychain (not seedable); use `CURSOR_API_KEY` in containers. Covered by `tests/agent-auth-seed.test.sh`.
@@ -97,3 +111,5 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 - **gryph removed from the image.** SafeDep's `gryph` agent-audit layer is no longer installed (Dockerfile) or hooked (`gryph install` dropped from `bootstrap-state.sh`); host-side hooks for it are stripped from the seeded `settings.json`. `cot` was never in the image (its hook command pointed at a macOS-only binary path) and is likewise stripped. Agent observability is host-side now that sessions auto-sync on container start and exit.
 
 [Unreleased]: https://github.com/cyfinoid/aidc/commits/main
+[2.0.1]: https://github.com/cyfinoid/aidc/compare/v2.0.0...v2.0.1
+[2.0.0]: https://github.com/cyfinoid/aidc/compare/v0.2.0...v2.0.0

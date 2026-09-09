@@ -18,7 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DOCKERFILE="${AIDC_PINS_DOCKERFILE:-$REPO_ROOT/templates/devcontainer/Dockerfile.tmpl}"
+# Pins live in the shared base-image template (since the base/thin split).
+DOCKERFILE="${AIDC_PINS_DOCKERFILE:-$REPO_ROOT/templates/devcontainer/Dockerfile.base.tmpl}"
 
 WRITE=0
 case "${1:-}" in

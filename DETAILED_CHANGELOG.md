@@ -8,6 +8,79 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-09 — v2.0.1: pin refresh (all tools/agents), update-pins template-path fix, version 0.2.0 → 2.0.1
+
+**Summary:** Refreshed every version + SHA256 pin in the shared base-image
+template to current upstream releases, fixed a latent bug where
+`scripts/update-pins.sh --write` silently updated nothing (it still targeted
+the pre-split `Dockerfile.tmpl` instead of `Dockerfile.base.tmpl`), and bumped
+aidc to 2.0.1 (out of early 0.x; releasing policy updated).
+
+**The update-pins bug:** the base/thin image split moved all pins from
+`Dockerfile.tmpl` to `Dockerfile.base.tmpl`, but `update-pins.sh`'s default
+`DOCKERFILE` never followed. A `--write` run printed `warn: ARG … not found
+… (skipped)` per pin and ended `no ARG lines updated` — misleadingly phrased
+as success-path output. Anyone running the script since the split would have
+believed their pins were current when nothing changed. Fixed the default to
+`Dockerfile.base.tmpl` (still overridable via `AIDC_PINS_DOCKERFILE`); the
+unit test passes because it injects its own fixture path via that variable —
+which is exactly why the wrong default went unnoticed.
+
+**Pin refresh** (`scripts/update-pins.sh --write`, review output inspected
+before applying):
+
+| pin | old | new |
+|-----|-----|-----|
+| GIT_DELTA | 0.18.2 | 0.19.2 |
+| PMG | v0.21.3 | v0.28.1 |
+| VET | v1.17.3 | v1.19.0 |
+| TRUFFLEHOG | v3.95.8 | v3.97.4 |
+| GITLEAKS | v8.30.1 | v8.30.1 (unchanged; hashes re-verified) |
+| SYFT | v1.18.1 | v1.51.1 |
+| GRYPE | v0.87.0 | v0.118.0 |
+| RTK | v0.43.0 | v0.48.0 |
+| CLAUDE | 2.1.201 | 2.1.266 |
+| CODEX | 0.142.5 | 0.153.4 |
+| OPENCODE | 1.17.13 | 1.18.30 |
+| GROK | 0.2.87 | 1.0.24 (vendor major) |
+| OMP | 18.1.5 | 18.1.15 |
+
+All checksums are the vendors' own release checksums (delta hashed locally —
+it publishes none). Note OPENCODE 1.18.30 stays inside the schema-frozen epoch
+(v1.17.10 → 1.18.30, see today's earlier entry +
+`docs/opencode-schema-epochs.md`), so the session-merge fix remains valid
+against hosts on any 1.17.10+ build.
+
+**Version bump:** `lib/aidc/common.sh` `AIDC_VERSION` 0.2.0 → 2.0.1, with
+`docs/releasing.md`'s versioning policy rewritten (was "staying in 0.x until
+the CLI surface stabilizes" — long since stabilized with the lib split).
+Stamp comparison is exact string equality, so every existing scaffold shows
+as stale and is refreshed via `aidc upgrade` — desired behavior for a major
+jump. CHANGELOG cut per the release procedure: new empty `[Unreleased]`,
+`[2.0.1]` (schema-gate fix + pins + update-pins fix + upgrade notes), and the
+former `[Unreleased]` body retitled `[2.0.0]` (same date — the accumulated
+work ships as one release generation; nothing was ever tagged 0.2.0, `git
+tag -l` is empty, so no history is being fabricated).
+
+**Commands & verification:**
+- `bash scripts/update-pins.sh` (review) then `--write`; diff inspected
+  (`git diff templates/devcontainer/Dockerfile.base.tmpl` — 26 ARG lines).
+- `bash tests/update-pins.test.sh` → `24 passed, 0 failed`.
+- Full suite + shellcheck + `aidc-scan` re-run at the end of the session
+  (clean; see session log).
+
+**Notes / follow-ups:**
+- Base-image content hash changes ⇒ the next `aidc up`/`rebuild` on any
+  project rebuilds the shared base once (expected; that's the pin refresh
+  doing its job).
+- GROK 0.2.87 → 1.0.24 is a vendor major bump — flagged in upgrade notes in
+  case login state or CLI behavior shifted.
+- Idea for later (not done): make `update-pins.sh --write` exit non-zero when
+  a pin ARG is missing from the target file instead of warning, so a future
+  template rename can't silently no-op again.
+
+---
+
 ## 2026-09-09 — opencode merge: order-independent schema gate, migration-epoch gate, name-qualified insert
 
 **Summary:** The opencode.db merge shipped earlier today refused to merge for

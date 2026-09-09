@@ -47,8 +47,9 @@ releases give users a version to report (`aidc version`), give
 
 ## Versioning policy
 
-Semver, staying in `0.x` until the CLI surface stabilizes: breaking CLI or
-scaffold-behavior changes bump the minor; fixes and additive features bump
-the patch. The version stamped into each project's
+Semver. aidc is out of early `0.x` (CLI surface stable since the lib split);
+breaking CLI or scaffold-behavior changes bump the major, additive features
+the minor, fixes the patch. The version stamped into each project's
 `.ai-container/project.env` records which aidc version scaffolded it — that
-stamp is what `aidc upgrade` compares against.
+stamp is what `aidc upgrade` compares against (exact string comparison, so any
+bump simply marks older scaffolds stale and offers `aidc upgrade`).

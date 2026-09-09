@@ -12,7 +12,7 @@
 FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec AS uv
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
 
-ARG GIT_DELTA_VERSION=0.18.2
+ARG GIT_DELTA_VERSION=0.19.2
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -69,8 +69,8 @@ echo "$sha  $dest" | sha256sum -c - >/dev/null || {
 EOF
 RUN chmod 0755 /usr/local/bin/aidc-fetch-verified
 
-ARG GIT_DELTA_SHA256_AMD64=1658c7b61825d411b50734f34016101309e4b6e7f5799944cf8e4ac542cebd7f
-ARG GIT_DELTA_SHA256_ARM64=937781aa7788e1510858743fff6c9a8b4a69fe0a22a7c8a69493e633227939a9
+ARG GIT_DELTA_SHA256_AMD64=ea4f0222950ee750a3d38dd80d03bce4cee07a3f63928fc47548383bcaf23093
+ARG GIT_DELTA_SHA256_ARM64=0edc36cf514f1bd84becac3e94ee8ae9f8818c6a1f99f7b2ee67b362afa253d3
 RUN ARCH=$(dpkg --print-architecture) \
     && case "$ARCH" in \
          amd64) DELTA_SHA="$GIT_DELTA_SHA256_AMD64" ;; \
@@ -111,9 +111,9 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
 # before installs. Binaries installed system-wide; shell/shim wiring done
 # per-user below. Pinned release artifact, checksum-verified (previously a
 # floating `main`-branch curl|sh installer).
-ARG PMG_VERSION=v0.21.3
-ARG PMG_SHA256_AMD64=6cd4ce75d187c6a3cd4082821b4341401f2e246d848338691b2a5927a5a1d21e
-ARG PMG_SHA256_ARM64=2c5b842ef1290c7d2ba3435dec542c04f2093bc9d81520226683f215c57a6868
+ARG PMG_VERSION=v0.28.1
+ARG PMG_SHA256_AMD64=6eedee215faa4ea42b4cb8c1e18961c31803df1bb2acd7b5aaee6484352b5303
+ARG PMG_SHA256_ARM64=8acba49e44d2fed67f9a1931c8b277c6d25fc087a44976939e13bcff80ce8624
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) PMG_ASSET="pmg_Linux_x86_64.tar.gz"; PMG_SHA="$PMG_SHA256_AMD64" ;; \
@@ -134,9 +134,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # newest tag, update VET_VERSION, rebuild, and commit. "latest" is honoured
 # for ad-hoc overrides but resolves at build time, which defeats the pin —
 # avoid in committed configs.
-ARG VET_VERSION=v1.17.3
-ARG VET_SHA256_AMD64=b126d5e0d4abda882437f911c8e3702709ed4ed529461afdea494e984cac655d
-ARG VET_SHA256_ARM64=409be327ac16c9cd15debe6fc54baf32968480319808b1893b9650092bdb9ccc
+ARG VET_VERSION=v1.19.0
+ARG VET_SHA256_AMD64=4e39ea7fb7c11e1edcdcf41a3c71766f62fb7f4533930b850afbd1bb441bb221
+ARG VET_SHA256_ARM64=0cf95eca4d79e9252e11f2a0d87e928a36efa3b417b853724eafa0b3748cf923
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) VET_ARCH="x86_64"; VET_SHA="$VET_SHA256_AMD64" ;; \
@@ -157,9 +157,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # SCA is handled by vet/pmg above; this layer covers code-pattern and secret
 # scans. trufflehog is a pinned, checksum-verified release artifact
 # (previously a floating `main`-branch curl|sh installer).
-ARG TRUFFLEHOG_VERSION=v3.95.8
-ARG TRUFFLEHOG_SHA256_AMD64=136c42933697ab2e09402d003ff4259086312b80cb671e7d9ab05477597bc4f0
-ARG TRUFFLEHOG_SHA256_ARM64=49231b33cdd49dee4e98c7efc9acfb16e8d08ac5fed84bf7e983656487a96b98
+ARG TRUFFLEHOG_VERSION=v3.97.4
+ARG TRUFFLEHOG_SHA256_AMD64=dc24007c2f233bd61c05beabeb44aa27ea9b43288166279209abe0458c5ce76b
+ARG TRUFFLEHOG_SHA256_ARM64=7e65e771d2a247964056aa5edba0f8ae3945895e5dce867fe0ffbc7b0128239a
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv tool install semgrep \
     && ARCH_RAW="$(dpkg --print-architecture)" \
@@ -211,12 +211,12 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # https://github.com/anchore/grype/releases, update the ARG, rebuild, commit.
 # Direct release artifacts, checksum-verified (previously vendor installer
 # scripts fetched from `main`, which could bypass the version pin).
-ARG SYFT_VERSION=v1.18.1
-ARG SYFT_SHA256_AMD64=066c251652221e4d44fcc4d115ce3df33a91769da38c830a8533199db2f65aab
-ARG SYFT_SHA256_ARM64=cd228306e5cb0654baecb454f76611606b84899d27fa9ceb7da4df46b94fe84e
-ARG GRYPE_VERSION=v0.87.0
-ARG GRYPE_SHA256_AMD64=be710d15f5477e5c77ce03d14e480263415d7ab135e04b8483663f688823087d
-ARG GRYPE_SHA256_ARM64=3c64dc19d0dab8a1ab30860c9f5167383088d009528054b3854c56aac3574948
+ARG SYFT_VERSION=v1.51.1
+ARG SYFT_SHA256_AMD64=8fcb33017a0dc1058298c923c436d19dfa68ae93968e0b423248542e3afb9fc3
+ARG SYFT_SHA256_ARM64=a7fd2b784e6664acd44719270574f6cd8c6864fc2b1700bf9099bd1cccda7d7f
+ARG GRYPE_VERSION=v0.118.0
+ARG GRYPE_SHA256_AMD64=1d444c5e7360471815f7158f71935fcecc68a3c417d85c7344f770854300bba2
+ARG GRYPE_SHA256_ARM64=32aceeb8ee837244775fcb522372c8b3a47914986385f3148f4ee2c930482a84
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) A_ARCH="amd64"; SYFT_SHA="$SYFT_SHA256_AMD64"; GRYPE_SHA="$GRYPE_SHA256_AMD64" ;; \
@@ -237,9 +237,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # Pinned release artifact, checksum-verified (previously a floating
 # `master`-branch curl|sh installer). Note the vendor's per-arch targets:
 # musl for x86_64, gnu for aarch64 — that is what rtk publishes.
-ARG RTK_VERSION=v0.43.0
-ARG RTK_SHA256_AMD64=ff8a1e7766496e175291a85aeca1dc97c9ff6df33e51e5893d1fbc78fea2a609
-ARG RTK_SHA256_ARM64=5519f7ca12e5c143a609f0d28a0a77b97413a8dce31c2681f1a41c24519a8731
+ARG RTK_VERSION=v0.48.0
+ARG RTK_SHA256_AMD64=e4e650fa1677c0de2f6839a6040d7b17f312d32f163c402b75af70e9e5af1a91
+ARG RTK_SHA256_ARM64=5ed65486a96077bd6bba7c87fdc9d0e4a1918d19619be3c87380888389a30c7c
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) RTK_TARGET="x86_64-unknown-linux-musl"; RTK_SHA="$RTK_SHA256_AMD64" ;; \
@@ -347,11 +347,11 @@ RUN pmg setup install \
 # tool being run on a first build. Because AIDC_AGENTS is part of the base image
 # content hash (see aidc::base_image_tag), changing the selection builds a fresh
 # base. Version pins and the fetch-to-file (never piped) contract are unchanged.
-ARG CLAUDE_VERSION=2.1.201
-ARG CODEX_VERSION=0.142.5
-ARG OPENCODE_VERSION=1.17.13
-ARG GROK_VERSION=0.2.87
-ARG OMP_VERSION=18.1.5
+ARG CLAUDE_VERSION=2.1.266
+ARG CODEX_VERSION=0.153.4
+ARG OPENCODE_VERSION=1.18.30
+ARG GROK_VERSION=1.0.24
+ARG OMP_VERSION=18.1.15
 ARG AIDC_AGENTS="all"
 RUN mkdir -p \
       /home/vscode/.local/bin \
