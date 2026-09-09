@@ -8,6 +8,105 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-09 — opencode merge: order-independent schema gate, migration-epoch gate, name-qualified insert
+
+**Summary:** The opencode.db merge shipped earlier today refused to merge for
+users whose host db was created by an older opencode and grown in place, while
+the container ran a newer build — logging *"opencode.db schema differs between
+container and host; skipping merge"* even though the two schemas were
+logically identical. This session diagnosed the false positive from real data,
+documented opencode's schema-epoch history, and rebuilt the gate so same-epoch
+merges succeed regardless of physical column order, while genuine epoch drift
+still refuses.
+
+**Symptom:** `aidc opencode` on a host running opencode 1.18.20 with a
+container pinned at 1.17.13 logged
+`opencode.db schema differs between container and host; skipping merge`;
+sessions stayed in quarantine and never surfaced in the host's session viewer.
+
+**Diagnosis (from data, not theory):**
+1. First hypothesis (version skew) was **wrong** — a lesson recorded here
+   deliberately. `migration.gen.ts` and `schema.gen.ts` are byte-identical
+   between tags v1.17.13 and v1.18.20; the schema has been frozen across
+   v1.17.10 → v1.18.30 (40+ releases; last 20 versions contain zero schema
+   changes). Version numbers were never the cause.
+2. `pragma_table_info` dumps of the actual dbs (run by the user on the host)
+   showed the *identical* 29-column `session` table in both dbs with 11 columns
+   at different `cid` positions, and the host's DDL carrying a trailing run of
+   appended columns (`time_archived integer, workspace_id text, path text, …`)
+   — the fingerprint of `ALTER TABLE … ADD COLUMN` growth on a long-lived db,
+   versus a fresh container db built from the compacted `schema.gen.ts` in
+   definition order.
+3. The gate `aidc::opencode_db_schema_match` compared `group_concat(cid||
+   name||':'||type)` — position included — so reordered-but-equal tables read
+   as drift. Critically, this was the guard doing necessary work against the
+   *old* merge: `INSERT OR IGNORE … SELECT *` is positional and would have
+   silently shifted values between columns (container `workspace_id` into host
+   `parent_id`, etc.) had the gate simply been relaxed. Gate and insert had to
+   change together.
+
+**Change** (`lib/aidc/sync.sh`):
+- `aidc::opencode_db_columns` (new): per-table fingerprint `name:type` sorted
+  by name — physical order deliberately excluded.
+- `aidc::opencode_db_migration_ids` (new): applied ids from opencode's
+  `migration` journal (`id TEXT PRIMARY KEY, time_completed INTEGER`).
+- `aidc::opencode_db_schema_match` (rewritten): merge is schema-safe when
+  (a) for every table shared by the dbs, the container's `name:type` set is a
+  subset of the host's (equal = same epoch; host-extra = host migrated ahead,
+  additive, fine), and (b) when either db carries a `migration` journal, both
+  must and the container's ids must be a subset of the host's — a container
+  from a newer epoch, or a journal on one side only, refuses to quarantine.
+  Subset test via `comm -23` (lines only in src) must be empty.
+- `aidc::opencode_db_merge` (rewritten): `INSERT OR IGNORE INTO "t" (cols)
+  SELECT cols FROM aidc_src."t"` with the **source's** name-qualified column
+  list in `cid` order — the schema gate guarantees every source column exists
+  in the destination, so the source list *is* the shared intersection. Never
+  `SELECT *`. Skipped tables (absent in src) still skipped; empty collist →
+  skip statement (can't happen for a real table but guards degenerate cases).
+- Log message updated: "schema not merge-compatible (container db newer than
+  host, or column/type drift)".
+- Comment blocks (function headers + the big `opencode_merge_to_base` banner)
+  updated to describe the subset/epoch policy and point at
+  `docs/opencode-schema-epochs.md`.
+
+**New tests** (`tests/sync-sessions.test.sh`, cases 12–16 inside the sqlite3
+block; 21 total pass):
+- 12 reordered-but-equal schema (container `id, extra_col, data` vs host
+  `id, data` + `ALTER TABLE … ADD extra_col`) → merges with every value
+  verified in the right column — the exact real-world false positive.
+- 13 host-extra column (`newer_col`) → merges, container row lands with the
+  new column NULL, host row intact.
+- 14 container `migration` journal ahead (`m2_new` not on host) → skip,
+  host db untouched, quarantine kept.
+- 15 host journal ahead (container ids a subset) → merges; journal stays
+  host-complete (2 rows — container journal rows are OR-IGNOREd in).
+- 16 journal on one side only → skip, quarantine kept.
+
+**Commands & verification:**
+- `bash tests/sync-sessions.test.sh` → `21 passed, 0 failed`.
+- `shellcheck lib/aidc/sync.sh tests/sync-sessions.test.sh` → clean.
+- `aidc-scan` on the changed files → clean (see session log).
+- Epoch research: per-tag `migration.gen.ts`/`schema.gen.ts` fetched from
+  `raw.githubusercontent.com/sst/opencode/<tag>/…` (v1.16.0=30, v1.17.0=32,
+  v1.17.4=33, v1.17.5=35, v1.17.10→v1.18.30=38 — identical set), recorded in
+  `docs/opencode-schema-epochs.md`.
+
+**Notes / follow-ups:**
+- Policy (user-confirmed): support merging between any two builds carrying the
+  same migration-id set — in practice the single frozen epoch v1.17.10 →
+  current. Breaking boundaries below that (v1.17.5's 35-migration set, and the
+  reshaping `reset_v2_session_state`/`simplify_*` batch at v1.17.10) are
+  exactly what the journal gate now refuses.
+- The container pin (1.17.13) can stay; it is inside the frozen epoch, so it
+  merges with any host ≥ 1.17.10 regardless of column order. No pin bump
+  needed for correctness.
+- `SELECT id FROM migration` returns empty for a no-journal db *and* for a
+  missing table (stderr swallowed) — intentional: both sides empty = legacy
+  pre-journal dbs, merge proceeds on column compatibility alone; one-sided
+  journal = refuse.
+
+---
+
 ## 2026-09-09 — opencode sessions merge into the host's own data dir (not just the aidc quarantine)
 
 **Summary:** After the 2026-09-04 fix, synced opencode sessions landed only in

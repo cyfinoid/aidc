@@ -298,6 +298,124 @@ if command -v sqlite3 >/dev/null 2>&1; then
     fail "opencode.db no-sqlite3 not skipped safely: host session count=$n"
   fi
 
+  # ── 12. same schema, different column ORDER → merges, values land right ────
+  # The real-world false positive this fix exists for: a long-lived host db
+  # grown via ALTER TABLE ADD COLUMN appends columns at the end, a fresh
+  # container db lays them out in definition order. A positional SELECT *
+  # would swap values between columns; the name-qualified insert must not.
+  setup_case oc-merge-reordered
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, extra_col TEXT, data TEXT);
+     INSERT INTO session VALUES ('contB', 'e', '{\"cwd\":\"/workspace/proj\"}');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     INSERT INTO session VALUES ('hostA', 'HOSTROW');
+     ALTER TABLE session ADD COLUMN extra_col TEXT;"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  got_b="$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")"
+  got_bx="$(sqlite3 "$bdb" "SELECT extra_col FROM session WHERE id='contB';")"
+  got_a="$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='hostA';")"
+  if [[ "$got_b" == '{"cwd":"/home/alice/app/proj"}' && "$got_bx" == "e" && "$got_a" == "HOSTROW" ]]; then
+    ok "opencode.db: reordered-but-equal schema merges, values in the right columns"
+  else
+    fail "opencode.db reordered merge wrong: hostA=$got_a contB=$got_b extra=$got_bx"
+  fi
+
+  # ── 13. host db has MORE columns (newer build) → still merges by name ──────
+  setup_case oc-merge-host-newer
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     INSERT INTO session VALUES ('contB', '{\"cwd\":\"/workspace/proj\"}');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     INSERT INTO session VALUES ('hostA', '{}');
+     ALTER TABLE session ADD COLUMN newer_col TEXT;"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  got_b="$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")"
+  got_bnew="$(sqlite3 "$bdb" "SELECT newer_col FROM session WHERE id='contB';")"
+  if [[ "$got_b" == '{"cwd":"/home/alice/app/proj"}' && -z "$got_bnew" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session;")" == "2" ]]; then
+    ok "opencode.db: host-extra column tolerated, container row merged (new col NULL)"
+  else
+    fail "opencode.db host-newer merge wrong: contB=$got_b newer_col=$got_bnew"
+  fi
+
+  # ── 14. migration journal: container AHEAD of host → skip (epoch drift) ────
+  setup_case oc-merge-journal-ahead
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session VALUES ('contB', '{}');
+     INSERT INTO migration VALUES ('m1', 1), ('m2_new', 2);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO migration VALUES ('m1', 1);"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
+  if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
+    ok "opencode.db: container migration-journal ahead of host → skipped, quarantine kept"
+  else
+    fail "opencode.db journal-ahead not skipped safely: host session count=$n"
+  fi
+
+  # ── 15. migration journal: host ahead (container a subset) → merge proceeds ─
+  setup_case oc-merge-journal-behind
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session VALUES ('contB', '{\"cwd\":\"/workspace/proj\"}');
+     INSERT INTO migration VALUES ('m1', 1);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO migration VALUES ('m1', 1), ('m2_new', 2);"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  got="$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")"
+  nj="$(sqlite3 "$bdb" "SELECT count(*) FROM migration;")"
+  if [[ "$got" == '{"cwd":"/home/alice/app/proj"}' && "$nj" == "2" ]]; then
+    ok "opencode.db: host journal ahead → merged, journal stays host-complete"
+  else
+    fail "opencode.db journal-behind merge wrong: contB=$got migration_rows=$nj"
+  fi
+
+  # ── 16. journal on one side only → skip (can't reason about the epoch) ─────
+  setup_case oc-merge-journal-one-sided
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session VALUES ('contB', '{}');
+     INSERT INTO migration VALUES ('m1', 1);"
+  mkdir -p "$HOME/.local/share/opencode"
+  mk_session_db "$HOME/.local/share/opencode/opencode.db" \
+    "INSERT INTO session VALUES ('hostA', '{}');"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
+  if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
+    ok "opencode.db: journal present on one side only → skipped, quarantine kept"
+  else
+    fail "opencode.db one-sided journal not skipped safely: host session count=$n"
+  fi
+
 else
   printf 'skip: opencode.db SQLite merge cases (sqlite3 not installed)\n'
 fi

@@ -157,8 +157,12 @@ aidc::sync_session_tool() {
 # safe; on any doubt we bail and leave the quarantine copy as the record:
 #   - sqlite3 must be present on the host;
 #   - the host db is snapshotted first (rollback + a liveness/lock probe);
-#   - table schemas must match between the container's and host's opencode
-#     builds (schema drift → skip rather than risk a partial/failed insert).
+#   - schemas must be merge-compatible: per shared table, the container's
+#     columns (name:type, compared order-independently) must be a subset of the
+#     host's, and when either db carries opencode's `migration` journal both
+#     must and the container's applied ids must not run ahead of the host's
+#     (epoch policy: docs/opencode-schema-epochs.md). Anything else → skip
+#     rather than risk a partial/failed insert.
 # The actual insert runs in one transaction with a busy_timeout, so against the
 # host-native filesystem it is atomic even if the host's opencode is running.
 #
@@ -218,10 +222,10 @@ aidc::opencode_merge_to_base() {
     return 0
   fi
 
-  # Schema drift between the two opencode builds makes a blind row merge
-  # unsafe — skip rather than risk a partial/failed insert.
+  # A container db from a newer schema epoch (or outright column/type drift)
+  # makes a row merge unsafe — skip rather than risk a partial/failed insert.
   if ! aidc::opencode_db_schema_match "$mdb" "$bdb"; then
-    aidc::log "opencode.db schema differs between container and host; skipping merge (sessions kept at $quarantine)"
+    aidc::log "opencode.db schema not merge-compatible (container db newer than host, or column/type drift); skipping merge (sessions kept at $quarantine)"
     rm -f "$mdb"
     return 0
   fi
@@ -276,35 +280,72 @@ aidc::opencode_db_rewrite_paths() {
   done < <(aidc::opencode_db_tables "$db")
 }
 
-# True when every table the destination db shares with the source has an
-# identical column layout (cid+name+type, in order). Tables present in only one
-# db are ignored — the merge simply skips those.
+# Column fingerprint of one table: name:type per line, sorted by name. Physical
+# order (cid) is deliberately excluded — a long-lived host db grown through
+# ALTER TABLE … ADD COLUMN appends columns at the end, while a fresh db built
+# from opencode's schema snapshot lays them out in definition order: same
+# logical schema, different physical layout (docs/opencode-schema-epochs.md).
+aidc::opencode_db_columns() {
+  local db="$1"
+  local t="$2"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  "$sqlite" "$db" "SELECT name||':'||type FROM pragma_table_info('${t//\'/\'\'}') ORDER BY name;" 2>/dev/null
+}
+
+# Applied-migration ids from opencode's `migration` journal, one per line.
+# Empty when the table is absent (pre-journal opencode build, test fixture) or
+# holds no rows.
+aidc::opencode_db_migration_ids() {
+  local db="$1"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  "$sqlite" "$db" "SELECT id FROM migration ORDER BY id;" 2>/dev/null
+}
+
+# True when merging src into dst is schema-safe:
+#   - for every table the dbs share, src's columns (name:type, order
+#     independent) must be a subset of dst's. Equal is the normal same-epoch
+#     case; dst holding extra columns (host build newer, additive growth) is
+#     fine because the merge inserts by column name. src holding anything dst
+#     lacks means the container db is from a newer schema epoch → refuse.
+#   - when either db carries a `migration` journal, both must, and the
+#     container's applied ids must be a subset of the host's — a container
+#     running ahead straddles data migrations whose row shapes SQL cannot
+#     reconcile (epoch boundaries: docs/opencode-schema-epochs.md).
+# Tables present in only one db are ignored — the merge simply skips those.
 aidc::opencode_db_schema_match() {
   local src="$1"
   local dst="$2"
-  local sqlite="${AIDC_SQLITE3:-sqlite3}"
-  local t sa sb
+  local t sa sb src_ids dst_ids
   while IFS= read -r t; do
     [[ -n "$t" ]] || continue
-    local tq="${t//\'/\'\'}"
-    sa="$("$sqlite" "$src" "SELECT group_concat(cid||':'||name||':'||type,'|') FROM pragma_table_info('$tq');" 2>/dev/null)"
+    sa="$(aidc::opencode_db_columns "$src" "$t")"
     [[ -n "$sa" ]] || continue  # table absent in src → nothing to merge for it
-    sb="$("$sqlite" "$dst" "SELECT group_concat(cid||':'||name||':'||type,'|') FROM pragma_table_info('$tq');" 2>/dev/null)"
-    [[ "$sa" == "$sb" ]] || return 1
+    sb="$(aidc::opencode_db_columns "$dst" "$t")"
+    # Subset test: nothing in src's column set may be missing from dst's.
+    [[ -z "$(comm -23 <(printf '%s\n' "$sa") <(printf '%s\n' "$sb"))" ]] || return 1
   done < <(aidc::opencode_db_tables "$dst")
+  src_ids="$(aidc::opencode_db_migration_ids "$src")"
+  dst_ids="$(aidc::opencode_db_migration_ids "$dst")"
+  if [[ -n "$src_ids" || -n "$dst_ids" ]]; then
+    [[ -n "$src_ids" && -n "$dst_ids" ]] || return 1
+    [[ -z "$(comm -23 <(printf '%s\n' "$src_ids") <(printf '%s\n' "$dst_ids"))" ]] || return 1
+  fi
   return 0
 }
 
 # Additively merge every shared table from src into dst with INSERT OR IGNORE
 # (host rows win on primary-key collision). One transaction, foreign keys off:
 # additive inserts can't orphan rows (a conflicting parent is already present),
-# so table order is irrelevant. Returns non-zero on any SQLite error.
+# so table order is irrelevant. Rows are inserted by column NAME, never a
+# positional SELECT * — the two dbs may lay the same columns out in a different
+# physical order, and a positional insert would silently shift values between
+# columns. Returns non-zero on any SQLite error.
 aidc::opencode_db_merge() {
   local src="$1"
   local dst="$2"
   local sqlite="${AIDC_SQLITE3:-sqlite3}"
   local src_sql="${src//\'/\'\'}"
-  local sql t
+  local sql t collist
   # busy_timeout as SQL (not the .timeout dot-command, which is silently
   # ignored — and aborts the rest — when passed as a command-line argument).
   sql="PRAGMA busy_timeout=5000;
@@ -316,7 +357,11 @@ BEGIN IMMEDIATE;
     [[ -n "$t" ]] || continue
     # Only merge tables the source db also has.
     [[ -n "$("$sqlite" "$src" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
-    sql+="INSERT OR IGNORE INTO \"$t\" SELECT * FROM aidc_src.\"$t\";
+    # The schema gate guarantees every source column exists in the destination,
+    # so the source's column list is exactly the shared intersection.
+    collist="$("$sqlite" "$src" "SELECT group_concat('\"' || name || '\"', ',') FROM (SELECT name FROM pragma_table_info('${t//\'/\'\'}') ORDER BY cid);" 2>/dev/null)"
+    [[ -n "$collist" ]] || continue
+    sql+="INSERT OR IGNORE INTO \"$t\" ($collist) SELECT $collist FROM aidc_src.\"$t\";
 "
   done < <(aidc::opencode_db_tables "$dst")
   sql+="COMMIT;
