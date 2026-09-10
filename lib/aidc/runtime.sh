@@ -185,22 +185,26 @@ aidc::compose_exec() {
   aidc::compose "$workspace" exec ${AIDC_EXEC_ENV_ARGS[@]+"${AIDC_EXEC_ENV_ARGS[@]}"} workspace "$@"
 }
 
-# The `aidc-scan` PATH shim is created by bootstrap-state.sh's init dispatch,
-# which runs asynchronously and only at container (re)creation. That leaves two
-# gaps: (1) a race — `compose up -d` returns before bootstrap finishes, so on a
-# first run a shell/agent can enter before the symlink exists; and (2) staleness
-# — a container reused from before the scaffold gained aidc-scan.sh never gets
-# the link at all. ensure_container_running calls this on every container-entering
-# command (shell, exec, agents, sbom, …) so `aidc-scan` (and the Stop-hook
-# guardrail that invokes it) is always on PATH. Idempotent; non-fatal on failure.
-aidc::ensure_scan_link() {
+# The `aidc-scan` and `aidc-ci` PATH shims are created by bootstrap-state.sh's
+# init dispatch, which runs asynchronously and only at container (re)creation.
+# That leaves two gaps: (1) a race — `compose up -d` returns before bootstrap
+# finishes, so on a first run a shell/agent can enter before the symlinks exist;
+# and (2) staleness — a container reused from before the scaffold gained a
+# script never gets its link at all. ensure_container_running calls this on
+# every container-entering command (shell, exec, agents, sbom, …) so the shims
+# are always on PATH. aidc-scan matters most (the Stop-hook guardrail invokes
+# it); aidc-ci has no hook — its link is convenience for in-container shells,
+# since `aidc ci` execs the script directly. Idempotent; non-fatal on failure.
+aidc::ensure_tool_links() {
   local workspace="$1"
   local home="${AIDC_CONTAINER_HOME:-/home/vscode}"
   aidc::compose "$workspace" exec -T workspace sh -c '
-    script=/workspace/.devcontainer/scripts/aidc-scan.sh
-    [ -f "$script" ] || exit 0
-    mkdir -p "$1/.local/bin" && ln -sf "$script" "$1/.local/bin/aidc-scan"
-  ' aidc-ensure-scan-link "$home" >/dev/null 2>&1 || true
+    mkdir -p "$1/.local/bin"
+    for name in aidc-scan aidc-ci; do
+      script=/workspace/.devcontainer/scripts/$name.sh
+      [ -f "$script" ] && ln -sf "$script" "$1/.local/bin/$name"
+    done
+  ' aidc-ensure-tool-links "$home" >/dev/null 2>&1 || true
 }
 
 aidc::cmd_exec() {
@@ -253,6 +257,32 @@ aidc::cmd_scan() {
   fi
   AIDC_EXEC_ENV_ARGS=()
   aidc::compose_exec "$workspace" bash /workspace/.devcontainer/scripts/aidc-scan.sh "$@"
+}
+
+aidc::append_ci_env_args() {
+  local key
+  for key in "${AIDC_CI_ENV_KEYS[@]}"; do
+    if [[ -n "${!key:-}" ]]; then
+      AIDC_EXEC_ENV_ARGS+=("-e" "$key")
+    fi
+  done
+}
+
+# Replay the PROJECT's GitHub Actions workflows natively inside the container
+# (opt-in: nothing invokes this automatically). All logic lives in the
+# scaffolded .devcontainer/scripts/aidc-ci.sh (also on the container PATH as
+# `aidc-ci`), so shells and agents can call it directly. Exit code propagates
+# from the engine (0 passes/skips, 1 failures, 2 usage/env error).
+aidc::cmd_ci() {
+  local workspace
+  workspace="$(aidc::default_workspace)"
+  aidc::ensure_container_running "$workspace"
+  if [[ $# -gt 0 && "$1" == "--" ]]; then
+    shift
+  fi
+  AIDC_EXEC_ENV_ARGS=()
+  aidc::append_ci_env_args
+  aidc::compose_exec "$workspace" bash /workspace/.devcontainer/scripts/aidc-ci.sh "$@"
 }
 
 # Run just the license-conflict check. Defaults to warn; --fail gates (exit 1).
@@ -401,7 +431,7 @@ aidc::cmd_opencode_web() {
   aidc::ensure_toolchain_volumes "$workspace"
   aidc::compose_up "$workspace"
   aidc::auto_sync_sessions "$workspace" all
-  aidc::ensure_scan_link "$workspace"
+  aidc::ensure_tool_links "$workspace"
 
   AIDC_EXEC_ENV_ARGS=()
   aidc::append_passthrough_env_args
@@ -649,9 +679,9 @@ aidc::ensure_container_running() {
   fi
 
   # Every container-entering command passes through here, so this is the single
-  # chokepoint that guarantees the aidc-scan shim on PATH (shell, exec, agents,
-  # sbom, …), closing the async-bootstrap race and stale-container gaps.
-  aidc::ensure_scan_link "$workspace"
+  # chokepoint that guarantees the PATH shims (shell, exec, agents, sbom, …),
+  # closing the async-bootstrap race and stale-container gaps.
+  aidc::ensure_tool_links "$workspace"
 }
 
 # Build the -f file chain for docker compose. The base compose.yaml is always

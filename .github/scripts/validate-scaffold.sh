@@ -38,6 +38,7 @@ required_files=(
   .devcontainer/devcontainer.json
   .devcontainer/scripts/bootstrap-state.sh
   .devcontainer/scripts/init-firewall.sh
+  .devcontainer/scripts/aidc-ci.sh
   .ai-container/project.env
 )
 missing=0

@@ -47,6 +47,7 @@ make_fixture() {
   cp "$t/devcontainer/project-setup.sh.tmpl"        "$dir/.devcontainer/project-setup.sh"
   cp "$t/devcontainer/scripts/bootstrap-state.sh.tmpl" "$dir/.devcontainer/scripts/bootstrap-state.sh"
   cp "$t/devcontainer/scripts/init-firewall.sh.tmpl"   "$dir/.devcontainer/scripts/init-firewall.sh"
+  cp "$t/devcontainer/scripts/aidc-ci.sh.tmpl"         "$dir/.devcontainer/scripts/aidc-ci.sh"
   local f
   for f in aidc-lib-common aidc-sbom-code aidc-sbom-image aidc-sbom-diff aidc-license-check aidc-sbom-all; do
     cp "$t/ci/${f}.sh.tmpl" "$dir/scripts/ci/${f}.sh"

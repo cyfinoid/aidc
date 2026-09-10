@@ -1,0 +1,10 @@
+name: download-missing-fixture
+on: [push]
+jobs:
+  art:
+    runs-on: ubuntu-latest
+    steps:
+      # fictional vendor + SHA-pinned (never fetched) — no prior upload ran
+      - uses: actions/download-artifact@2222222222222222222222222222222222222222
+        with:
+          name: never-uploaded

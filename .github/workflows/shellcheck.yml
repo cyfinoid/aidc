@@ -100,3 +100,9 @@ jobs:
 
       - name: Run rtk savings unit tests
         run: bash tests/rtk-gain.test.sh
+
+      - name: Run aidc-ci engine + subcommand unit tests
+        run: |
+          set -euo pipefail
+          bash tests/local-ci.test.sh
+          bash tests/ci-cmd.test.sh

@@ -1,0 +1,14 @@
+name: needs-fixture
+on: [push]
+jobs:
+  up:
+    runs-on: ubuntu-latest
+    steps:
+      - name: ok
+        run: true
+  down:
+    needs: [up]
+    runs-on: ubuntu-latest
+    steps:
+      - name: uses-needs
+        run: echo "${{ needs.up.outputs.x }}"

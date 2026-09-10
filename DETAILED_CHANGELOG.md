@@ -8,6 +8,184 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-10 — `aidc ci`: replay the wrapped project's GitHub workflows natively (opt-in product feature)
+
+**Summary:** New `aidc ci` subcommand + scaffolded engine
+(`templates/devcontainer/scripts/aidc-ci.sh.tmpl` → the project's
+`.devcontainer/scripts/aidc-ci.sh`, symlinked as `aidc-ci` on the container
+PATH) replays **the wrapped project's** push/PR-triggered GitHub Actions
+workflows natively inside the project container — parsing the YAML as-is
+(workflows are read, never modified) and re-executing their `run:` steps
+with GitHub-runner env fidelity, so the CI GitHub will run can be exercised
+before pushing, without GitHub and without Docker emulation. **Opt-in by
+design** (explicit user requirement): the scaffolded engine is inert until
+a human (or an agent told to) invokes it — nothing hooks it into any
+session/bootstrap/lifecycle step, and no workflow calls it.
+
+**Scope correction worth recording:** the first build of this feature
+misread the ask and produced a repo-local developer tool
+(`.github/scripts/run-workflows-locally.sh`) for replaying *aidc's own*
+workflows. The user clarified the intent — run **the wrapped project's**
+workflows, wherever aidc runs, if that project has any push/PR workflows.
+The engine survived the pivot (it was already project-generic in its
+parsing); the delivery surface was rebuilt: prototype deleted, engine moved
+into the scaffolding template, host subcommand added.
+
+**Why native replay (and not act):** aidc containers have no Docker socket,
+so `act`-style emulation is impossible in-container; but typical project CI
+is `run:`-heavy (validation lives in scripts the workflow calls), so a
+native step-replay covers nearly everything. The alternative — waiting for
+a GitHub round-trip to discover a broken test — is exactly the friction
+this removes.
+
+**Delivery architecture (the `aidc scan`/`aidc-scan` pattern, followed
+exactly):**
+- Engine: `templates/devcontainer/scripts/aidc-ci.sh.tmpl`, copied verbatim
+  by `aidc init`/`upgrade` into `.devcontainer/scripts/aidc-ci.sh`
+  (registered in `AIDC_MANAGED_PATHS` and `AIDC_OVERWRITE_TEMPLATE_MAP`,
+  mode 0755). The repo dogfoods its own rendered copy (gitignored,
+  read-only in-container; refreshed host-side via `aidc upgrade`).
+- Container PATH: `bootstrap-state.sh` init symlinks both `aidc-scan` and
+  `aidc-ci` into `~/.local/bin` (`install_tool_links`, scripts dir
+  overridable via `AIDC_CONTAINER_SCRIPTS_DIR` for the test); the host-side
+  `aidc::ensure_tool_links` chokepoint (generalized from
+  `ensure_scan_link`) re-asserts them on every container-entering command.
+- Host surface: `aidc ci` (`aidc::cmd_ci` in `lib/aidc/runtime.sh`) —
+  ensure-container-running, forward `AIDC_CI_PROJECT`/`AIDC_CI_PYTHON`
+  only-if-set (`AIDC_CI_ENV_KEYS`), then `compose_exec … bash
+  /workspace/.devcontainer/scripts/aidc-ci.sh "$@"` with rc propagation.
+  Registered on all four surfaces: dispatcher, completions (commands +
+  flags), help, `known=` suggestion list.
+
+**How the engine works:**
+- An embedded python bridge (PyYAML) is the *only* thing that interprets
+  workflow YAML; it emits normalized JSON (workflows → jobs → matrix-expanded
+  legs → verbatim steps) that bash consumes via `jq`. It handles the YAML-1.1
+  `on:`→`True` trap, marks matrix `include:`/`exclude:` jobs unsupported, and
+  models tag-filtered push triggers as `push:tags` so the default selection
+  (push/pull_request) excludes them honestly.
+- Python+PyYAML resolved at runtime (`AIDC_CI_PYTHON` exclusive →
+  `python3` → `uv run --with pyyaml` → `pmg uv run --with pyyaml`) because
+  the container's `python3` is uv-managed without pyyaml — no image change.
+- **Project resolution** (the #1 generalization trap — invoked via the PATH
+  symlink, `$SCRIPT_DIR/../..` would resolve to `$HOME/..`):
+  `$AIDC_CI_PROJECT` (must exist, else exit 2) → `git -C "$PWD"
+  rev-parse --show-toplevel` → `/workspace` if a directory → usage error.
+  `GITHUB_WORKSPACE/SHA/REF/REF_NAME/REPOSITORY` derive from the resolved
+  project (`origin` remote overrides the `local/<basename>` default);
+  `GITHUB_HEAD_REF`/`BASE_REF` empty (push semantics), `GITHUB_ACTOR`
+  defaults to `local`.
+- Per step: `${{ }}` expression allowlist — `matrix.*`, `runner.os/temp`,
+  widened `github.*` (event_name/ref/ref_name/head_ref/base_ref/actor/
+  repository/sha), each via a `ctx_sub` helper covering the 4 spacing
+  variants GitHub accepts; `env.*` resolves in a **second pass over the
+  merged env** (after the `GITHUB_ENV`/`GITHUB_PATH` delta merge), so
+  values set by earlier steps are visible in bodies, `if:` conditions,
+  `working-directory:`, and `with:` — a surviving `${{ env.K }}` whose key
+  isn't defined SKIPs loudly; `${{ needs.* }}` bodies SKIP loudly
+  (declaration order, no DAG); any other survivor (secrets, token,
+  hashFiles) SKIPs. `if:` subset (`always()`, `runner.os`,
+  `github.event_name`) evaluates, anything else SKIPs; `uses:` dispatch:
+  checkout no-op, upload-artifact copies `with.path`, **download-artifact
+  copies `<artifacts-dir>/<name>` into `with.path`** (missing → loud SKIP
+  naming the uploading workflow), cache/buildx/scorecard/codeql and
+  unknown actions SKIP with their name.
+- Env layering per step: GITHUB stubs → workflow env → job env →
+  GITHUB_ENV/GITHUB_PATH deltas accumulated within the job (offset-based,
+  including the `KEY<<delim` multiline form) → step env → `--env` overrides;
+  steps run `bash --noprofile --norc -eo pipefail`, output tee'd to per-step
+  logs. A failing step aborts the job's later steps; `if: always()` steps
+  still run; `continue-on-error` is honored.
+- Capability gating (docker/`gh` off): docker need detected by **usage** —
+  `docker <subcommand>` invocations and the `docker:<image>` scheme — not
+  the bare word, so steps that mention docker in guards/comments still run
+  and self-degrade exactly as on a real macOS CI leg. The check follows
+  `.github/scripts/*.sh` references one level (guard-exempt, so
+  self-degrading scripts still run while an unguarded `docker run` inside
+  gates the caller). References beyond that scope are deliberately not
+  followed — such steps run and fail honestly (a correct failure, not a
+  mis-skip); documented.
+- Bash scope: parse-clean under 3.2 (validate-scaffold `bash -n`s the
+  scaffolded copy; repo shellcheck globs exclude `.sh.tmpl`), runtime floor
+  bash ≥ 4 (associative arrays), stated in the header.
+
+**Fixes made along the way (repo code, never workflow YAML):** the only
+repo-code fix the replay surfaced was in the *test fixture builder* —
+`tests/validate-scaffold.test.sh`'s `make_fixture()` didn't render
+`aidc-ci.sh` after it became a required scaffold file (found by replaying
+the `shellcheck` workflow through the engine; the workflow's own
+"Run scaffold-validator unit tests" step failed exactly as designed).
+Everything else that can run natively passed as-written.
+
+**Engine-side fidelity gaps found and fixed during development:** the
+first prototype run's full list (tag-filtered push selecting `release.yml`;
+`--workflow` glob matching the raw JSON line; `GITHUB_ENV`/`GITHUB_PATH`
+deltas dying in command substitutions; bare-word docker matching) plus, at
+productization, the symlink project-resolution trap, the missing widened
+`github.*` expressions, the `env.*` ordering (second pass after the delta
+merge — regression-guarded by replaying the shellcheck workflow), the
+`needs.*` loud skip, and `download-artifact` (workflows that upload then
+verify now round-trip).
+
+**Commands run (verification):**
+```
+bash tests/local-ci.test.sh                      # 24 passed, 0 failed
+bash tests/ci-cmd.test.sh                        # 6 passed, 0 failed
+bash tests/scan-link.test.sh                     # 5 passed, 0 failed
+bash tests/cli-errors.test.sh                    # 8 passed, 0 failed
+bash tests/init-force.test.sh                    # 10 passed, 0 failed
+.github/scripts/test-bootstrap-state.sh          # 13 passed, 0 failed
+bash tests/validate-scaffold.test.sh             # 6 passed, 0 failed
+bash tests/opencode-web.test.sh                  # 8 passed, 0 failed
+shellcheck --severity=warning <engine .tmpl + new/changed tests>   # clean
+bash -n templates/devcontainer/scripts/aidc-ci.sh.tmpl             # parse-clean
+bash templates/devcontainer/scripts/aidc-ci.sh.tmpl --work-dir /tmp/... --workflow 'shellcheck*' --isolate-home
+                                                  # 22 pass / 0 fail / 0 skip, rc=0 (template engine)
+bash templates/devcontainer/scripts/aidc-ci.sh.tmpl --workflow 'sbom*' --job sbom
+                                                  # 4/0/0, real SBOM artifacts
+bash templates/devcontainer/scripts/aidc-ci.sh.tmpl --workflow 'aidc-e2e*' --isolate-home
+                                                  # 9 pass / 0 fail / 4 skip
+bash templates/devcontainer/scripts/aidc-ci.sh.tmpl --isolate-home  # default set: 44 pass, 0 fail, 20 skip, rc=0
+```
+Verified skips are exactly the docker/gh/GitHub-only ones (bash-compat's
+four `docker run` legs, e2e's buildx/compose/macos steps, image-size's
+build/comment/budget, image-scan's build/pins/scan/upload, scorecard's
+GitHub-only actions).
+
+**Known divergences (documented in `docs/local-ci.md`):** steps run in the
+real project worktree (workflows that write files leave them in the tree —
+cleaned after dogfood runs) and inherit the caller's env; every step gets
+`-eo pipefail` (stricter than GitHub's `-e`); HOME is real unless
+`--isolate-home`; `needs:` runs in declaration order; artifacts live on the
+local filesystem, not GitHub's artifact store. Exit codes: 0 passes/skips ·
+1 real FAIL (any skip under `--strict`) · 2 usage/dep/YAML error —
+propagated through `aidc ci`.
+
+**Files:** `templates/devcontainer/scripts/aidc-ci.sh.tmpl` (new, ~730
+lines — the engine), `lib/aidc/runtime.sh` (`cmd_ci` +
+`append_ci_env_args` + `ensure_tool_links` generalization),
+`lib/aidc/common.sh` (managed/overwrite-map entries + `AIDC_CI_ENV_KEYS`),
+`lib/aidc.sh` (dispatcher/help/known), `completions/aidc.bash`,
+`templates/devcontainer/scripts/bootstrap-state.sh.tmpl`
+(`install_tool_links` + overridable scripts dir),
+`.github/scripts/test-bootstrap-state.sh` (link cases),
+`.github/scripts/validate-scaffold.sh` (required file),
+`.github/workflows/shellcheck.yml` (test step runs both test files),
+`tests/local-ci.test.sh` (engine self-test, 24 cases) +
+`tests/ci-cmd.test.sh` (host-wrapper contract, 6) +
+`tests/scan-link.test.sh` (retargeted, 5) + `tests/validate-scaffold.test.sh`
+(fixture renders the engine) + `tests/opencode-web.test.sh` (stub) +
+`tests/fixtures/local-ci/*.yml` (14 fixtures), `docs/local-ci.md`
+(product doc), README (docs index + Commands), `.github/scripts/
+run-workflows-locally.sh` (**deleted** — the repo-local prototype this
+feature replaces). **Explicitly unchanged:** `Dockerfile.base.tmpl`,
+hooks/settings/auto-sync — the opt-in guarantee (nothing automatic invokes
+the engine).
+
+---
+
+---
+
 ## 2026-09-10 — rtk savings: session-end print, all-agent wiring, host-db merge
 
 **Summary:** Made rtk's token savings visible and durable. Claude sessions now

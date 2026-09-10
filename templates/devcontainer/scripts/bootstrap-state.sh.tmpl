@@ -325,15 +325,22 @@ sync_gitconfig_overlay() {
   fi
 }
 
-# Make aidc-scan callable by name inside the container (agents run it before
-# declaring work done — see the seeded CLAUDE.md/AGENTS.md guardrails). The
-# script itself lives in the read-only /workspace/.devcontainer overlay, so a
-# symlink is all that's needed and it tracks scaffold upgrades automatically.
-install_aidc_scan_link() {
-  local script="/workspace/.devcontainer/scripts/aidc-scan.sh"
-  [[ -f "$script" ]] || return 0
+# Make the aidc container-side tools callable by name (agents run aidc-scan
+# before declaring work done — see the seeded CLAUDE.md/AGENTS.md guardrails;
+# aidc-ci is human/agent convenience for replaying the project's workflows).
+# The scripts themselves live in the read-only /workspace/.devcontainer
+# overlay, so symlinks are all that's needed and they track scaffold
+# upgrades automatically.
+scripts_dir="${AIDC_CONTAINER_SCRIPTS_DIR:-/workspace/.devcontainer/scripts}"
+
+install_tool_links() {
+  local name script
   ensure_dir "$home_dir/.local/bin"
-  ln -sf "$script" "$home_dir/.local/bin/aidc-scan"
+  for name in aidc-scan aidc-ci; do
+    script="$scripts_dir/$name.sh"
+    [[ -f "$script" ]] || continue
+    ln -sf "$script" "$home_dir/.local/bin/$name"
+  done
 }
 
 install_agent_hooks() {
@@ -436,7 +443,7 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
       sync_tool "all"
       sync_gitconfig_overlay
       install_agent_hooks
-      install_aidc_scan_link
+      install_tool_links
       run_firewall_if_enabled
       ;;
     sync)

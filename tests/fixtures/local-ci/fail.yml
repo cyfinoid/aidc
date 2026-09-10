@@ -1,0 +1,13 @@
+name: fail-fixture
+on: [push]
+jobs:
+  bad:
+    runs-on: ubuntu-latest
+    steps:
+      - name: boom
+        run: exit 3
+      - name: never-reached
+        run: echo should-not-run
+      - name: cleanup
+        if: always()
+        run: echo cleanup-ran

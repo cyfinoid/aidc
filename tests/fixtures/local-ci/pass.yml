@@ -1,0 +1,12 @@
+name: pass-fixture
+on:
+  push:
+    branches: [main]
+jobs:
+  ok:
+    runs-on: ubuntu-latest
+    steps:
+      - name: say
+        run: echo hello
+      - name: succeed
+        run: true

@@ -7,7 +7,7 @@
 # lints each module file in isolation and cannot see those uses.
 # shellcheck disable=SC2034
 
-AIDC_VERSION="${AIDC_VERSION:-2.0.1}"
+AIDC_VERSION="${AIDC_VERSION:-2.1.0}"
 
 AIDC_CONTAINER_USER="${AIDC_CONTAINER_USER:-vscode}"
 
@@ -55,6 +55,7 @@ AIDC_MANAGED_PATHS=(
   ".devcontainer/scripts/aidc-scan.sh"
   ".devcontainer/scripts/aidc-scan-hook.sh"
   ".devcontainer/scripts/rtk-session-end.sh"
+  ".devcontainer/scripts/aidc-ci.sh"
   ".ai-container/project.env"
   ".cursor/rules/00-core-logics.mdc"
   "scripts/ci/aidc-lib-common.sh"
@@ -88,6 +89,7 @@ AIDC_OVERWRITE_TEMPLATE_MAP=(
   "templates/devcontainer/scripts/aidc-scan.sh.tmpl:.devcontainer/scripts/aidc-scan.sh:0755"
   "templates/devcontainer/scripts/aidc-scan-hook.sh.tmpl:.devcontainer/scripts/aidc-scan-hook.sh:0755"
   "templates/devcontainer/scripts/rtk-session-end.sh.tmpl:.devcontainer/scripts/rtk-session-end.sh:0755"
+  "templates/devcontainer/scripts/aidc-ci.sh.tmpl:.devcontainer/scripts/aidc-ci.sh:0755"
   "templates/cursor-rules/00-core-logics.mdc.tmpl:.cursor/rules/00-core-logics.mdc:0644"
   "templates/ci/aidc-lib-common.sh.tmpl:scripts/ci/aidc-lib-common.sh:0755"
   "templates/ci/aidc-sbom-code.sh.tmpl:scripts/ci/aidc-sbom-code.sh:0755"
@@ -147,6 +149,13 @@ AIDC_SBOM_ENV_KEYS=(
   "AIDC_LICENSE_SBOM"
   "AIDC_PROJECT_LICENSE"
   "AIDC_LICENSE_USE_VET"
+)
+
+# Host-set knobs forwarded into the container for `aidc ci` so the engine's
+# project/python overrides reach the replayed workflows.
+AIDC_CI_ENV_KEYS=(
+  "AIDC_CI_PROJECT"
+  "AIDC_CI_PYTHON"
 )
 
 aidc::need_cmd() {

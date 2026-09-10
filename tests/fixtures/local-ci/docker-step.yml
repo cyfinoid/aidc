@@ -1,0 +1,13 @@
+name: docker-fixture
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: scaffold
+        run: mkdir -p "$RUNNER_TEMP/work" && echo FROM scratch > "$RUNNER_TEMP/work/Dockerfile"
+      - name: build
+        run: docker build -t probe "$RUNNER_TEMP/work"
+
+      - name: scan
+        run: grype docker:probe -o table

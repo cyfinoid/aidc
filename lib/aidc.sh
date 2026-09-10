@@ -120,6 +120,9 @@ aidc::main() {
     scan)
       aidc::cmd_scan "$@"
       ;;
+    ci)
+      aidc::cmd_ci "$@"
+      ;;
     licenses)
       aidc::cmd_licenses "$@"
       ;;
@@ -151,7 +154,7 @@ aidc::main() {
 # first letter) before pointing at help and doctor.
 aidc::suggest_command() {
   local cmd="$1"
-  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan doctor insights update upgrade version help"
+  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan ci doctor insights update upgrade version help"
   local suggestions="" k
   for k in $known; do
     case "$k" in
@@ -197,6 +200,7 @@ Usage:
   aidc sbom [-- ...]
   aidc licenses [--fail] [-- ...]
   aidc scan [--all|--staged|paths...] [--json]
+  aidc ci [--list|--workflow <glob>|--job <id>|--all|--strict|-- ...]
   aidc doctor
   aidc insights [--since DATE]
   aidc update
@@ -210,6 +214,10 @@ Notes:
     scan a built image for the build-time SBOM.
   - aidc licenses runs the license-conflict check (scripts/ci/aidc-license-check.sh).
     Defaults to warn; pass --fail to exit non-zero on a conflict (CI gate).
+  - aidc ci replays THIS project's push/PR GitHub Actions workflows natively
+    in the container (opt-in — nothing runs it automatically), so the CI
+    GitHub will run can be exercised before pushing. Docker/gh/GitHub-bound
+    steps SKIP loudly with the reason. See docs/local-ci.md in the aidc repo.
   - aidc --debug <command> (or AIDC_DEBUG=1) prints a file:line-prefixed
     execution trace to stderr to diagnose where a run stalls (e.g. the macOS
     Keychain token read, or the first container build). Secret values (OAuth

@@ -37,7 +37,7 @@ aidc::ensure_base_image()        { :; }
 aidc::ensure_toolchain_volumes() { :; }
 aidc::compose_up()               { :; }
 aidc::auto_sync_sessions()       { :; }
-aidc::ensure_scan_link()         { :; }
+aidc::ensure_tool_links()        { :; }
 aidc::append_passthrough_env_args() { :; }
 aidc::gen_web_password()         { printf 'testpass123'; }
 

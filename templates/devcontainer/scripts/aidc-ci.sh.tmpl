@@ -1,0 +1,794 @@
+#!/usr/bin/env bash
+# aidc-managed
+#
+# aidc-ci — replay THIS project's GitHub Actions workflows natively, inside
+# the project container, without GitHub and without modifying the workflow
+# files (they are read as the single source of truth and executed exactly as
+# written). Scaffolded by `aidc init`/`aidc upgrade` into
+# .devcontainer/scripts/; invoked as `aidc ci` (host) or `aidc-ci`
+# (container PATH).
+#
+# OPT-IN BY DESIGN: the scaffolded file is inert until a human invokes it.
+# No workflow calls it, no hook or lifecycle step dispatches it, nothing
+# runs it automatically — the PATH symlink bootstrap installs is a pointer,
+# not an invocation.
+#
+# Why native replay (and not act): the project container typically has no
+# Docker socket, so nektos/act-style emulation (jobs in containers) is
+# impossible in-container. Most CI logic lives in `run:` steps, so replaying
+# those covers nearly everything; steps/jobs that genuinely need Docker, the
+# gh CLI, or GitHub-only actions are SKIPped loudly instead of being
+# silently mis-run.
+#
+# Bash scope: PARSE-clean under bash 3.2 (validate-scaffold.sh runs `bash -n`
+# on the scaffolded copy); RUNTIME floor is bash >= 4 (associative arrays) —
+# fine for the Linux container images this ships into. Unlike bin/aidc +
+# lib/aidc, this is container-side tooling, not host CLI code.
+#
+# Exit codes: 0 = only passes/skips · 1 = any real step failure (any skip
+# too, under --strict) · 2 = usage/dependency/YAML error.
+set -euo pipefail
+
+# ── constants / globals ──────────────────────────────────────────────────────
+LIST=0 ALL=0 STRICT=0 ISOLATE_HOME=0 KEEP=0
+EVENT="push"
+WF_GLOB="*" JOB_FILTER=""
+WF_DIR=""
+WORK="" WORK_OWNED=0
+ARTIFACTS=""
+DECLARED_ENV=()
+CAP_OVERRIDE_KEYS=() CAP_OVERRIDE_VALS=()
+
+PASS_N=0 FAIL_N=0 SKIP_N=0
+
+usage() {
+  cat <<'EOF'
+aidc-ci — replay this project's GitHub Actions workflows natively (opt-in)
+
+Usage: aidc-ci [flags]            (host surface: aidc ci [flags])
+
+Project resolution (where .github/workflows is looked up):
+  $AIDC_CI_PROJECT if set  ->  git toplevel of the current dir  ->  /workspace
+
+Flags:
+  --list                  print the execution plan, run nothing
+  --workflow <glob>       filter by workflow file basename (e.g. 'sbom*')
+  --job <id>              filter to one job id within the workflow(s)
+  --all                   include tag/schedule-only workflows (release…)
+  --event <name>          simulate this event for `github.event_name`
+                          (default: push)
+  --strict                treat SKIPs as failures (exit 1)
+  --capability n=on|off   override a capability probe (repeatable; probes:
+                          docker, gh) — used by the self-test
+  --env K=V               extra env for every step, wins over workflow env
+                          (repeatable)
+  --isolate-home          run steps under a throwaway HOME (recommended when
+                          workflows install things)
+  --workflows-dir <dir>   parse workflows from this dir instead of the
+                          project's .github/workflows (used by the self-test)
+  --artifacts-dir <dir>   where upload-artifact copies land
+                          (default: <work-dir>/artifacts)
+  --work-dir <dir>        scratch dir (default: mktemp -d; auto-removed on
+                          exit — an explicit dir is NEVER auto-removed)
+  --keep                  keep the auto-created scratch dir (path printed)
+
+Dependencies: bash >= 4, jq, git, and python3 with pyyaml — resolved at
+runtime via: $AIDC_CI_PYTHON (exclusive, no fallback) -> `python3` if it
+imports yaml -> `uv run --with pyyaml` -> `pmg uv run --with pyyaml`.
+
+See docs/local-ci.md in the aidc repo for scope, fidelity notes, and the
+deliberate divergences from a real GitHub runner.
+EOF
+}
+
+usage_error() { printf 'aidc-ci: %s\n' "$1" >&2; exit 2; }
+
+# ── argument parsing ─────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --list) LIST=1 ;;
+    --all) ALL=1 ;;
+    --strict) STRICT=1 ;;
+    --isolate-home) ISOLATE_HOME=1 ;;
+    --keep) KEEP=1 ;;
+    --event) [[ $# -ge 2 ]] || usage_error "--event needs a value"; EVENT="$2"; shift ;;
+    --workflow) [[ $# -ge 2 ]] || usage_error "--workflow needs a value"; WF_GLOB="$2"; shift ;;
+    --job) [[ $# -ge 2 ]] || usage_error "--job needs a value"; JOB_FILTER="$2"; shift ;;
+    --workflows-dir) [[ $# -ge 2 ]] || usage_error "--workflows-dir needs a value"; WF_DIR="$2"; shift ;;
+    --artifacts-dir) [[ $# -ge 2 ]] || usage_error "--artifacts-dir needs a value"; ARTIFACTS="$2"; shift ;;
+    --work-dir) [[ $# -ge 2 ]] || usage_error "--work-dir needs a value"; WORK="$2"; shift ;;
+    --env) [[ $# -ge 2 ]] || usage_error "--env needs K=V"; DECLARED_ENV+=("$2"); shift ;;
+    --capability)
+      [[ $# -ge 2 ]] || usage_error "--capability needs name=on|off"
+      [[ "$2" == *=* ]] || usage_error "--capability needs name=on|off (got: $2)"
+      CAP_OVERRIDE_KEYS+=("${2%%=*}"); CAP_OVERRIDE_VALS+=("${2#*=}"); shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) usage_error "unknown flag: $1 (see --help)" ;;
+  esac
+  shift
+done
+
+# ── project resolution ───────────────────────────────────────────────────────
+# NEVER derive the project from $0/BASH_SOURCE: the container PATH symlink
+# (~/.local/bin/aidc-ci) would resolve the script dir into $HOME/.. — the
+# target is the PROJECT the user is working on, resolved from the
+# environment or the working dir.
+PROJECT="${AIDC_CI_PROJECT:-}"
+if [[ -n "$PROJECT" ]]; then
+  [[ -d "$PROJECT" ]] || usage_error "AIDC_CI_PROJECT: not a directory: $PROJECT"
+elif PROJECT="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null)" && [[ -n "$PROJECT" ]]; then
+  :
+elif [[ -d /workspace ]]; then
+  PROJECT=/workspace
+else
+  usage_error "cannot determine the project dir (set AIDC_CI_PROJECT or run from inside the project)"
+fi
+[[ -n "$WF_DIR" ]] || WF_DIR="$PROJECT/.github/workflows"
+[[ -d "$WF_DIR" ]] || usage_error "workflows dir not found: $WF_DIR"
+command -v jq >/dev/null 2>&1 || usage_error "jq is required (apt/brew install jq)"
+command -v git >/dev/null 2>&1 || usage_error "git is required"
+
+# ── python+pyyaml resolution chain ───────────────────────────────────────────
+# AIDC_CI_PYTHON is an exclusive escape hatch (and the self-test's way to
+# force the failure path): when set, only that interpreter is tried.
+declare -a PY_CMD=()
+resolve_python() {
+  if [[ -n "${AIDC_CI_PYTHON:-}" ]]; then
+    if "$AIDC_CI_PYTHON" -c 'import yaml' >/dev/null 2>&1; then
+      PY_CMD=("$AIDC_CI_PYTHON"); return 0
+    fi
+    return 1
+  fi
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+    PY_CMD=(python3); return 0
+  fi
+  if command -v uv >/dev/null 2>&1 \
+     && uv run --no-project --with pyyaml python -c 'import yaml' >/dev/null 2>&1; then
+    PY_CMD=(uv run --no-project --with pyyaml python); return 0
+  fi
+  if command -v pmg >/dev/null 2>&1 \
+     && pmg uv run --no-project --with pyyaml python -c 'import yaml' >/dev/null 2>&1; then
+    PY_CMD=(pmg uv run --no-project --with pyyaml python); return 0
+  fi
+  return 1
+}
+if ! resolve_python; then
+  cat >&2 <<MSG
+aidc-ci: no python3-with-pyaml found (needed to parse workflows).
+Tried: AIDC_CI_PYTHON="${AIDC_CI_PYTHON:-<unset>}", python3, uv run --with pyyaml, pmg uv run --with pyyaml.
+Fix one of:
+  - aidc devcontainer :  export AIDC_CI_PYTHON=<python with pyyaml>, or
+                          install pyyaml into the uv-managed python3
+  - macOS host        :  python3 -m pip install --user pyyaml   (or: brew install pyyaml)
+  - any CI box        :  apt-get install -y python3-yaml
+MSG
+  exit 2
+fi
+
+# ── scratch dir / GITHUB_* environment stubs ─────────────────────────────────
+if [[ -z "$WORK" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/aidc-local-ci.XXXXXX")"
+  WORK_OWNED=1
+fi
+RUNNER_TEMP="$WORK/tmp"; GITHUB_ENV_FILE="$WORK/env"; GITHUB_PATH_FILE="$WORK/path"
+LOG_DIR="$WORK/logs"; PLAN_FILE="$WORK/plan.json"
+mkdir -p "$RUNNER_TEMP" "$LOG_DIR" "${ARTIFACTS:-$WORK/artifacts}"
+: >"$GITHUB_ENV_FILE"; : >"$GITHUB_PATH_FILE"
+[[ -n "$ARTIFACTS" ]] || ARTIFACTS="$WORK/artifacts"
+
+cleanup() {
+  if [[ "$WORK_OWNED" == "1" && "$KEEP" == "0" && -d "$WORK" ]]; then
+    rm -rf "$WORK"
+  elif [[ "$WORK_OWNED" == "1" && "$KEEP" == "1" ]]; then
+    printf 'aidc-ci: work dir kept at %s\n' "$WORK"
+  fi
+}
+trap cleanup EXIT
+
+GITHUB_WORKSPACE="$PROJECT"
+GITHUB_SHA="$(git -C "$PROJECT" rev-parse HEAD 2>/dev/null || printf 0000000000000000000000000000000000000000)"
+GITHUB_REF="refs/heads/$(git -C "$PROJECT" rev-parse --abbrev-ref HEAD 2>/dev/null || printf HEAD)"
+GITHUB_REF_NAME="${GITHUB_REF#refs/heads/}"
+GITHUB_HEAD_REF=""   # push-event semantics; PR-only context stays empty
+GITHUB_ACTOR="${AIDC_CI_ACTOR:-local}"
+GITHUB_REPOSITORY="local/$(basename "$PROJECT")"
+remote_url="$(git -C "$PROJECT" remote get-url origin 2>/dev/null || true)"
+if [[ -n "$remote_url" ]]; then
+  GITHUB_REPOSITORY="$(printf '%s' "$remote_url" | sed -e 's/\.git$//' -e 's|^.*github\.com[:/]||')"
+fi
+if [[ "$ISOLATE_HOME" == "1" ]]; then
+  export HOME="$WORK/home"
+  mkdir -p "$HOME"
+fi
+
+# ── capability probes (overridable for hermetic self-testing) ────────────────
+declare -A CAP=()
+CAP[docker]=off
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then CAP[docker]=on; fi
+CAP[gh]=off
+if command -v gh >/dev/null 2>&1; then CAP[gh]=on; fi
+i=0
+while [[ $i -lt ${#CAP_OVERRIDE_KEYS[@]} ]]; do
+  case "${CAP_OVERRIDE_VALS[$i]}" in
+    on|off) CAP["${CAP_OVERRIDE_KEYS[$i]}"]="${CAP_OVERRIDE_VALS[$i]}" ;;
+    *) usage_error "--capability ${CAP_OVERRIDE_KEYS[$i]}: expected on|off" ;;
+  esac
+  i=$((i + 1))
+done
+
+# ── plan loading: embedded python bridge → normalized JSON ───────────────────
+# The bridge is the ONLY thing that interprets workflow YAML; bash consumes
+# its JSON via jq. Workflows are never modified.
+load_plan() { # <plan-file> <workflow-files...>
+  local out="$1"; shift
+  "${PY_CMD[@]}" - "$@" >"$out" <<'PY'
+import json, os, sys
+import yaml
+
+def triggers_of(on):
+    if on is None:
+        return []
+    if isinstance(on, str):
+        return [on]
+    if isinstance(on, list):
+        return [str(x) for x in on]
+    if isinstance(on, dict):
+        out = []
+        for k, v in on.items():
+            out.append(str(k))
+            # A push trigger with a tags: filter and no branches: filter only
+            # fires on tag pushes (tag-filtered release workflows) — a
+            # local branch-push replay must not select it. Keep plain
+            # "push" entries too when the trigger has both, so --list
+            # stays honest.
+            if str(k) == "push" and isinstance(v, dict) and "tags" in v:
+                out.append("push:tags")
+                if "branches" not in v:
+                    out.remove("push")
+        return out
+    return []
+
+def legs_of(matrix):
+    """Expand a strategy matrix into a list of axis dicts, or None if the
+    matrix uses features we refuse to guess at (include/exclude, non-list
+    axes) — the runner then SKIPs the job loudly instead of mis-running it."""
+    if not isinstance(matrix, dict):
+        return [{}]
+    if "include" in matrix or "exclude" in matrix:
+        return None
+    axes = {}
+    for k, v in matrix.items():
+        if not isinstance(v, list):
+            return None
+        axes[k] = v
+    legs = [{}]
+    for k, vals in axes.items():
+        legs = [dict(leg, **{k: v}) for leg in legs for v in vals]
+    return legs
+
+def norm_step(idx, s):
+    if not isinstance(s, dict):
+        raise SystemExit(f"aidc-ci: step {idx}: not a mapping")
+    if "uses" in s and "run" in s:
+        raise SystemExit(f"aidc-ci: step {idx}: both 'uses' and 'run' present")
+    env = s.get("env") if isinstance(s.get("env"), dict) else {}
+    with_ = s.get("with") if isinstance(s.get("with"), dict) else None
+    return {
+        "i": idx,
+        "name": s.get("name"),
+        "uses": s.get("uses"),
+        "with": with_,
+        "if": s.get("if"),
+        "env": env,
+        "run": s.get("run"),
+        "wd": s.get("working-directory"),
+        "coe": bool(s.get("continue-on-error", False)),
+    }
+
+workflows = []
+for f in sys.argv[1:]:
+    try:
+        with open(f) as fh:
+            doc = yaml.safe_load(fh)
+    except Exception as e:  # noqa: BLE001 — surface any parse failure verbatim
+        print(f"aidc-ci: {f}: {e}", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(doc, dict) or not isinstance(doc.get("jobs"), dict):
+        print(f"aidc-ci: {f}: not a workflow mapping (no 'jobs')", file=sys.stderr)
+        sys.exit(2)
+    on = doc.get("on", doc.get(True))  # YAML 1.1 parses bare `on:` as boolean True
+    wenv = doc.get("env") if isinstance(doc.get("env"), dict) else {}
+    jobs = []
+    for jid, j in doc["jobs"].items():
+        j = j or {}
+        strat = j.get("strategy") if isinstance(j.get("strategy"), dict) else {}
+        legs = legs_of(strat.get("matrix"))
+        unsupported = None if legs is not None else "matrix include/exclude or non-list axis"
+        jenv = j.get("env") if isinstance(j.get("env"), dict) else {}
+        steps = [norm_step(i, s) for i, s in enumerate(j.get("steps") or [], 1)]
+        needs = j.get("needs") or []
+        if isinstance(needs, str):
+            needs = [needs]
+        jobs.append({
+            "id": jid,
+            "name": j.get("name"),
+            "runs_on": j.get("runs-on"),
+            "needs": needs,
+            "env": jenv,
+            "unsupported": unsupported,
+            "legs": [{"axes": leg} for leg in (legs or [])],
+            "steps": steps,
+        })
+    workflows.append({
+        "file": f,
+        "name": doc.get("name") or os.path.basename(f),
+        "triggers": triggers_of(on),
+        "env": wenv,
+        "jobs": jobs,
+    })
+json.dump({"workflows": workflows}, sys.stdout)
+PY
+}
+
+mapfile -t CANDIDATES < <(find "$WF_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+[[ ${#CANDIDATES[@]} -gt 0 ]] || usage_error "no workflow files in $WF_DIR"
+load_plan "$PLAN_FILE" "${CANDIDATES[@]}"
+
+# ── selection: default = push/pull_request triggered; --all adds the rest ────
+selected_count=0
+declare -a WF_JSONS=()
+while IFS= read -r wf; do
+  base="$(basename "$(jq -r '.file' <<<"$wf")")"
+  hits_default=0
+  if [[ "$ALL" == "1" ]]; then hits_default=1; fi
+  if [[ "$hits_default" == "0" ]]; then
+    for t in $(jq -r '.triggers[]' <<<"$wf"); do
+      if [[ "$t" == "push" || "$t" == "pull_request" ]]; then hits_default=1; fi
+    done
+  fi
+  [[ "$hits_default" == "1" ]] || continue
+  # shellcheck disable=SC2254  # user-supplied glob on purpose
+  case "$base" in
+    $WF_GLOB) WF_JSONS+=("$wf"); selected_count=$((selected_count + 1)) ;;
+  esac
+done < <(jq -c '.workflows[]' "$PLAN_FILE")
+
+if [[ "$selected_count" == "0" ]]; then
+  printf 'aidc-ci: no workflows matched (dir=%s glob=%s all=%s)\n' "$WF_DIR" "$WF_GLOB" "$ALL" >&2
+  exit 2
+fi
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+declare -A MAT=()       # current leg's matrix axes
+declare -A JOB_DELTA=() # GITHUB_ENV / GITHUB_PATH state accumulated within the job
+declare -A STEP_ENV=()  # merged env for the current step
+declare -a env_args=()  # STEP_ENV flattened for `env`
+
+size_of() { # <file> — GNU stat, BSD stat fallback
+  stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || printf 0
+}
+
+# Substitute every spacing variant of ${{ <key> }} (${ {k} }, ${{k}},
+# ${{ k }}, ${{ k}}) — one helper for all contexts.
+ctx_sub() { # <string> <context-key> <value> — prints the substituted string
+  local t="$1" k="$2" v="$3"
+  t="${t//\$\{\{ $k \}\}/$v}"
+  t="${t//\$\{\{$k\}\}/$v}"
+  t="${t//\$\{\{ $k\}\}/$v}"
+  t="${t//\$\{\{$k \}\}/$v}"
+  printf '%s' "$t"
+}
+
+expand_expressions() { # <string> — allowlisted ${{ }} substitution; prints result
+  local s="$1" k v
+  if [[ ${#MAT[@]} -gt 0 ]]; then
+    for k in "${!MAT[@]}"; do
+      s="$(ctx_sub "$s" "matrix.$k" "${MAT[$k]}")"
+    done
+  fi
+  s="$(ctx_sub "$s" "runner.os" "Linux")"
+  s="$(ctx_sub "$s" "runner.temp" "$RUNNER_TEMP")"
+  s="$(ctx_sub "$s" "github.event_name" "$EVENT")"
+  s="$(ctx_sub "$s" "github.ref" "$GITHUB_REF")"
+  s="$(ctx_sub "$s" "github.ref_name" "$GITHUB_REF_NAME")"
+  s="$(ctx_sub "$s" "github.head_ref" "$GITHUB_HEAD_REF")"
+  s="$(ctx_sub "$s" "github.base_ref" "")"
+  s="$(ctx_sub "$s" "github.actor" "$GITHUB_ACTOR")"
+  s="$(ctx_sub "$s" "github.repository" "$GITHUB_REPOSITORY")"
+  s="$(ctx_sub "$s" "github.sha" "$GITHUB_SHA")"
+  printf '%s' "$s"
+}
+
+# Second pass for ${{ env.* }} — resolves against the merged environment of
+# the current step (workflow → job → GITHUB_ENV deltas → step env), so it
+# must run AFTER STEP_ENV is built. GitHub expands env values themselves the
+# same way; keys GitHub wouldn't have defined are left for the loud-SKIP
+# check in the step loop.
+expand_env_ctx() { # <string> — prints the substituted string
+  local t="$1" k
+  if [[ ${#STEP_ENV[@]} -gt 0 ]]; then
+    for k in "${!STEP_ENV[@]}"; do
+      t="$(ctx_sub "$t" "env.$k" "${STEP_ENV[$k]}")"
+    done
+  fi
+  printf '%s' "$t"
+}
+
+has_unsupported_expression() { [[ "$1" == *'${{'* ]]; }
+
+# verdict for a (already expression-expanded) `if:` — echoes run|skip|unsupported
+eval_if() {
+  local c="$1"
+  if [[ -z "$c" ]]; then printf 'run'; return 0; fi
+  case "$c" in
+    'always()') printf 'run' ;;
+    "runner.os == 'Linux'"|'runner.os == "Linux"'|"runner.os == 'linux'") printf 'run' ;;
+    "runner.os == 'macOS'"|'runner.os == "macOS"'|\
+    "runner.os == 'Windows'"|'runner.os == "Windows"'|\
+    "runner.os == 'macos'"|'runner.os == "macos"') printf 'skip' ;;
+    "github.event_name == '$EVENT'"|"github.event_name == \"$EVENT\"") printf 'run' ;;
+    github.event_name\ ==\ *|runner.os\ ==\ *) printf 'skip' ;;
+    *) printf 'unsupported' ;;
+  esac
+}
+
+# GITHUB_ENV / GITHUB_PATH deltas since a byte offset. New values accumulate
+# into JOB_DELTA (which later steps overlay after job env); the new byte
+# offset is reported in the global DELTA_OFF — NOT via stdout, because the
+# caller must not run these in a command substitution (the JOB_DELTA writes
+# would die with the subshell).
+apply_env_delta() { # <file> <prev-offset>
+  local f="$1" prev="$2" sz chunk line key val delim acc
+  sz="$(size_of "$f")"
+  DELTA_OFF="$sz"
+  if [[ "$sz" -le "$prev" ]]; then return 0; fi
+  chunk="$(tail -c +$((prev + 1)) "$f")"
+  local -a lines=()
+  while IFS= read -r line || [[ -n "$line" ]]; do lines+=("$line"); done <<<"$chunk"
+  local i=0
+  while (( i < ${#lines[@]} )); do
+    line="${lines[i]}"; i=$((i + 1))
+    case "$line" in
+      *"<<"*)
+        key="${line%%<<*}"; delim="${line#*<<}"
+        acc=""
+        while (( i < ${#lines[@]} )) && [[ "${lines[i]}" != "$delim" ]]; do
+          acc+="${lines[i]}"$'\n'; i=$((i + 1))
+        done
+        i=$((i + 1))  # consume the delimiter line
+        if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then JOB_DELTA["$key"]="$acc"; fi
+        ;;
+      '='*) : ;;
+      *=*)
+        key="${line%%=*}"; val="${line#*=}"
+        if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then JOB_DELTA["$key"]="$val"; fi
+        ;;
+    esac
+  done
+}
+
+apply_path_delta() { # <file> <prev-offset> — each new line is a dir to prepend
+  local f="$1" prev="$2" sz chunk line
+  sz="$(size_of "$f")"
+  DELTA_OFF="$sz"
+  if [[ "$sz" -le "$prev" ]]; then return 0; fi
+  chunk="$(tail -c +$((prev + 1)) "$f")"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    JOB_DELTA[PATH]="${line}:${JOB_DELTA[PATH]:-$PATH}"
+  done <<<"$chunk"
+}
+
+build_env_args() { # flattens STEP_ENV into env_args for `env`
+  env_args=()
+  local k
+  for k in "${!STEP_ENV[@]}"; do
+    env_args+=("$k=${STEP_ENV[$k]}")
+  done
+}
+
+# Runs the step script with merged env, output tee'd to the log AND the
+# terminal; sets the global STEP_RC (no command substitution — it would
+# capture the tee'd output too).
+run_step_script() { # <script-file> <cwd> <log-file>
+  local sf="$1" dir="$2" log="$3"
+  set +e
+  (
+    cd "$dir" 2>/dev/null || cd "$GITHUB_WORKSPACE"
+    env "${env_args[@]}" bash --noprofile --norc -eo pipefail "$sf"
+  ) > >(tee -a "$log") 2>&1
+  STEP_RC=${PIPESTATUS[0]}
+  set -e
+}
+
+# status recording ------------------------------------------------------------
+print_step_line() { # <status> <note> <duration-s>
+  printf '    %-4s %s%s\n' "$1" "$2" "${3:+ ($3 s)}"
+}
+pass_step() { PASS_N=$((PASS_N + 1)); print_step_line PASS "$1" "${2:-}"; }
+fail_step() { FAIL_N=$((FAIL_N + 1)); print_step_line FAIL "$1${2:+ (rc=$2)}" ""; }
+skip_step() { SKIP_N=$((SKIP_N + 1)); print_step_line SKIP "$1" ""; }
+
+handle_uses() { # <action> <artifact-name> <artifact-path> <step-desc>
+  local action="$1" art_name="$2" art_path="$3" desc="$4"
+  local base="${action%%@*}" dst src copied
+  case "$base" in
+    actions/checkout)
+      pass_step "$desc — checkout (no-op: already on the local checkout)" ;;
+    actions/upload-artifact)
+      if [[ -z "$art_path" ]]; then
+        skip_step "$desc — upload-artifact without a path"
+        return 0
+      fi
+      dst="$ARTIFACTS/$art_name"; mkdir -p "$dst"; copied=0
+      while IFS= read -r src; do
+        [[ -e "$src" ]] || continue
+        cp -r "$src" "$dst/" && copied=$((copied + 1))
+      done <<<"$art_path"
+      if (( copied )); then
+        pass_step "$desc — artifact '$art_name' copied ($copied path(s))"
+      else
+        skip_step "$desc — artifact path not found: $art_path"
+      fi
+      ;;
+    actions/download-artifact)
+      # with.path is a DESTINATION here (the upload mirror image); artifacts
+      # only exist if an uploading workflow ran first in this session.
+      src="$ARTIFACTS/$art_name"
+      if [[ -d "$src" ]]; then
+        dst="${art_path:-$GITHUB_WORKSPACE}"
+        mkdir -p "$dst"
+        cp -R "$src/." "$dst/"
+        pass_step "$desc — artifact '$art_name' downloaded to $dst"
+      else
+        skip_step "$desc — artifact '$art_name' not found in $ARTIFACTS (run the uploading workflow first)"
+      fi
+      ;;
+    actions/cache|docker/setup-buildx-action)
+      skip_step "$desc — $base needs GitHub/docker infrastructure" ;;
+    ossf/scorecard-action|github/codeql-action/*)
+      skip_step "$desc — GitHub-only action: $base" ;;
+    *)
+      skip_step "$desc — unknown action: $base (not run locally)" ;;
+  esac
+}
+
+# Docker USAGE, not the bare word: subcommand invocations, plus the
+# `docker:<image>` source scheme (grype/syft resolve it via the daemon).
+# Steps routinely mention docker in comments/guards ("command -v docker")
+# and self-degrade; those must run so their own skip logic fires, exactly
+# as it would on a real macOS runner.
+DOCKER_USE_RE='\bdocker(-compose)?[[:space:]]+(build|run|compose|info|version|ps|images|volume|volumes|network|networks|exec|logs|pull|push|tag|create|start|stop|restart|rm|kill|inspect|login|logout|context|buildx)[[:space:]]|\bdocker:[[:alnum:]]'
+
+# A step body may only mention a script, so follow .github/scripts/*.sh
+# references one level (GitHub's canonical helper location): a referenced
+# script counts as docker-bound only when it uses docker UNGUARDED — a
+# script that probes `command -v docker` and self-degrades must run so its
+# own skip logic fires; one that calls docker bare would really fail.
+# scripts outside .github/scripts/ and tests/*.sh are deliberately NOT
+# followed (test stubs mention docker for hermeticity; anything else simply
+# runs and fails honestly — a correct failure, not a mis-skip).
+ref_needs_docker() { # <script-path> — 0 when it uses docker unguarded
+  local f="$1"
+  [[ -f "$f" ]] || return 1
+  grep -qE "$DOCKER_USE_RE" "$f" && ! grep -qF 'command -v docker' "$f"
+}
+
+gate_body() { # <expanded-body> <desc> — records a SKIP and returns 1 when gated
+  local body="$1" desc="$2" ref
+  if [[ "${CAP[docker]}" != "on" ]]; then
+    if grep -qE "$DOCKER_USE_RE" <<<"$body"; then
+      skip_step "$desc — needs docker (capability off)"; return 1
+    fi
+    while IFS= read -r ref; do
+      [[ -n "$ref" ]] || continue
+      if ref_needs_docker "$GITHUB_WORKSPACE/$ref"; then
+        skip_step "$desc — referenced $ref needs docker (capability off)"; return 1
+      fi
+    done < <(grep -oE '\.github/scripts/[A-Za-z0-9_./-]+\.sh' <<<"$body" | sort -u)
+  fi
+  if [[ "${CAP[gh]}" != "on" ]] && grep -qE '\bgh[[:space:]]+(pr|api|run|release)[[:space:]]' <<<"$body"; then
+    skip_step "$desc — needs the gh CLI (capability off)"; return 1
+  fi
+  return 0
+}
+
+# ── --list: print the plan, run nothing ──────────────────────────────────────
+if [[ "$LIST" == "1" ]]; then
+  for wf in "${WF_JSONS[@]}"; do
+    printf '%s  (%s)  triggers: %s\n' \
+      "$(jq -r '.name' <<<"$wf")" "$(jq -r '.file' <<<"$wf")" "$(jq -r '.triggers | join(" ")' <<<"$wf")"
+    while IFS= read -r job; do
+      printf '  job %-18s legs:%d steps:%d%s\n' \
+        "$(jq -r '.id' <<<"$job")" "$(jq -r '.legs | length' <<<"$job")" "$(jq -r '.steps | length' <<<"$job")" \
+        "$(jq -r 'if .unsupported then "  UNSUPPORTED: " + .unsupported else "" end' <<<"$job")"
+      jq -r '.steps[] | "    \(.i). \(.name // .uses // .run // "?" | split("\n")[0] | .[0:70])"' <<<"$job"
+    done < <(jq -c '.jobs[]' <<<"$wf")
+  done
+  exit 0
+fi
+
+# ── execution ────────────────────────────────────────────────────────────────
+printf 'aidc-ci: %d workflow(s) selected · event=%s · docker=%s gh=%s\n' \
+  "$selected_count" "$EVENT" "${CAP[docker]}" "${CAP[gh]}"
+printf '  workspace=%s\n  work dir=%s (logs: %s)\n' "$GITHUB_WORKSPACE" "$WORK" "$LOG_DIR"
+
+declare -a WF_TITLES=() WF_RESULTS=()
+step_script_n=0
+
+for wf in "${WF_JSONS[@]}"; do
+  wf_name="$(jq -r '.name' <<<"$wf")"
+  wf_pass=$PASS_N; wf_fail=$FAIL_N; wf_skip=$SKIP_N
+  printf '\n[%s]\n' "$wf_name"
+
+  while IFS= read -r job; do
+    job_id="$(jq -r '.id' <<<"$job")"
+    if [[ -n "$JOB_FILTER" && "$job_id" != "$JOB_FILTER" ]]; then
+      continue
+    fi
+    if [[ "$(jq -r '.needs | length' <<<"$job")" != "0" ]]; then
+      printf '  note: job %s declares needs:%s — running in declaration order, no DAG\n' \
+        "$job_id" "$(jq -r '.needs | join(",")' <<<"$job")"
+    fi
+
+    if [[ "$(jq -r '.unsupported' <<<"$job")" != "null" ]]; then
+      skip_step "job $job_id — $(jq -r '.unsupported' <<<"$job")"
+      continue
+    fi
+
+    while IFS= read -r leg; do
+      MAT=()
+      while IFS= read -r kv; do
+        if [[ "$kv" == *=* ]]; then MAT["${kv%%=*}"]="${kv#*=}"; fi
+      done < <(jq -r '.axes | to_entries[] | "\(.key)=\(.value)"' <<<"$leg")
+
+      leg_label="$(jq -r '.axes | to_entries | map("\(.key)=\(.value)") | join(" ")' <<<"$leg")"
+      leg_os="$(jq -r '.axes.os // empty' <<<"$leg")"
+      runs_on="$(jq -r '.runs_on // empty' <<<"$job")"
+      [[ -n "$leg_os" ]] && runs_on="$leg_os"
+      if [[ "$runs_on" == macos* || "$runs_on" == windows* ]]; then
+        skip_step "job $job_id (leg: ${leg_label:-$runs_on}) — non-Linux runner image"
+        continue
+      fi
+
+      printf '  job %s%s\n' "$job_id" "${leg_label:+ (leg: $leg_label)}"
+
+      # GITHUB_ENV / GITHUB_PATH are per-job state on real runners
+      : >"$GITHUB_ENV_FILE"; : >"$GITHUB_PATH_FILE"
+      JOB_DELTA=()
+      env_off=0; path_off=0
+      job_failed=0
+
+      while IFS= read -r step; do
+        step_n="$(jq -r '.i' <<<"$step")"
+        step_name="$(jq -r '.name // ""' <<<"$step")"
+        uses="$(jq -r '.uses // empty' <<<"$step")"
+        raw_run="$(jq -r '.run // empty' <<<"$step")"
+        raw_if="$(jq -r '.if // empty' <<<"$step")"
+        coe="$(jq -r '.coe' <<<"$step")"
+        desc="${step_n}. ${step_name:-${uses:-run}}"
+
+        cond="$(expand_expressions "$raw_if")"
+        verdict="$(eval_if "$cond")"
+        if [[ "$verdict" == "unsupported" ]]; then
+          skip_step "$desc — unsupported condition: $raw_if"; continue
+        fi
+        if [[ "$verdict" == "skip" ]]; then
+          skip_step "$desc — condition false locally: $raw_if"; continue
+        fi
+        if [[ "$job_failed" == "1" && "$cond" != 'always()' ]]; then
+          skip_step "$desc — job already failed"; continue
+        fi
+
+        # merged env: GITHUB stubs → workflow env → job env → JOB_DELTA
+        #            (GITHUB_ENV/GITHUB_PATH) → step env → --env overrides
+        STEP_ENV=()
+        STEP_ENV[CI]=true
+        STEP_ENV[GITHUB_ACTIONS]=true
+        STEP_ENV[GITHUB_WORKSPACE]="$GITHUB_WORKSPACE"
+        STEP_ENV[RUNNER_TEMP]="$RUNNER_TEMP"
+        STEP_ENV[RUNNER_OS]=Linux
+        STEP_ENV[GITHUB_ENV]="$GITHUB_ENV_FILE"
+        STEP_ENV[GITHUB_PATH]="$GITHUB_PATH_FILE"
+        STEP_ENV[GITHUB_REF]="$GITHUB_REF"
+        STEP_ENV[GITHUB_SHA]="$GITHUB_SHA"
+        STEP_ENV[GITHUB_EVENT_NAME]="$EVENT"
+        STEP_ENV[GITHUB_REPOSITORY]="$GITHUB_REPOSITORY"
+        STEP_ENV[GITHUB_REF_NAME]="$GITHUB_REF_NAME"
+        STEP_ENV[GITHUB_HEAD_REF]="$GITHUB_HEAD_REF"
+        STEP_ENV[GITHUB_ACTOR]="$GITHUB_ACTOR"
+        while IFS= read -r kv; do
+          if [[ "$kv" == *=* ]]; then STEP_ENV["${kv%%=*}"]="${kv#*=}"; fi
+        done < <(jq -r '.env | to_entries[] | "\(.key)=\(.value)"' <<<"$wf")
+        while IFS= read -r kv; do
+          if [[ "$kv" == *=* ]]; then STEP_ENV["${kv%%=*}"]="${kv#*=}"; fi
+        done < <(jq -r '.env | to_entries[] | "\(.key)=\(.value)"' <<<"$job")
+        if [[ ${#JOB_DELTA[@]} -gt 0 ]]; then
+          for k in "${!JOB_DELTA[@]}"; do STEP_ENV["$k"]="${JOB_DELTA[$k]}"; done
+        fi
+        while IFS= read -r kv; do
+          if [[ "$kv" == *=* ]]; then STEP_ENV["${kv%%=*}"]="${kv#*=}"; fi
+        done < <(jq -r '.env | to_entries[] | "\(.key)=\(.value)"' <<<"$step")
+        if [[ ${#DECLARED_ENV[@]} -gt 0 ]]; then
+          for kv in "${DECLARED_ENV[@]}"; do
+            if [[ "$kv" == *=* ]]; then STEP_ENV["${kv%%=*}"]="${kv#*=}"; fi
+          done
+        fi
+        # GitHub expands contexts inside env: values too — one pass over the
+        # merged map (keys are snapshotted before the body runs, so in-place
+        # value mutation is safe).
+        if [[ ${#STEP_ENV[@]} -gt 0 ]]; then
+          for k in "${!STEP_ENV[@]}"; do
+            STEP_ENV["$k"]="$(expand_env_ctx "$(expand_expressions "${STEP_ENV[$k]}")")"
+          done
+        fi
+        build_env_args
+
+        if [[ -n "$uses" ]]; then
+          art_name="$(expand_env_ctx "$(expand_expressions "$(jq -r '.with.name // "artifact"' <<<"$step")")")"
+          art_path="$(expand_env_ctx "$(expand_expressions "$(jq -r '.with.path // empty' <<<"$step")")")"
+          handle_uses "$uses" "$art_name" "$art_path" "$desc"
+          continue
+        fi
+
+        body="$(expand_env_ctx "$(expand_expressions "$raw_run")")"
+        case "$body" in
+          *'${{ needs.'*|*'${{needs.'*)
+            skip_step "$desc — needs.* outputs unavailable locally (declaration order, no DAG)"; continue ;;
+        esac
+        if grep -qE '\$\{\{[[:space:]]*env\.' <<<"$body"; then
+          skip_step "$desc — \${{ env.* }} key not defined in the merged env"; continue
+        fi
+        if has_unsupported_expression "$body"; then
+          skip_step "$desc — unsupported expression (secrets/token/hashFiles stay unexpanded)"; continue
+        fi
+        if ! gate_body "$body" "$desc"; then
+          continue
+        fi
+
+        step_script_n=$((step_script_n + 1))
+        sf="$WORK/step-$step_script_n.sh"
+        log="$LOG_DIR/w${step_script_n}.log"
+        printf '%s\n' "$body" >"$sf"
+        wd="$(expand_env_ctx "$(expand_expressions "$(jq -r '.wd // empty' <<<"$step")")")"
+        dir="${wd:+$GITHUB_WORKSPACE/$wd}"
+        [[ -n "$dir" ]] || dir="$GITHUB_WORKSPACE"
+        t0=$(date +%s)
+        run_step_script "$sf" "$dir" "$log"
+        t1=$(date +%s)
+        if [[ "$STEP_RC" == "0" ]]; then
+          pass_step "$desc" "$((t1 - t0))"
+        elif [[ "$coe" == "true" ]]; then
+          fail_step "$desc — continue-on-error" "$STEP_RC"
+        else
+          fail_step "$desc" "$STEP_RC"
+          job_failed=1
+        fi
+        apply_env_delta "$GITHUB_ENV_FILE" "$env_off"; env_off="$DELTA_OFF"
+        apply_path_delta "$GITHUB_PATH_FILE" "$path_off"; path_off="$DELTA_OFF"
+      done < <(jq -c '.steps[]' <<<"$job")
+    done < <(jq -c '.legs[]' <<<"$job")
+  done < <(jq -c '.jobs[]' <<<"$wf")
+
+  WF_TITLES+=("$wf_name")
+  WF_RESULTS+=("$(printf '%d pass, %d fail, %d skip' \
+    "$((PASS_N - wf_pass))" "$((FAIL_N - wf_fail))" "$((SKIP_N - wf_skip))")")
+done
+
+# ── summary ──────────────────────────────────────────────────────────────────
+printf '\nSummary:\n'
+i=0
+while (( i < ${#WF_TITLES[@]} )); do
+  printf '  %-14s %s\n' "${WF_TITLES[$i]}" "${WF_RESULTS[$i]}"
+  i=$((i + 1))
+done
+printf 'TOTAL: %d pass, %d fail, %d skip\n' "$PASS_N" "$FAIL_N" "$SKIP_N"
+
+if [[ "$FAIL_N" -gt 0 ]]; then
+  exit 1
+fi
+if [[ "$STRICT" == "1" && "$SKIP_N" -gt 0 ]]; then
+  printf 'aidc-ci: --strict: %d skipped step(s) treated as failure\n' "$SKIP_N" >&2
+  exit 1
+fi
+exit 0

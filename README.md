@@ -84,6 +84,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 - [`docs/uninstall.md`](docs/uninstall.md) — per-project and host-wide removal
 - [`docs/releasing.md`](docs/releasing.md) — how releases are cut
 - [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md) — host-clipboard → container PNG paste bridge
+- [`docs/local-ci.md`](docs/local-ci.md) — `aidc ci`: replaying the wrapped project's GitHub workflows locally (opt-in)
 - [`CHANGELOG.md`](CHANGELOG.md) — high-level release notes; [`DETAILED_CHANGELOG.md`](DETAILED_CHANGELOG.md) — long-form per-change rationale
 - [`SECURITY.md`](SECURITY.md) — how to report vulnerabilities in aidc itself
 
@@ -114,6 +115,7 @@ aidc sync-sessions [claude|codex|opencode|grok|omp|all]
 aidc sbom
 aidc licenses [--fail]
 aidc scan [--all|--staged|paths...] [--json]
+aidc ci [--list|--workflow <glob>|--job <id>|--all|--strict|-- ...]
 aidc doctor
 aidc insights [--since DATE]
 aidc update
