@@ -193,7 +193,7 @@ Usage:
   aidc cursor
   aidc sync-claude-aliases
   aidc sync-config <claude|codex|opencode|grok|omp|cursor|all>
-  aidc sync-sessions [claude|codex|opencode|grok|omp|all]
+  aidc sync-sessions [claude|codex|opencode|grok|omp|rtk|all]
   aidc sbom [-- ...]
   aidc licenses [--fail] [-- ...]
   aidc scan [--all|--staged|paths...] [--json]
@@ -244,6 +244,19 @@ Notes:
     first, so it is never overwritten (needs sqlite3 on the host; opt out with
     AIDC_OPENCODE_MERGE_TO_BASE=0). Sessions also auto-sync on container start,
     agent exit, 'down', and 'destroy' unless AIDC_AUTO_SYNC_SESSIONS=0.
+  - rtk token-savings tracking: every rtk-wired agent (claude, opencode,
+    cursor-agent — plus omp experimentally) records into one shared
+    ~/.local/share/rtk/history.db, which lives on the rtk_data volume so it
+    survives rebuilds and is synced/merged into the host's OWN rtk db on every
+    auto-sync — a plain host `rtk gain` (or `rtk gain -p <workspace>`) then
+    shows combined host+container savings. Claude sessions print a one-line
+    gain summary at session end (AIDC_RTK_SESSION_END_HOOK=0 disables). Other
+    knobs: AIDC_RTK_OMP_EXTENSION=0 drops omp's extension,
+    AIDC_RTK_MERGE_TO_BASE=0 keeps savings only in the per-project quarantine
+    (~/.local/share/aidc/rtk/<repo>/), AIDC_RTK_DB overrides the host db
+    (default: first existing of ~/.local/share/rtk/history.db or
+    ~/Library/Application Support/rtk/history.db). codex and grok have no rtk
+    integration upstream. See docs/security.md for the full matrix.
   - The host-clipboard bridge is off by default. Enable it at (re)create time
     with 'aidc up --clipboard' or 'aidc rebuild --clipboard'.
   - Per-project VM isolation is off by default due to resource cost. Enable it

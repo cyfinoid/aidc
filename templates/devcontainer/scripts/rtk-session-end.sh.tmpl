@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# aidc-managed
+# Claude Code SessionEnd hook: surface rtk's token savings when a session ends.
+#
+# Claude Code swallows SessionEnd-hook stdout (debug log only) and hooks run
+# without a controlling terminal (/dev/tty is unavailable), so the ONLY
+# documented channel that reaches the user at session end is exiting 2 with
+# the message on stderr — SessionEnd cannot block the exit
+# (code.claude.com/docs/en/hooks, "Exit code 2 behavior per event").
+#
+# This hook is display-only: rtk's history.db IS the record, and
+# 'aidc sync-sessions' merges it into the host's own rtk data. It must stay
+# fast (SessionEnd hooks get a 1.5 s budget by default; rtk gain ~10 ms) and
+# fail open — a reporting hook must never make the agent unusable.
+#
+# Knob: AIDC_RTK_SESSION_END_HOOK (project.env / config.env), default 1.
+set -uo pipefail
+
+WS="${AIDC_RTK_HOOK_WORKSPACE:-${AIDC_SCAN_HOOK_WORKSPACE:-/workspace}}"
+
+# Knob (sourced from the project env like the rest of the container config).
+if [[ -f "$WS/.ai-container/project.env" ]]; then
+  # shellcheck disable=SC1091
+  . "$WS/.ai-container/project.env" 2>/dev/null || true
+fi
+[[ "${AIDC_RTK_SESSION_END_HOOK:-1}" == "1" ]] || exit 0
+
+command -v rtk >/dev/null 2>&1 || exit 0
+
+# Drain the hook payload (session_id/cwd/reason) — nothing here needs it.
+cat >/dev/null 2>&1 || true
+
+gain="$(rtk gain -f json 2>/dev/null)" || exit 0
+
+# Fixed output shape from the pinned rtk build:
+# {"summary":{"total_commands":N,"total_input":N,"total_output":N,
+#             "total_saved":N,"avg_savings_pct":F,...}}
+saved="$(printf '%s' "$gain" | grep -o '"total_saved":[0-9]*' | head -1 | cut -d: -f2)"
+cmds="$(printf '%s' "$gain" | grep -o '"total_commands":[0-9]*' | head -1 | cut -d: -f2)"
+pct="$(printf '%s' "$gain" | grep -o '"avg_savings_pct":[0-9]*' | head -1 | cut -d: -f2)"
+[[ "$saved" =~ ^[0-9]+$ ]] || exit 0
+[[ "$cmds" =~ ^[0-9]+$ ]] || cmds=0
+[[ "$pct" =~ ^[0-9]+$ ]] || pct=0
+
+{
+  printf 'rtk: %s tokens saved (%s%%) over %s commands' "$saved" "$pct" "$cmds"
+  printf ' — all-time in this container; merged to host on sync\n'
+} >&2
+exit 2

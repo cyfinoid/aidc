@@ -72,7 +72,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 - seeds non-negotiable guidance into `CLAUDE.md` / `AGENTS.md` for every project — security guardrails, test-coverage discipline, and changelog/session-log conventions
 - seeds committed project docs once, never overwriting your edits — `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and a `logs/` session journal
 - auto-syncs in-container agent session transcripts back to the host on container start and exit, so the host's `/insights` stays current
-- ships SafeDep's `pmg` / `vet` for supply-chain interception and `rtk` for token-saving CLI proxying
+- ships SafeDep's `pmg` / `vet` for supply-chain interception and `rtk` for token-saving CLI proxying — rtk is wired into every agent it supports (claude, opencode, cursor-agent, omp experimentally), prints a savings summary when a Claude session ends, persists its history across rebuilds, and merges container savings into the host's own rtk db so a plain host `rtk gain` shows the combined total
 - offers an opt-in default-deny egress firewall with a sane allowlist
 
 ## Documentation

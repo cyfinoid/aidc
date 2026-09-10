@@ -22,8 +22,8 @@ aidc::cmd_sync_sessions() {
   aidc::ensure_container_running "$workspace"
 
   case "$tool" in
-    claude|codex|opencode|grok|omp|all) ;;
-    *) aidc::die "usage: aidc sync-sessions [claude|codex|opencode|grok|omp|all]" ;;
+    claude|codex|opencode|grok|omp|rtk|all) ;;
+    *) aidc::die "usage: aidc sync-sessions [claude|codex|opencode|grok|omp|rtk|all]" ;;
   esac
 
   if [[ "$tool" == "all" ]]; then
@@ -32,6 +32,7 @@ aidc::cmd_sync_sessions() {
     aidc::sync_session_tool "$workspace" opencode
     aidc::sync_session_tool "$workspace" grok
     aidc::sync_session_tool "$workspace" omp
+    aidc::sync_session_tool "$workspace" rtk
   else
     aidc::sync_session_tool "$workspace" "$tool"
   fi
@@ -97,6 +98,19 @@ aidc::sync_session_tool() {
       container_src="/home/vscode/.omp/agent/sessions"
       host_dst="$HOME/.omp/agent/sessions"
       ;;
+    rtk)
+      # rtk's savings history: one SQLite db in the XDG data dir, shared by
+      # every rtk-wired agent (claude hook, opencode plugin, cursor hooks.json,
+      # omp extension). Copied to an aidc-owned quarantine first and merged
+      # into the host's OWN rtk db afterwards (aidc::rtk_merge_to_base below) —
+      # never extracted over the host's data dir, whose db sits at the same
+      # path. tee/ holds raw command-output logs: bulky, not savings data.
+      container_src="/home/vscode/.local/share/rtk"
+      host_dst="$HOME/.local/share/aidc/rtk/$(aidc::repo_slug "${workspace:-/workspace}")"
+      src_excludes=(--exclude=./tee)
+      gate=(test -f "$container_src/history.db")
+      gate_desc="no rtk history.db in $container_src"
+      ;;
     *)
       aidc::die "unknown session tool: $tool"
       ;;
@@ -140,6 +154,13 @@ aidc::sync_session_tool() {
   # merge is additive and never overwrites host data — see the function.
   if [[ "$tool" == "opencode" ]]; then
     aidc::opencode_merge_to_base "$workspace" "$host_dst"
+  fi
+
+  # rtk's quarantined history is likewise merged into the host's OWN rtk db so
+  # a plain host `rtk gain` reflects container savings — additive, never
+  # overwriting host data (see the function).
+  if [[ "$tool" == "rtk" ]]; then
+    aidc::rtk_merge_to_base "$workspace" "$host_dst"
   fi
 }
 
@@ -370,6 +391,181 @@ DETACH DATABASE aidc_src;
   "$sqlite" "$dst" "$sql" >/dev/null 2>&1
 }
 
+# ── rtk savings merge ──
+#
+# Merge the quarantined container copy of rtk's history.db (in $quarantine)
+# into the host's OWN rtk db, so a plain host `rtk gain` reflects what rtk
+# saved inside aidc containers. Same safety posture as the opencode merge,
+# with one structural difference: rtk's tables use `id INTEGER PRIMARY KEY`
+# (rowid) on every table, so — unlike opencode's UUID-keyed rows — ids can
+# NEVER be carried over (the host already owns ids 1..N; INSERT OR IGNORE by
+# pk would silently drop every container row). Instead rows are inserted
+# WITHOUT the id (the host assigns fresh rowids) and re-merges are made
+# idempotent by natural keys, which rtk's nanosecond-precision timestamps
+# make tight:
+#   commands      → (timestamp, original_cmd)
+#   parse_failures→ (timestamp, raw_command)
+#   hook_decisions→ (session_id, tool_use_id)
+# Identical rows can at worst collapse indistinguishable duplicates — an
+# undercount of zero information. Everything else mirrors opencode: work on a
+# private copy, path-rewrite /workspace to the host workspace (stable dedupe
+# + host `rtk gain -p <workspace>` works), schema-subset gate, VACUUM INTO
+# snapshot for rollback, one transaction with busy_timeout. Degrades to
+# quarantine-only on any doubt. Opt out with AIDC_RTK_MERGE_TO_BASE=0;
+# override the host db with AIDC_RTK_DB; override sqlite3 with AIDC_SQLITE3.
+
+# Resolve the host's own rtk history.db: explicit override, else the first
+# existing candidate across the layouts rtk uses (XDG data dir on Linux,
+# Application Support on macOS), else the XDG path — used to create the db
+# wholesale when the host runs no rtk of its own yet.
+aidc::rtk_resolve_host_db() {
+  if [[ -n "${AIDC_RTK_DB:-}" ]]; then
+    printf '%s\n' "$AIDC_RTK_DB"
+    return 0
+  fi
+  local d
+  for d in "${XDG_DATA_HOME:-$HOME/.local/share}/rtk" "$HOME/Library/Application Support/rtk"; do
+    if [[ -f "$d/history.db" ]]; then
+      printf '%s\n' "$d/history.db"
+      return 0
+    fi
+  done
+  printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/rtk/history.db"
+}
+
+aidc::rtk_merge_to_base() {
+  local workspace="$1"
+  local quarantine="$2"
+  [[ "${AIDC_RTK_MERGE_TO_BASE:-1}" == "0" ]] && return 0
+
+  local qdb="$quarantine/history.db"
+  [[ -f "$qdb" ]] || return 0
+
+  local bdb
+  bdb="$(aidc::rtk_resolve_host_db)"
+
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  if ! command -v "$sqlite" >/dev/null 2>&1; then
+    aidc::log "sqlite3 not on host; rtk savings kept at $quarantine (install sqlite3 to merge into $bdb)"
+    return 0
+  fi
+
+  # Work on a private copy so the host db only ever receives path-corrected
+  # rows, and a failed merge never disturbs the quarantine copy people inspect.
+  local mdb="$quarantine/.rtk.merge.db"
+  rm -f "$mdb"
+  if ! cp "$qdb" "$mdb" 2>/dev/null; then
+    aidc::warn "could not stage rtk history.db for merge (kept at $quarantine)"
+    return 0
+  fi
+  if [[ -n "$workspace" && "$workspace" != "/workspace" ]]; then
+    aidc::rtk_db_rewrite_paths "$mdb" "$workspace"
+  fi
+
+  mkdir -p "$(dirname "$bdb")"
+
+  # Host has no rtk data yet → nothing to merge into; install our copy
+  # wholesale (a future host rtk install picks the db up at the same path).
+  if [[ ! -f "$bdb" ]]; then
+    if cp "$mdb" "$bdb" 2>/dev/null; then
+      aidc::log "created $bdb from container rtk savings"
+    else
+      aidc::warn "could not create $bdb (rtk savings kept at $quarantine)"
+    fi
+    rm -f "$mdb"
+    return 0
+  fi
+
+  # A container db from an rtk build with extra per-table columns makes a row
+  # merge unsafe — skip rather than risk a partial insert. The schema check is
+  # generic SQLite (name:type subsets); rtk carries no migration journal, so
+  # the opencode epoch clause inside it is inert here.
+  if ! aidc::opencode_db_schema_match "$mdb" "$bdb"; then
+    aidc::log "rtk history.db schema not merge-compatible (container rtk newer than host, or column/type drift); skipping merge (savings kept at $quarantine)"
+    rm -f "$mdb"
+    return 0
+  fi
+
+  # Snapshot the host db first (VACUUM INTO = consistent copy + implicit
+  # lock/readability probe). Restored verbatim if the merge somehow fails.
+  local bak="$bdb.aidc-bak"
+  rm -f "$bak"
+  local bak_sql="${bak//\'/\'\'}"
+  if ! "$sqlite" "$bdb" "PRAGMA busy_timeout=3000; VACUUM INTO '$bak_sql';" >/dev/null 2>&1; then
+    aidc::log "host rtk history.db busy or unreadable; skipping merge (savings kept at $quarantine)"
+    rm -f "$mdb" "$bak"
+    return 0
+  fi
+
+  if aidc::rtk_db_merge "$mdb" "$bdb"; then
+    aidc::log "merged rtk savings into $bdb"
+    rm -f "$bak"
+  else
+    mv -f "$bak" "$bdb" 2>/dev/null || true
+    aidc::warn "rtk history.db merge failed and was rolled back; savings kept at $quarantine"
+  fi
+  rm -f "$mdb"
+}
+
+# Rewrite the in-container mount root (/workspace) to the host workspace inside
+# a db copy. rtk records the cwd in commands.project_path and
+# hook_decisions.project_path; rewriting mirrors the *.json/*.jsonl sed the
+# sync runs for transcripts.
+aidc::rtk_db_rewrite_paths() {
+  local db="$1"
+  local ws="$2"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  local ws_sql="${ws//\'/\'\'}"
+  "$sqlite" "$db" \
+    "UPDATE commands SET project_path=replace(project_path,'/workspace','$ws_sql') WHERE project_path LIKE '%/workspace%';
+UPDATE hook_decisions SET project_path=replace(project_path,'/workspace','$ws_sql') WHERE project_path LIKE '%/workspace%';" \
+    >/dev/null 2>&1 || true
+}
+
+# Natural dedupe key of one rtk table, as a WHERE clause comparing host alias
+# h against source alias s. Unknown/future tables return empty → skipped.
+aidc::rtk_db_natural_key() {
+  case "$1" in
+    commands) printf 'h.timestamp=s.timestamp AND h.original_cmd=s.original_cmd' ;;
+    parse_failures) printf 'h.timestamp=s.timestamp AND h.raw_command=s.raw_command' ;;
+    hook_decisions) printf 'h.session_id=s.session_id AND h.tool_use_id=s.tool_use_id' ;;
+  esac
+}
+
+# Additively merge every shared table from src into dst. Rows are inserted by
+# column NAME minus id (host assigns fresh rowids — see the block comment
+# above for why ids must not travel), skipping rows whose natural key already
+# exists in the host. One transaction, busy_timeout as SQL. Returns non-zero
+# on any SQLite error.
+aidc::rtk_db_merge() {
+  local src="$1"
+  local dst="$2"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  local src_sql="${src//\'/\'\'}"
+  local sql t collist natkey
+  sql="PRAGMA busy_timeout=5000;
+ATTACH DATABASE '$src_sql' AS aidc_src;
+BEGIN IMMEDIATE;
+"
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    # Only merge tables the source db also has, with a known natural key.
+    [[ -n "$(aidc::rtk_db_natural_key "$t")" ]] || continue
+    [[ -n "$("$sqlite" "$src" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
+    # The schema gate guarantees every source column exists in the destination,
+    # so the source's column list (minus id) is the shared intersection.
+    collist="$("$sqlite" "$src" "SELECT group_concat('\"' || name || '\"', ',') FROM (SELECT name FROM pragma_table_info('${t//\'/\'\'}') WHERE name != 'id' ORDER BY cid);" 2>/dev/null)"
+    [[ -n "$collist" ]] || continue
+    natkey="$(aidc::rtk_db_natural_key "$t")"
+    sql+="INSERT INTO \"$t\" ($collist) SELECT $collist FROM aidc_src.\"$t\" AS s WHERE NOT EXISTS (SELECT 1 FROM main.\"$t\" AS h WHERE $natkey);
+"
+  done < <(aidc::opencode_db_tables "$dst")
+  sql+="COMMIT;
+DETACH DATABASE aidc_src;
+"
+  "$sqlite" "$dst" "$sql" >/dev/null 2>&1
+}
+
 # Best-effort session sync wired into the agent/lifecycle paths so transcripts
 # land on the host without a manual 'aidc sync-sessions'. Opt out by setting
 # AIDC_AUTO_SYNC_SESSIONS=0 in .ai-container/project.env. 'tool' is a single
@@ -385,7 +581,7 @@ aidc::auto_sync_sessions() {
 
   if [[ "$tool" == "all" ]]; then
     local t
-    for t in claude codex opencode grok omp; do
+    for t in claude codex opencode grok omp rtk; do
       aidc::sync_session_tool "$workspace" "$t" || true
     done
     return 0
@@ -397,6 +593,14 @@ aidc::auto_sync_sessions() {
       ;;
     *)
       # cursor-agent and unknowns have no session volume to sync.
+      ;;
+  esac
+
+  # rtk's savings history is one shared db per container, so it rides along
+  # with the syncs of the agents rtk is wired into (claude/opencode/cursor).
+  case "$tool" in
+    claude|opencode|cursor-agent)
+      aidc::sync_session_tool "$workspace" rtk || true
       ;;
   esac
 }

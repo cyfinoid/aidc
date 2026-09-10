@@ -573,7 +573,17 @@ aidc::run_tool() {
     omp)
       # omp (oh-my-pi) defaults to the "yolo" approval mode (auto-allow), so it
       # runs non-interactively in the container with no extra flag, like grok.
-      command=("omp")
+      # rtk filtering: omp is a pi fork that loads pi extensions when handed
+      # them explicitly; the bootstrap installs rtk's pi extension at
+      # ~/.omp/agent/extensions/rtk.ts and this wrapper loads it when present.
+      # Experimental (load-path verified only) — opt out with
+      # AIDC_RTK_OMP_EXTENSION=0 in project.env, which drops the flag.
+      if [[ "${AIDC_RTK_OMP_EXTENSION:-1}" == "1" ]]; then
+        command=(bash -c 'ext="$HOME/.omp/agent/extensions/rtk.ts"; if [[ -f "$ext" ]]; then exec omp --extension "$ext" "$@"; fi; exec omp "$@"' \
+                 omp-launch)
+      else
+        command=("omp")
+      fi
       ;;
     cursor-agent)
       command=("cursor-agent" "--sandbox" "disabled" "-f")

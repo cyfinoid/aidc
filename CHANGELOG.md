@@ -4,6 +4,14 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+
+- **rtk token savings: printed at session end, persisted across rebuilds, and merged into the host's own rtk data.** rtk is now wired into every agent it supports — not just claude: **opencode** (plugin, re-installed after the sync-mode plugins seeding that would wipe it), **cursor-agent** (`~/.cursor/hooks.json`, with a pre-create working around rtk 0.48.0's missing-mkdir bug), and **omp** experimentally (no rtk target exists; the pi extension is placed at `~/.omp/agent/extensions/rtk.ts` and passed via `--extension` at launch, `AIDC_RTK_OMP_EXTENSION=0` to drop). codex/grok have no rtk integration upstream (documented). All wired agents record into one shared `~/.local/share/rtk/history.db`, now on a named `rtk_data` volume so history survives `aidc rebuild`. Claude sessions print a one-line gain summary at SessionEnd (`rtk: N tokens saved (P%) over M commands — all-time in this container; merged to host on sync`) via the only display channel Claude Code offers there (exit 2 + stderr); the reporter is display-only and fail-open (`AIDC_RTK_SESSION_END_HOOK=0` disables). Every auto-sync point now also quarantines the container db to `~/.local/share/aidc/rtk/<repo>/` (minus `tee/` logs) and **additively merges it into the host's own rtk db** — the opencode merge model adapted for rtk's rowid tables: ids are never carried (the host owns them), idempotence comes from natural keys (nanosecond timestamp + command; session/tool ids), `/workspace` is path-rewritten, and the host db is schema-gated + snapshotted with rollback — so a plain host `rtk gain` shows combined host+container savings and `rtk gain -p <workspace>` works per project. Knobs: `AIDC_RTK_MERGE_TO_BASE=0`, `AIDC_RTK_DB`, `AIDC_SQLITE3`; `aidc sync-sessions` accepts `rtk`. The base image now ships the `sqlite3` CLI. Covered by `tests/rtk-gain.test.sh`.
+
+### Fixed
+
+- **`@RTK.md` import in the seeded `CLAUDE.md` silently no-opped in-container.** The host `~/.claude/CLAUDE.md` imports rtk's usage reference via `@RTK.md`, but `sync_claude` never seeded `RTK.md` from the host — so the model never saw the rtk command reference (the PreToolUse hook still rewrote commands mechanically, but guidance like "prefer rtk git log" was invisible). `RTK.md` is now seeded alongside `CLAUDE.md`.
+
 ## [2.0.1] - 2026-09-09
 
 ### Fixed

@@ -8,6 +8,105 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-10 — rtk savings: session-end print, all-agent wiring, host-db merge
+
+**Summary:** Made rtk's token savings visible and durable. Claude sessions now
+print a one-line gain summary at session end; rtk is wired into every agent it
+supports (opencode, cursor-agent, omp experimentally — previously claude only);
+its history lives on a named volume so it survives rebuilds; and every sync
+point merges the container's savings into the **host's own rtk db**, so a plain
+host `rtk gain` shows combined host+container totals (the user's explicit
+direction: same model as the opencode session merge, no separate aidc
+aggregator). Also fixed the seeded `CLAUDE.md`'s `@RTK.md` import silently
+no-opping because `RTK.md` was never seeded.
+
+**Why:** savings were invisible (nobody runs `rtk gain` by hand), ephemeral
+(`~/.local/share/rtk` sat in the container layer — every `aidc rebuild` wiped
+the numbers), claude-only (opencode/cursor/omp users got no rtk at all), and
+unqueryable from the host (the whole point of the numbers).
+
+**Session-end display mechanism (docs-researched):** Claude Code swallows
+SessionEnd-hook stdout (debug log only) and hooks run with no controlling
+terminal (`/dev/tty` unavailable). The only documented channel that reaches
+the user is **exit 2 with the message on stderr** ("Shows stderr to user only";
+SessionEnd cannot block the exit). The reporter
+(`templates/devcontainer/scripts/rtk-session-end.sh`, 0755, seeded into
+`settings.json` by a new idempotent `ensure_rtk_session_end_settings` patcher)
+therefore prints `rtk: 665 tokens saved (59%) over 9 commands — all-time in
+this container; merged to host on sync` to stderr and exits 2. Display-only
+and fail-open: missing rtk / unparseable `rtk gain -f json` / knob off
+(`AIDC_RTK_SESSION_END_HOOK=0`, which also removes the settings entry) →
+silent exit 0. `rtk gain` costs ~10 ms against the 1.5 s SessionEnd budget.
+
+**Agent matrix (empirically verified against pinned rtk 0.48.0):**
+
+| agent | wiring | notes |
+|---|---|---|
+| claude | existing hook + new SessionEnd reporter | `install_agent_hooks` untouched |
+| opencode | `rtk init --opencode` → `~/.config/opencode/plugins/rtk.ts` | called AFTER the plugins seeding (sync-mode `rsync --delete` would wipe a plugin installed before it; the call repairs the wipe on every init/sync) |
+| cursor-agent | `rtk init --agent cursor` → `~/.cursor/hooks.json` | **rtk 0.48.0 bug**: init writes tmp+rename without creating `~/.cursor` first and exits 1 — bootstrap pre-creates the dir |
+| omp | experimental: pi extension at `~/.omp/agent/extensions/rtk.ts`, loaded via `omp --extension` (launch guard in `run_tool`) | rtk has no omp target; omp is a pi fork that still loads pi extensions. Loads verified on the help path only; knob `AIDC_RTK_OMP_EXTENSION=0`. Generator runs under a temp HOME with `env -u CLAUDE_CONFIG_DIR` — rtk honors that var over HOME and would otherwise write into the real `~/.claude` (observed live during probing) |
+| codex, grok | none | `--agent codex|grok` is an invalid value upstream; documented only |
+
+All wired agents record into the same `~/.local/share/rtk/history.db`, so one
+sync covers everything.
+
+**Persistence + sync + merge:**
+
+- `compose.yaml.tmpl` gains a named `rtk_data` volume at
+  `/home/vscode/.local/share/rtk` (effective on next recreate; wiped by
+  `aidc destroy` like the other volumes — fresh nanosecond timestamps mean
+  post-reset merges never false-dedupe).
+- `sync_session_tool` gains an `rtk` case: tars the container dir into the
+  per-project quarantine `~/.local/share/aidc/rtk/<repo>/` excluding `tee/`
+  output logs, gated on `history.db` existing. `auto_sync_sessions` pulls it
+  for `all` and piggybacks on claude/opencode/cursor-agent syncs.
+- `aidc::rtk_merge_to_base` (host side, the opencode merge adapted): rtk's
+  tables are rowid-keyed (`id INTEGER PRIMARY KEY`), so unlike opencode's
+  UUID rows **ids can never travel** — `INSERT OR IGNORE` by pk would silently
+  drop every container row. Rows are inserted *without* id (host assigns fresh
+  rowids); idempotence via natural keys (`commands`/`parse_failures`:
+  timestamp+command, `hook_decisions`: session_id+tool_use_id — ns-precision
+  timestamps make these tight). `/workspace` → host workspace rewritten in
+  `project_path` on a private copy (stable dedupe + host `rtk gain -p` works).
+  Safety: schema-subset gate (reuses `aidc::opencode_db_schema_match`; rtk
+  has no migration journal so the epoch clause is inert), `VACUUM INTO`
+  snapshot + verbatim rollback, one transaction with `busy_timeout`. No host
+  db yet → wholesale install at the resolved path (a future host rtk picks it
+  up). Degrades to quarantine-only on no-sqlite3/drift/busy. Knobs:
+  `AIDC_RTK_MERGE_TO_BASE=0`, `AIDC_RTK_DB`, `AIDC_SQLITE3`.
+- Base image ships the `sqlite3` CLI (user-approved install) so merge logic is
+  developable/testable with the same binary hosts use.
+
+**Files touched:** new `templates/devcontainer/scripts/rtk-session-end.sh.tmpl`
+(+ both `common.sh` maps); `bootstrap-state.sh.tmpl` (patcher, RTK.md seed,
+`wire_rtk_opencode/cursor/omp`); `compose.yaml.tmpl` (volume);
+`Dockerfile.base.tmpl` (sqlite3); `lib/aidc/sync.sh` (rtk sync case + merge
+functions + auto-sync piggyback); `lib/aidc/runtime.sh` (omp `--extension`
+launch guard); `lib/aidc.sh` / `completions/aidc.bash` (usage + notes);
+`docs/security.md` (full rtk section rewrite); `README.md`.
+New `tests/rtk-gain.test.sh` (26 cases) + CI step in
+`.github/workflows/shellcheck.yml`.
+
+**Commands run:** `bash tests/rtk-gain.test.sh` (26/26), sibling suites
+(`scan-hook` 14/14, `sync-sessions` 21/21, `cli-errors` 8/8, `compose-up`
+8/8, `agents-opt-in` 2/2), `shellcheck` clean on new/changed files at CI
+severity, `.github/scripts/check-module-deps.sh` OK, `aidc-scan` (see session
+log).
+
+**Verification notes:** merge live-verified with fixture dbs before writing
+the tests (host 3 rows + container 2 rows with colliding integer ids → 5 rows
+after merge, none dropped; re-merge no-op; path rewrite correct). The omp
+launch guard verified with and without the extension file. **Follow-up
+pending:** host end-to-end after the next `aidc rebuild` (volume attaches,
+hook wires, real merges into the host's rtk db) and one real `aidc omp`
+session to confirm the extension behaves (currently help-path-verified only).
+
+**Rollback:** revert the commit; the settings patcher self-heals (removes the
+SessionEnd entry when the script is absent), the quarantine dir is inert, and
+merged rows in the host db are ordinary rtk rows (deletable by
+`project_path` if ever wanted). `rtk_data` can be `docker volume rm`'d.
+
 ## 2026-09-09 — v2.0.1: pin refresh (all tools/agents), update-pins template-path fix, version 0.2.0 → 2.0.1
 
 **Summary:** Refreshed every version + SHA256 pin in the shared base-image

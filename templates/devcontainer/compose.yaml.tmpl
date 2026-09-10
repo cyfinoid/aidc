@@ -119,6 +119,13 @@ services:
       - type: volume
         source: omp_home
         target: /home/vscode/.omp
+      # rtk's savings history (history.db — the record every rtk-wired agent
+      # appends to). Without a volume it lives in the container layer and every
+      # recreation wipes the stats; 'aidc sync-sessions' still merges whatever
+      # accumulated to the host before that.
+      - type: volume
+        source: rtk_data
+        target: /home/vscode/.local/share/rtk
       # Shared read-only toolchain store (issue #9): one copy of Go/Rust/JDK
       # (+ gosec/cargo-audit) serves all projects, populated by
       # 'aidc tools install'. Read-only so agents can't tamper with the shared
@@ -142,3 +149,4 @@ volumes:
   cursor_agent_home:
   grok_home:
   omp_home:
+  rtk_data:

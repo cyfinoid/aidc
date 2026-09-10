@@ -391,8 +391,50 @@ Verify:
 ```bash
 aidc exec -- rtk --version
 aidc exec -- rtk gain                                                     # token savings so far
-aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # just the rtk PreToolUse/Bash hook
+aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # rtk PreToolUse/Bash + SessionEnd reporter + aidc Stop hook
 ```
+
+### Which agents get rtk
+
+rtk supports some but not all of the agents aidc ships. Wiring is verified per target against the pinned rtk build and re-applied on every init/sync-config (idempotent), so it self-heals:
+
+| agent | rtk wiring | mechanism |
+|---|---|---|
+| claude | yes | PreToolUse/Bash hook (above) + SessionEnd reporter (below) |
+| opencode | yes | `rtk init --opencode` → `~/.config/opencode/plugins/rtk.ts`; re-installed after the sync-mode plugins seeding (which rsync-deletes it) |
+| cursor-agent | yes | `rtk init --agent cursor` → `~/.cursor/hooks.json` (preToolUse, matcher Shell). rtk 0.48.0 has a mkdir bug — the bootstrap pre-creates `~/.cursor` or init exits 1 |
+| omp | **experimental** | rtk has no omp target; the pi extension (`rtk init --agent pi` → `rtk.ts`) is placed at `~/.omp/agent/extensions/rtk.ts` and passed to omp via `--extension` at launch (loads verified on the help path; real-session behavior pending) |
+| codex, grok | no | rtk upstream has no integration (`--agent codex|grok` is an invalid value) |
+
+All wired agents record into one shared `~/.local/share/rtk/history.db`.
+
+### Session-end reporter (claude)
+
+Claude Code swallows SessionEnd-hook stdout and hooks run without a controlling terminal, so the reporter (`scripts/rtk-session-end.sh`, seeded into `settings.json`) prints one line via the only documented display channel — exit 2 with stderr:
+
+```
+rtk: 665 tokens saved (59%) over 9 commands — all-time in this container; merged to host on sync
+```
+
+It is display-only, fail-open (missing rtk, unparseable gain, knob off → silent exit 0), and fast (`rtk gain` ~10 ms against the 1.5 s SessionEnd budget). Set `AIDC_RTK_SESSION_END_HOOK=0` in `.ai-container/project.env` to disable both the print and the settings entry.
+
+### Persistence and host-side merge
+
+`~/.local/share/rtk` lives on the named `rtk_data` volume, so history survives `aidc rebuild` (and is wiped by `aidc destroy`, matching the other volumes). On every auto-sync point (container start, agent exit, `up`/`rebuild`/`down`/`destroy`) — and on `aidc sync-sessions rtk` — the container db is pulled into the per-project quarantine `~/.local/share/aidc/rtk/<repo>/` (the `tee/` output logs are excluded) and then merged into the host's **own** rtk db, so a plain host `rtk gain` shows combined host+container savings and `rtk gain -p <workspace>` works per project.
+
+The merge is additive and never lets container data damage host data:
+
+- rtk's tables key rows by `id INTEGER PRIMARY KEY` (rowid) that the host already owns, so ids are **never carried over** — rows are inserted without id and the host assigns fresh rowids. (The opencode merge's `INSERT OR IGNORE` trick would silently drop every container row here.)
+- Re-merges are idempotent via natural keys (`commands`/`parse_failures`: timestamp + command; `hook_decisions`: session_id + tool_use_id — rtk's nanosecond timestamps make these tight).
+- `/workspace` in `project_path` is rewritten to the host workspace on a private copy before merging.
+- The host db is snapshotted (`VACUUM INTO`) before the single-transaction merge and restored verbatim on failure; a schema mismatch (container rtk newer than host) or a busy db skips the merge and keeps the quarantine copy.
+- When the host runs no rtk of its own yet, the container db is installed wholesale at the host's default rtk path — a later host rtk install picks it up.
+
+Knobs: `AIDC_RTK_MERGE_TO_BASE=0` keeps savings only in the quarantine; `AIDC_RTK_DB` overrides the host db path; `AIDC_SQLITE3` overrides the sqlite3 binary (sqlite3 must exist on the host to merge — quarantine-only otherwise). The container image also ships the `sqlite3` CLI so the merge logic is developable/testable with the same binary the host uses.
+
+### RTK.md seeding
+
+The host `~/.claude/CLAUDE.md` imports rtk's usage reference via `@RTK.md`. `sync_claude` now seeds `RTK.md` from the host alongside `CLAUDE.md` — previously the import silently no-opped in-container, so the model never saw the rtk command reference (the PreToolUse hook still rewrote mechanically). The pi-extension generator runs with `CLAUDE_CONFIG_DIR` explicitly unset: rtk honors it over `HOME` and would otherwise write into the real `~/.claude`.
 
 ## Optional: egress firewall
 

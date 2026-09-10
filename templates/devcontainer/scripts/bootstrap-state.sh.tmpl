@@ -97,6 +97,59 @@ if changed:
 PY
 }
 
+# Wire rtk's SessionEnd reporter into Claude Code's settings.json: a hook that
+# prints the rtk token-savings summary when a session ends (via exit 2 + stderr
+# — the only display channel Claude Code offers at SessionEnd; see the script's
+# header). Added when AIDC_RTK_SESSION_END_HOOK=1 (default) AND the script
+# exists in the read-only scaffold overlay; removed when the knob is 0. Other
+# hooks are always preserved. Idempotent; safe to run on every init, which also
+# self-heals settings.json on volumes seeded by an older bootstrap.
+ensure_rtk_session_end_settings() {
+  local f="$1"
+  local script="${2:-/workspace/.devcontainer/scripts/rtk-session-end.sh}"
+  command -v python3 >/dev/null 2>&1 || return 0
+  local enforce="${AIDC_RTK_SESSION_END_HOOK:-1}"
+  [[ "$enforce" == "1" && ! -f "$script" ]] && enforce=0
+  AIDC_RTK_HOOK_ENFORCE="$enforce" AIDC_RTK_HOOK_SCRIPT="$script" python3 - "$f" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+enforce = os.environ.get("AIDC_RTK_HOOK_ENFORCE", "1") == "1"
+cmd = os.environ.get("AIDC_RTK_HOOK_SCRIPT", "/workspace/.devcontainer/scripts/rtk-session-end.sh")
+try:
+    cfg = json.load(open(p))
+except (FileNotFoundError, ValueError):
+    cfg = {}
+changed = False
+hooks = cfg.setdefault("hooks", {})
+events = hooks.setdefault("SessionEnd", [])
+have = any(
+    isinstance(e, dict)
+    and any(h.get("command") == cmd for h in e.get("hooks", []) if isinstance(h, dict))
+    for e in events if isinstance(e, dict)
+)
+if enforce and not have:
+    events.append({"hooks": [{"type": "command", "command": cmd}]})
+    changed = True
+elif not enforce and have:
+    for e in events:
+        if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+            kept = [h for h in e["hooks"] if not (isinstance(h, dict) and h.get("command") == cmd)]
+            if len(kept) != len(e["hooks"]):
+                e["hooks"] = kept
+                changed = True
+    hooks["SessionEnd"] = [e for e in events if not (isinstance(e, dict) and e.get("hooks") == [])]
+if not hooks.get("SessionEnd"):
+    hooks.pop("SessionEnd", None)
+if not cfg.get("hooks"):
+    cfg.pop("hooks", None)
+if changed:
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+PY
+  chmod 0600 "$f" 2>/dev/null || true
+}
+
 # Seed the aidc guardrail posture into Claude Code's settings.json:
 #   - a Stop hook running aidc-scan-hook.sh (mechanical enforcement of the
 #     "scan before done" guardrail) — added when AIDC_ENFORCE_SCAN_HOOK=1
@@ -155,11 +208,16 @@ sync_claude() {
   ensure_dir "$home_dir/.claude"
   copy_file_from_seed "/host-seed/claude/settings.json" "$home_dir/.claude/settings.json" "0600"
   copy_file_from_seed "/host-seed/claude/CLAUDE.md" "$home_dir/.claude/CLAUDE.md" "0644"
+  # The host's CLAUDE.md imports rtk's usage guidance via `@RTK.md`; without
+  # seeding the file the import silently no-ops and the model never sees the
+  # rtk command reference (the PreToolUse hook still rewrites mechanically).
+  copy_file_from_seed "/host-seed/claude/RTK.md" "$home_dir/.claude/RTK.md" "0644"
   # The host seed's settings.json carries hooks for host-only tools (gryph, cot);
   # they're pointless in the VM and cot would error on every fire. Strip just
   # those — rtk installs its own hook below and any user hooks are preserved.
   strip_host_hooks "$home_dir/.claude/settings.json"
   ensure_agent_guardrail_settings "$home_dir/.claude/settings.json"
+  ensure_rtk_session_end_settings "$home_dir/.claude/settings.json"
 }
 
 sync_codex() {
@@ -180,6 +238,11 @@ sync_opencode() {
   # opencode_data_home volume) so a host `opencode auth login` is inherited.
   ensure_dir "$home_dir/.local/share/opencode"
   copy_file_from_seed "/host-seed/opencode-data/auth.json" "$home_dir/.local/share/opencode/auth.json" "0600"
+  # rtk ships an opencode plugin (~/.config/opencode/plugins/rtk.ts). Install
+  # AFTER the plugins seeding: copy_dir_from_seed rsync --deletes in sync mode,
+  # which would wipe a plugin installed before it. Idempotent, so this repairs
+  # the wipe on every init/sync.
+  wire_rtk_opencode
 }
 
 sync_grok() {
@@ -200,6 +263,47 @@ sync_omp() {
   # ~/.omp/agent/sessions and persist via the omp_home volume (not seeded here).
   copy_file_from_seed "/host-seed/omp/agent/config.yml" "$home_dir/.omp/agent/config.yml" "0600"
   copy_file_from_seed "/host-seed/omp/agent/agent.db" "$home_dir/.omp/agent/agent.db" "0600"
+  wire_rtk_omp
+}
+
+# rtk wiring for the non-claude agents rtk supports (coverage matrix in
+# docs/security.md: claude via rtk init in install_agent_hooks, opencode plugin,
+# cursor hooks.json, omp via rtk's pi extension; codex/grok unsupported
+# upstream). All no-ops without rtk (slim builds) and safe to re-run on every
+# init/sync — rtk init --auto-patch is idempotent.
+wire_rtk_opencode() {
+  command -v rtk >/dev/null 2>&1 || return 0
+  rtk init --global --auto-patch --hook-only --opencode >/dev/null 2>&1 \
+    || echo "[bootstrap] rtk init --opencode failed" >&2
+}
+
+wire_rtk_cursor() {
+  command -v rtk >/dev/null 2>&1 || return 0
+  # rtk 0.48.0 writes ~/.cursor/hooks.json tmp+rename style but never creates
+  # the directory first — pre-create it or init exits 1.
+  ensure_dir "$home_dir/.cursor"
+  rtk init --global --auto-patch --hook-only --agent cursor >/dev/null 2>&1 \
+    || echo "[bootstrap] rtk init --agent cursor failed" >&2
+}
+
+wire_rtk_omp() {
+  command -v rtk >/dev/null 2>&1 || return 0
+  # rtk has no omp target. omp is a pi fork that still loads pi extensions when
+  # given them explicitly (the launcher passes --extension; loads verified,
+  # real-session behavior pending — knob AIDC_RTK_OMP_EXTENSION). Generate the
+  # pi extension under a throwaway HOME, with CLAUDE_CONFIG_DIR unset: rtk
+  # honors it over HOME and would otherwise write into the real ~/.claude.
+  local dst="$home_dir/.omp/agent/extensions/rtk.ts"
+  local tmp
+  tmp="$(mktemp -d 2>/dev/null)" || return 0
+  if env -u CLAUDE_CONFIG_DIR HOME="$tmp" \
+       rtk init --global --auto-patch --hook-only --agent pi >/dev/null 2>&1 \
+     && [[ -f "$tmp/.pi/agent/extensions/rtk.ts" ]]; then
+    ensure_dir "$(dirname "$dst")"
+    cp "$tmp/.pi/agent/extensions/rtk.ts" "$dst" 2>/dev/null \
+      || echo "[bootstrap] could not install rtk omp extension" >&2
+  fi
+  rm -rf "$tmp"
 }
 
 sync_cursor() {
@@ -210,6 +314,7 @@ sync_cursor() {
   # authenticate with CURSOR_API_KEY (forwarded via AIDC_PASSTHROUGH_ENV_KEYS) —
   # see docs/security.md.
   copy_file_from_seed "/host-seed/cursor/cli-config.json" "$home_dir/.cursor/cli-config.json" "0600"
+  wire_rtk_cursor
 }
 
 sync_gitconfig_overlay() {

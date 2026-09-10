@@ -97,3 +97,6 @@ jobs:
           set -euo pipefail
           bash tests/scan-hook.test.sh
           bash tests/insights.test.sh
+
+      - name: Run rtk savings unit tests
+        run: bash tests/rtk-gain.test.sh

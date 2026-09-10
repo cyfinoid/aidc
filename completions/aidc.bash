@@ -52,7 +52,7 @@ _aidc() {
     sync-config)
       COMPREPLY=($(compgen -W "claude codex opencode grok omp cursor all" -- "$cur")) ;;
     sync-sessions)
-      COMPREPLY=($(compgen -W "claude codex opencode grok omp all" -- "$cur")) ;;
+      COMPREPLY=($(compgen -W "claude codex opencode grok omp rtk all" -- "$cur")) ;;
     claude)
       case "$prev" in
         --profile|--provider)
