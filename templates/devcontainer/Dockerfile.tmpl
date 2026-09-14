@@ -203,11 +203,13 @@ RUN pmg setup install \
 # volume mounted at ~/.grok at runtime cannot shadow it.
 RUN mkdir -p \
       /home/vscode/.local/bin \
+      /home/vscode/.local/share/rtk \
       /home/vscode/.claude \
       /home/vscode/.codex \
       /home/vscode/.config/opencode \
       /home/vscode/.cursor-agent \
       /home/vscode/.grok \
+    && chmod 0700 /home/vscode/.local/share/rtk \
     && curl -fsSL https://claude.ai/install.sh | bash \
     && curl -fsSL https://chatgpt.com/codex/install.sh | sh \
     && curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \

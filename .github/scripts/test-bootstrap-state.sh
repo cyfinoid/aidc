@@ -110,6 +110,48 @@ assert_eq "malformed file untouched" 'this is not json' "$(cat "$f5")"
 strip_host_hooks "$tmp/does-not-exist.json" && rc=0 || rc=$?
 assert_eq "missing file exits 0" '0' "$rc"
 
+# --- ensure_rtk_sandbox_write -----------------------------------------------
+rtk_dir="$tmp/rtk-data"
+
+# Case 7: empty settings gains sandbox.filesystem.allowWrite
+f7="$tmp/c7.json"
+printf '{}' >"$f7"
+ensure_rtk_sandbox_write "$f7" "$rtk_dir"
+assert_eq "empty settings gets allowWrite" "$rtk_dir" \
+  "$(jq -r '.sandbox.filesystem.allowWrite[0]' "$f7")"
+
+# Case 8: existing allowWrite entries are preserved, path appended
+f8="$tmp/c8.json"
+printf '{"sandbox":{"filesystem":{"allowWrite":["/tmp/build"]}}}' >"$f8"
+ensure_rtk_sandbox_write "$f8" "$rtk_dir"
+assert_eq "existing allowWrite preserved+appended" \
+  '["/tmp/build","'"$rtk_dir"'"]' \
+  "$(jq -c '.sandbox.filesystem.allowWrite' "$f8")"
+
+# Case 9: idempotent when the path is already listed
+cp "$f8" "$tmp/c8.once"
+ensure_rtk_sandbox_write "$f8" "$rtk_dir"
+if cmp -s "$tmp/c8.once" "$f8"; then
+  assert_eq "allowWrite idempotent" "same" "same"
+else
+  assert_eq "allowWrite idempotent" "same" "different"
+fi
+
+# Case 10: malformed JSON / missing file are no-ops
+f10="$tmp/c10.json"
+printf 'not json' >"$f10"
+ensure_rtk_sandbox_write "$f10" "$rtk_dir" && rc=0 || rc=$?
+assert_eq "sandbox patch malformed JSON exits 0" '0' "$rc"
+assert_eq "sandbox patch malformed file untouched" 'not json' "$(cat "$f10")"
+ensure_rtk_sandbox_write "$tmp/no-such-settings.json" "$rtk_dir" && rc=0 || rc=$?
+assert_eq "sandbox patch missing file exits 0" '0' "$rc"
+
+# Case 11: non-dict sandbox is left alone (don't clobber)
+f11="$tmp/c11.json"
+printf '{"sandbox":"off"}' >"$f11"
+ensure_rtk_sandbox_write "$f11" "$rtk_dir"
+assert_eq "non-dict sandbox untouched" '{"sandbox":"off"}' "$(cat "$f11")"
+
 echo
 echo "passed=$pass failed=$fail"
 [[ "$fail" -eq 0 ]] || exit 1

@@ -38,6 +38,7 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ### Fixed
 
+- **rtk tracking DB permission denied.** rtk 0.44.2+ pre-creates `~/.local/share/rtk/history.db` owner-only and now surfaces `Permission denied (os error 13)` instead of swallowing it. Bootstrap now (a) ensures that data dir exists `0700` and is owned by `vscode`, (b) adds it to Claude Code `sandbox.filesystem.allowWrite` so sandboxed `rtk` can write the DB, and (c) does not write the hook-installed marker when `rtk init` fails, so the next start retries. The image also `mkdir`s the dir at build time.
 - **RTK install path.** Dockerfile previously set `RTK_INSTALL_DIR=/usr/local/bin` on the wrong side of the pipe (`VAR=val cmd1 | cmd2` scopes `VAR` to `cmd1`), so the installer fell back to `$HOME/.local/bin` while running as root — the binary landed in `/root/.local/bin/rtk` and was invisible to the `vscode` user. Env var moved onto the `sh` side of the pipe.
 
 ### Removed

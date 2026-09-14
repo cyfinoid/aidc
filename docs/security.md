@@ -117,6 +117,13 @@ The image ships [`rtk`](https://github.com/rtk-ai/rtk) (Rust Token Killer — a 
 
 rtk is auto-initialised the first time a fresh `claude_home` volume is created: `bootstrap-state.sh init` runs `rtk init --global --auto-patch --hook-only` (non-interactive; installs just the hook, no `RTK.md`/`CLAUDE.md` rewrite since both are seeded from the host), then drops a marker at `~/.claude/.aidc-agent-hooks-installed` so it isn't rerun on every container restart. `aidc destroy -f` wipes the volume and the marker, so the next `aidc up` re-applies the hook cleanly.
 
+rtk's tracking DB lives at `~/.local/share/rtk/history.db`. From rtk 0.44.2 the binary pre-creates that file owner-only and **fails loud** if the open returns EACCES (previously the error was swallowed, so `rtk gain` just stayed at zero). Two aidc-specific causes:
+
+1. The data dir missing or not writable by `vscode` (the image now `mkdir`s it `0700` at build time; bootstrap also creates/chowns it on every start).
+2. Claude Code's sandbox `allowWrite` list does not include that path, so every sandboxed `rtk` call gets `Permission denied (os error 13)`. Bootstrap idempotently adds `/home/vscode/.local/share/rtk` to `sandbox.filesystem.allowWrite` in the in-container `~/.claude/settings.json`.
+
+If `rtk init` itself fails, the hook-installed marker is **not** written, so the next container start retries.
+
 The host's own agent hooks — SafeDep's `gryph` audit layer, and `cot` (whose command is a macOS-only binary path) — are host-side concerns: in-container transcripts auto-sync back to the host on container start and exit, so observability happens there rather than in the VM. `bootstrap-state.sh` strips those host-only hook entries from the seeded `settings.json` on every sync (preserving rtk and any user hooks), so the VM never carries hooks that can't run inside it.
 
 Verify:

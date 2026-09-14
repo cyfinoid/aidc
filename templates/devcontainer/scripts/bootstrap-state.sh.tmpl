@@ -140,10 +140,82 @@ sync_gitconfig_overlay() {
   fi
 }
 
+# rtk 0.44.2+ pre-creates ~/.local/share/rtk/history.db with owner-only
+# mode and now *propagates* that open() failure (it used to swallow it):
+#   Failed to pre-create private DB file: .../history.db: Permission denied
+# Two independent causes show up as that error inside aidc:
+#   1. The data dir is missing or not writable by vscode (root-owned leftover).
+#   2. Claude Code's sandbox allowWrite list does not include the data dir
+#      (rtk-ai/rtk#320) — every sandboxed `rtk` then gets EACCES.
+ensure_rtk_data_dir() {
+  local dir="${1:-$home_dir/.local/share/rtk}"
+  mkdir -p "$dir" 2>/dev/null || true
+  if [[ ! -d "$dir" || ! -w "$dir" ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+      sudo -n mkdir -p "$dir" 2>/dev/null || true
+      sudo -n chown "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
+    fi
+  fi
+  chmod 0700 "$dir" 2>/dev/null || true
+}
+
+# Idempotently add $dir to settings.json sandbox.filesystem.allowWrite so
+# Claude Code's sandbox lets rtk create/write history.db. No-op when the
+# file is missing or not JSON; never removes existing allowWrite entries.
+ensure_rtk_sandbox_write() {
+  local f="$1"
+  local dir="$2"
+  [[ -f "$f" ]] || return 0
+  [[ -n "$dir" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  python3 - "$f" "$dir" <<'PY'
+import json, sys
+path, data_dir = sys.argv[1], sys.argv[2]
+try:
+    cfg = json.load(open(path))
+except (FileNotFoundError, ValueError):
+    sys.exit(0)
+if not isinstance(cfg, dict):
+    sys.exit(0)
+sandbox = cfg.get("sandbox")
+if sandbox is None:
+    sandbox = {}
+    cfg["sandbox"] = sandbox
+elif not isinstance(sandbox, dict):
+    sys.exit(0)
+fs = sandbox.get("filesystem")
+if fs is None:
+    fs = {}
+    sandbox["filesystem"] = fs
+elif not isinstance(fs, dict):
+    sys.exit(0)
+aw = fs.get("allowWrite")
+if not isinstance(aw, list):
+    aw = []
+if data_dir in aw:
+    sys.exit(0)
+aw.append(data_dir)
+fs["allowWrite"] = aw
+with open(path, "w") as fh:
+    json.dump(cfg, fh, indent=2)
+    fh.write("\n")
+PY
+}
+
 install_agent_hooks() {
   # Marker lives in the claude_home volume so it survives container restarts
   # but is wiped by 'aidc destroy', triggering a fresh re-init.
   local marker="$home_dir/.claude/.aidc-agent-hooks-installed"
+  local rtk_dir="$home_dir/.local/share/rtk"
+  local settings="$home_dir/.claude/settings.json"
+
+  # Always (re)assert the data dir + sandbox allowWrite. Volumes that already
+  # have the marker — including ones where an older bootstrap wrote the marker
+  # after a failed `rtk init` — still need the dir/allowlist or every sandboxed
+  # rtk call keeps failing with EACCES.
+  ensure_rtk_data_dir "$rtk_dir"
+  ensure_rtk_sandbox_write "$settings" "$rtk_dir"
+
   [[ -f "$marker" ]] && return 0
 
   # rtk is the only agent hook wired inside the VM. gryph/cot run on the host
@@ -151,9 +223,15 @@ install_agent_hooks() {
   # makes init non-interactive; --hook-only adds just the PreToolUse/Bash hook
   # without re-writing CLAUDE.md/RTK.md (both already seeded from the host).
   if command -v rtk >/dev/null 2>&1; then
-    rtk init --global --auto-patch --hook-only >/dev/null 2>&1 \
-      || echo "[bootstrap] rtk init --global failed" >&2
+    if ! rtk init --global --auto-patch --hook-only; then
+      echo "[bootstrap] rtk init --global failed" >&2
+      # Do not write the marker: retry hook install on the next start.
+      ensure_rtk_sandbox_write "$settings" "$rtk_dir"
+      return 0
+    fi
   fi
+  # rtk init --auto-patch may rewrite settings.json; re-apply allowWrite.
+  ensure_rtk_sandbox_write "$settings" "$rtk_dir"
 
   mkdir -p "$(dirname "$marker")"
   touch "$marker"
