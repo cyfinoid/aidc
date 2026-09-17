@@ -354,12 +354,18 @@ ARG OPENCODE_VERSION=1.18.30
 ARG GROK_VERSION=1.0.24
 ARG OMP_VERSION=18.1.15
 ARG AIDC_AGENTS="all"
+# Every path a named volume mounts over is pre-created here, as vscode: Docker
+# seeds a fresh named volume from the image directory at its target, inheriting
+# that directory's ownership. Miss one and the volume materialises root-owned,
+# leaving the (non-root) vscode user unable to write into it — which is exactly
+# how rtk's history.db silently never got created.
 RUN mkdir -p \
       /home/vscode/.local/bin \
       /home/vscode/.claude \
       /home/vscode/.codex \
       /home/vscode/.config/opencode \
       /home/vscode/.local/share/opencode \
+      /home/vscode/.local/share/rtk \
       /home/vscode/.cursor \
       /home/vscode/.grok \
       /home/vscode/.omp \

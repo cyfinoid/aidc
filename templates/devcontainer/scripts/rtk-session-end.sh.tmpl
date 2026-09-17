@@ -32,12 +32,26 @@ cat >/dev/null 2>&1 || true
 
 gain="$(rtk gain -f json 2>/dev/null)" || exit 0
 
-# Fixed output shape from the pinned rtk build:
+# Output shape from the pinned rtk build:
 # {"summary":{"total_commands":N,"total_input":N,"total_output":N,
 #             "total_saved":N,"avg_savings_pct":F,...}}
-saved="$(printf '%s' "$gain" | grep -o '"total_saved":[0-9]*' | head -1 | cut -d: -f2)"
-cmds="$(printf '%s' "$gain" | grep -o '"total_commands":[0-9]*' | head -1 | cut -d: -f2)"
-pct="$(printf '%s' "$gain" | grep -o '"avg_savings_pct":[0-9]*' | head -1 | cut -d: -f2)"
+#
+# rtk pretty-prints, so the value is separated from the key by ": " — the
+# separator must be matched explicitly. A pattern ending in [0-9]* happily
+# matches the key with *zero* digits, so a missing space tolerance does not
+# fail loudly; it yields an empty string and this hook silently exits 0.
+# [0-9]\+ (one or more) is what makes a shape change actually fall through to
+# the guards below. avg_savings_pct is a float and is truncated to its integer
+# part on purpose — this is a one-line human summary.
+json_num() {
+  printf '%s' "$gain" \
+    | grep -o "\"$1\"[[:space:]]*:[[:space:]]*[0-9]\+" \
+    | head -1 \
+    | grep -o '[0-9]\+$'
+}
+saved="$(json_num total_saved)"
+cmds="$(json_num total_commands)"
+pct="$(json_num avg_savings_pct)"
 [[ "$saved" =~ ^[0-9]+$ ]] || exit 0
 [[ "$cmds" =~ ^[0-9]+$ ]] || cmds=0
 [[ "$pct" =~ ^[0-9]+$ ]] || pct=0

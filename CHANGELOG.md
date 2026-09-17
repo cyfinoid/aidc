@@ -4,6 +4,13 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+
+- **rtk recorded no savings at all: the `rtk_data` volume mounted root-owned, so `history.db` could never be created.** The base image pre-creates every named-volume mount point as `vscode` (Docker seeds a fresh volume from the image directory, inheriting its ownership) — but `~/.local/share/rtk` was missing from that `mkdir`, so the volume materialised `root:root` and every `rtk` invocation failed its db init with `EACCES`. The failure was invisible in both directions: rtk still filtered commands correctly (savings were real, just unrecorded), and the SessionEnd reporter is deliberately fail-open, so `rtk gain` reported nothing and the host merge had nothing to carry. The mount point is now pre-created in `Dockerfile.base.tmpl`, and because Docker cannot re-seed an *existing* named volume (a rebuild alone does not fix an already-broken container), `bootstrap-state.sh` gained `ensure_rtk_data_dir` — a passwordless-sudo chown repair that runs on both `init` and `sync`, re-tests writability rather than trusting `chown`'s exit status, and warns without aborting the entrypoint.
+- **The SessionEnd savings summary never printed, even with a healthy db.** The reporter scraped `rtk gain -f json` with `grep -o '"total_saved":[0-9]*'`, but rtk pretty-prints (`"total_saved": 665`). With a space after the colon the pattern still matched the key with *zero* digits, so the hook extracted an empty string and fell through its own fail-open guard on every session. Parsing now matches the `": "` separator explicitly and requires `[0-9]\+`, so a future shape change fails loudly into the guard instead of silently.
+- **`wire_rtk_cursor`/`wire_rtk_omp`/`wire_rtk_opencode` reported success without verifying anything.** All three discard rtk's output and ran fire-and-forget, so a container could come up with `~/.cursor/hooks.json` and `~/.omp/agent/extensions/rtk.ts` simply absent — the state this repo's own container was in — with nothing said. Each helper now asserts its artifact exists and warns by name if not.
+- **`tests/rtk-gain.test.sh` overwrote the developer's real `~/.claude/RTK.md`.** The suite redirects `HOME` into its fixture but never `CLAUDE_CONFIG_DIR`, which compose exports container-wide as `/home/vscode/.claude` and which real rtk (and the suite's stub, faithfully) honors *over* `HOME` — so every wiring test wrote the stub's placeholder through to the real file. `CLAUDE_CONFIG_DIR` is now redirected for the whole suite. Also closed the fixture gap that hid the parsing bug above: the stub's gain payload was compact JSON, which real rtk never emits.
+
 ## [2.1.0] - 2026-09-10
 
 ### Added

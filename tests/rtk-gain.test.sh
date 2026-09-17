@@ -25,6 +25,16 @@ BOOTSTRAP="$REPO_ROOT/templates/devcontainer/scripts/bootstrap-state.sh.tmpl"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+# HOME is redirected into TMP_ROOT below, but CLAUDE_CONFIG_DIR is a *sibling*
+# escape hatch: real rtk (and the stub, which mirrors it) honors it over HOME,
+# and compose exports CLAUDE_CONFIG_DIR=/home/vscode/.claude container-wide. Any
+# `rtk init` the wiring tests drive would therefore write through to the real
+# ~/.claude — running this suite in the container used to overwrite the
+# developer's own RTK.md with the stub's placeholder. Redirect it for the whole
+# suite; the leak-canary test below overrides it to its own path and restores
+# this one rather than unsetting it.
+export CLAUDE_CONFIG_DIR="$TMP_ROOT/claude-config"
+
 passed=0
 failed=0
 ok()   { printf 'ok: %s\n' "$1"; passed=$((passed + 1)); }
@@ -133,6 +143,37 @@ else
   fail "garbage-gain case"
 fi
 
+# 4b. Real rtk PRETTY-PRINTS its JSON ("total_saved": 665, with a space after
+#     the colon); the compact payload above is not what the pinned build
+#     actually emits. A `"key":[0-9]*` pattern matches the key with zero digits
+#     against pretty output, so the reporter used to extract "" and fail open on
+#     every real session — savings recorded, never displayed. Pin the real shape.
+rc=0
+err="$(GAIN_JSON='{
+  "summary": {
+    "total_commands": 9,
+    "total_input": 1116,
+    "total_output": 451,
+    "total_saved": 665,
+    "avg_savings_pct": 59.587813620071685,
+    "total_time_ms": 10,
+    "avg_time_ms": 1
+  }
+}' run_hook 2>&1 >/dev/null)" || rc=$?
+if [[ "$rc" -eq 2 ]] && [[ "$err" == *"rtk: 665 tokens saved (59%) over 9 commands"* ]]; then
+  ok "parses rtk's pretty-printed gain JSON (space after colon)"
+else
+  fail "pretty-printed gain: rc=$rc err=$err"
+fi
+
+# 4c. A genuinely absent key must still fail open rather than print an empty
+#     count — this is the guard the [0-9]\+ change protects.
+if GAIN_JSON='{"summary": {"total_commands": 9}}' run_hook >/dev/null 2>&1; then
+  ok "gain JSON missing total_saved fails open"
+else
+  fail "missing-key case"
+fi
+
 # ── 5-8: settings.json seeding (bootstrap patcher) ───────────────────────────
 # home_dir is captured when the template is sourced, so the fixture container
 # home must be exported BEFORE — and the stub rtk writes under $HOME, so the
@@ -230,7 +271,7 @@ if [[ -f "$HOME/.omp/agent/extensions/rtk.ts" ]] \
 else
   fail "omp wiring (ext=$([[ -f $HOME/.omp/agent/extensions/rtk.ts ]] && echo yes || echo no) canary=$([[ -e $CLAUDE_CONFIG_DIR ]] && echo yes || echo no))"
 fi
-unset CLAUDE_CONFIG_DIR
+export CLAUDE_CONFIG_DIR="$TMP_ROOT/claude-config"
 
 # 12. Without rtk on PATH the wiring no-ops (slim builds).
 rm -rf "$HOME/.config/opencode/plugins" "$HOME/.cursor/hooks.json"
@@ -241,6 +282,53 @@ if [[ ! -e "$HOME/.config/opencode/plugins/rtk.ts" ]] \
   ok "missing rtk: wiring no-ops"
 else
   fail "no-rtk case"
+fi
+
+# ── 12b-12d: rtk data dir ownership (ensure_rtk_data_dir) ────────────────────
+# history.db lives at ~/.local/share/rtk, which the rtk_data volume mounts over.
+# Docker seeds a named volume from the image dir only at first creation, so a
+# volume that materialised root-owned stays root-owned across rebuilds and every
+# rtk invocation then fails its db init with EACCES — silently, since rtk still
+# filters fine. sudo is stubbed to record argv without needing privileges.
+RTK_DIR="$AIDC_CONTAINER_HOME/.local/share/rtk"
+SUDO_LOG="$TMP_ROOT/sudo.log"
+mkdir -p "$TMP_ROOT/sudobin"
+cat >"$TMP_ROOT/sudobin/sudo" <<SUDOSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$SUDO_LOG"
+exit 0
+SUDOSTUB
+chmod +x "$TMP_ROOT/sudobin/sudo"
+
+# 12b. Missing dir is created, and a writable dir needs no escalation.
+rm -rf "$RTK_DIR" "$SUDO_LOG"
+PATH="$TMP_ROOT/sudobin:$PATH" ensure_rtk_data_dir
+if [[ -d "$RTK_DIR" && -w "$RTK_DIR" ]] && [[ ! -s "$SUDO_LOG" ]]; then
+  ok "rtk data dir created; writable dir needs no chown"
+else
+  fail "rtk data dir create (sudo=$(cat "$SUDO_LOG" 2>/dev/null))"
+fi
+
+# 12c. Unwritable dir (the root-owned-volume case) triggers a chown repair.
+chmod 500 "$RTK_DIR"
+: >"$SUDO_LOG"
+PATH="$TMP_ROOT/sudobin:$PATH" ensure_rtk_data_dir 2>/dev/null
+if grep -q -- "-n chown -R .*$RTK_DIR" "$SUDO_LOG"; then
+  ok "unwritable rtk data dir triggers chown repair"
+else
+  fail "rtk chown repair (sudo=$(cat "$SUDO_LOG" 2>/dev/null))"
+fi
+
+# 12d. When the repair cannot land, warn but still return 0: bootstrap runs
+#      under `set -e` as the container's entrypoint, so aborting here would
+#      leave the container dead instead of merely untracked.
+rc=0
+warn="$(PATH="$TMP_ROOT/sudobin:$PATH" ensure_rtk_data_dir 2>&1 >/dev/null)" || rc=$?
+chmod 700 "$RTK_DIR"
+if [[ "$rc" -eq 0 ]] && [[ "$warn" == *"rtk gain"* ]]; then
+  ok "failed repair warns and fails open"
+else
+  fail "rtk repair fail-open: rc=$rc warn=$warn"
 fi
 
 # ── 13-19: host-side sync + merge (lib/aidc/sync.sh) ─────────────────────────
@@ -399,6 +487,25 @@ if grep -q 'source: rtk_data' "$REPO_ROOT/templates/devcontainer/compose.yaml.tm
   ok "rtk_data volume declared + mounted"
 else
   fail "compose volume"
+fi
+
+# 21b. ...and the image pre-creates its mount point as vscode, which is what
+#      makes a fresh volume inherit non-root ownership. Every other volume
+#      target in that mkdir already did; rtk's omission is what broke tracking.
+if grep -q '/home/vscode/.local/share/rtk' "$REPO_ROOT/templates/devcontainer/Dockerfile.base.tmpl"; then
+  ok "base image pre-creates the rtk data dir"
+else
+  fail "rtk data dir not pre-created in image"
+fi
+
+# 21c. Existing volumes can't be re-seeded by a rebuild, so the repair has to
+#      run from the entrypoint too — on both init and sync (sync being the only
+#      path that reaches an already-broken container).
+if grep -qE '^      ensure_rtk_data_dir$' "$BOOTSTRAP" \
+   && [[ "$(grep -cE '^      ensure_rtk_data_dir$' "$BOOTSTRAP")" -eq 2 ]]; then
+  ok "ensure_rtk_data_dir runs on both init and sync"
+else
+  fail "ensure_rtk_data_dir dispatch wiring"
 fi
 
 # 22. Template registered in both maps; sync_claude seeds RTK.md; sqlite3 in image.

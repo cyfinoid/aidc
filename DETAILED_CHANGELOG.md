@@ -8,6 +8,207 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-17 — rtk savings tracking was never recording: root-owned volume, unparseable reporter, unverified wiring
+
+**Summary:** `rtk gain` reported nothing in any container, for every wired
+agent, since the `rtk_data` volume was introduced. Three independent defects
+stacked, each silent by construction; this entry fixes all three plus the test
+isolation leak that let the suite pass while the feature was dead.
+
+**Trigger:** the question "is `rtk gain` plugged in opencode and other agents?"
+Answering it required checking actual container state rather than the wiring
+code, which is what surfaced the failures.
+
+### What was wrong
+
+**1. The data dir was root-owned (the root cause).**
+`compose.yaml.tmpl` mounts the `rtk_data` named volume at
+`/home/vscode/.local/share/rtk`, where rtk keeps `history.db` — the one db every
+rtk-wired agent appends to. Docker seeds a *fresh* named volume from whatever
+the image has at the mount target, inheriting that directory's ownership;
+`Dockerfile.base.tmpl` has a `mkdir -p` that pre-creates every volume target as
+`vscode` for exactly this reason, and `~/.local/share/rtk` was the one path
+missing from the list. The volume therefore materialised `root:root 755` while
+the container runs as `vscode` (uid 1000):
+
+```
+$ ls -ld /home/vscode/.local/share/rtk
+drwxr-xr-x 1 root root 0 Sep 17 15:17 .
+$ rtk gain
+rtk: Failed to initialize tracking database: Failed to pre-create private DB
+     file: /home/vscode/.local/share/rtk/history.db: Permission denied (os error 13)
+```
+
+Nothing surfaced this. rtk's *filtering* path is unaffected — `rtk git status`
+returns correctly reduced output, so the token savings were genuinely happening,
+just never written down. `align_uid` is the only chown in bootstrap and is
+explicitly a no-op unless invoked as root with a non-1000 host uid (dormant on
+OrbStack/Docker Desktop), so nothing repaired it.
+
+**2. The SessionEnd reporter could not parse rtk's output.**
+Independently fatal, and it would have kept the feature invisible even after
+fixing (1). `rtk-session-end.sh.tmpl` scraped the JSON with:
+
+```bash
+saved="$(printf '%s' "$gain" | grep -o '"total_saved":[0-9]*' | head -1 | cut -d: -f2)"
+```
+
+Real `rtk gain -f json` pretty-prints — `"total_saved": 665`, with a space after
+the colon. The pattern does not tolerate the space, but because it ends in
+`[0-9]*` (zero or more) it still *matches* — just the bare key, no digits. So
+`cut` yielded `""`, the `[[ "$saved" =~ ^[0-9]+$ ]] || exit 0` guard fired, and
+the hook exited 0 silently on every single session. A shape mismatch that should
+have been loud was laundered into the fail-open path.
+
+**3. The wiring helpers never verified their work.**
+`wire_rtk_opencode`/`wire_rtk_cursor`/`wire_rtk_omp` run `rtk init ... >/dev/null
+2>&1 || echo failed >&2`. Since rtk exits 0 on partial success, a helper could
+report nothing while producing nothing. The container this was found in had no
+`~/.cursor/hooks.json` and no `~/.omp/agent/` at all, despite the 2.1.0
+changelog entry claiming both were wired.
+
+**4. The tests were both blind and destructive.**
+`tests/rtk-gain.test.sh` carefully redirects `HOME` into a fixture, but never
+`CLAUDE_CONFIG_DIR` — which compose exports container-wide as
+`/home/vscode/.claude`, and which real rtk honors *over* `HOME` (the suite's own
+stub mirrors this faithfully, to test the omp `env -u` guard). Running the suite
+in the container therefore wrote the stub's `stub\n` placeholder over the
+developer's real `~/.claude/RTK.md`. This actually happened during this session
+and was restored from `/host-seed/claude/RTK.md`. Separately, the stub's default
+`GAIN_JSON` was *compact* JSON — a shape real rtk never emits — which is
+precisely why 26 tests passed against a reporter that could not parse reality.
+
+### Changes
+
+`templates/devcontainer/Dockerfile.base.tmpl` — add the missing mount point, with
+the invariant written down so the next volume doesn't repeat it:
+
+```diff
++# Every path a named volume mounts over is pre-created here, as vscode: Docker
++# seeds a fresh named volume from the image directory at its target, inheriting
++# that directory's ownership. Miss one and the volume materialises root-owned,
++# leaving the (non-root) vscode user unable to write into it — which is exactly
++# how rtk's history.db silently never got created.
+ RUN mkdir -p \
+       /home/vscode/.local/share/opencode \
++      /home/vscode/.local/share/rtk \
+```
+
+`templates/devcontainer/scripts/bootstrap-state.sh.tmpl` — new
+`ensure_rtk_data_dir`, called from **both** dispatch arms. The image fix only
+helps volumes created *after* it; Docker never re-seeds an existing volume, so
+`sync` is the only path that can reach an already-broken container:
+
+```diff
++ensure_rtk_data_dir() {
++  local dir="$home_dir/.local/share/rtk"
++  [[ -d "$dir" ]] || ensure_dir "$dir" 2>/dev/null || true
++  [[ -d "$dir" ]] || return 0
++  [[ -w "$dir" ]] && return 0
++  sudo -n chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
++  [[ -w "$dir" ]] && return 0
++  echo "[bootstrap] $dir not writable and could not be repaired — 'rtk gain' will record nothing" >&2
++}
+```
+
+Two deliberate choices: it re-tests `-w` instead of trusting `chown`'s exit
+status (sudo may be absent or non-passwordless, and a successful chown still
+leaves the dir unusable if the mode denies owner write), and it warns rather
+than failing, because this runs from the container entrypoint under `set -e`
+where aborting trades "savings untracked" for "container dead". `-w` is the
+right predicate over a uid comparison because `align_uid` can remap `vscode`.
+
+`rtk-session-end.sh.tmpl` — parse the real shape; require digits so the next
+change falls into the guard instead of past it:
+
+```diff
++json_num() {
++  printf '%s' "$gain" \
++    | grep -o "\"$1\"[[:space:]]*:[[:space:]]*[0-9]\+" \
++    | head -1 \
++    | grep -o '[0-9]\+$'
++}
++saved="$(json_num total_saved)"
+```
+
+The three `wire_rtk_*` helpers now assert their artifact landed
+(`.config/opencode/plugins/rtk.ts`, `.cursor/hooks.json`,
+`.omp/agent/extensions/rtk.ts`) and name what is missing.
+
+`tests/rtk-gain.test.sh` — `export CLAUDE_CONFIG_DIR="$TMP_ROOT/claude-config"`
+for the whole suite (the leak-canary case overrides it to its own path and
+restores this one rather than `unset`ing back to the ambient value), plus seven
+new assertions.
+
+### Commands
+
+```bash
+# Diagnosis
+ls -ld /home/vscode/.local/share/rtk        # root:root 755 — the root cause
+rtk gain                                     # EACCES on history.db
+rtk gain -f json                             # revealed the pretty-printed shape
+grep -rE "mkdir -p" templates/devcontainer/Dockerfile.base.tmpl
+
+# Live-container repair (the volume predates the image fix)
+sudo -n chown -R vscode:vscode /home/vscode/.local/share/rtk
+rtk init --global --auto-patch --hook-only --agent cursor
+env -u CLAUDE_CONFIG_DIR HOME="$tmp" rtk init --global --auto-patch --hook-only --agent pi
+cp "$tmp/.pi/agent/extensions/rtk.ts" ~/.omp/agent/extensions/rtk.ts
+
+# Verification
+bash tests/rtk-gain.test.sh                  # 33 passed, 0 failed (was 26)
+bash tests/validate-scaffold.test.sh         # 6 passed, 0 failed
+.github/scripts/test-bootstrap-state.sh      # passed=13 failed=0
+shellcheck --severity=warning tests/rtk-gain.test.sh
+aidc-scan                                    # semgrep/gitleaks/shellcheck clean
+```
+
+### Verification
+
+`rtk gain` records again, and accumulates across invocations:
+
+```
+$ rtk gain
+Total commands:    5
+Tokens saved:      10 (7.6%)
+```
+
+The SessionEnd reporter emits on stderr and exits 2 as designed:
+
+```
+$ echo '{"reason":"exit"}' | ./rtk-session-end.sh
+rtk: 10 tokens saved (7%) over 5 commands — all-time in this container; merged to host on sync
+(exit 2)
+```
+
+Wiring now present for every agent rtk supports: `~/.cursor/hooks.json`
+(`rtk hook cursor` on `Shell`), `~/.omp/agent/extensions/rtk.ts`, and the
+pre-existing `~/.config/opencode/plugins/rtk.ts`. Test isolation confirmed by
+re-running the suite and checking the real `~/.claude/RTK.md` survives intact
+(29 lines, not the stub placeholder).
+
+### Notes
+
+- **codex and grok remain unwired** — neither exposes a pre-tool hook and rtk
+  has no target for them (`rtk hook` covers claude/cursor/gemini/copilot/droid/
+  vibe). Unchanged, and still correct as documented.
+- **The container's `.devcontainer/` is a read-only bind mount of generated
+  scaffold and is gitignored**; all fixes land in `templates/`, and the running
+  container was repaired in place. Existing containers pick the repair up on the
+  next `aidc sync`; new ones get correct ownership from the image.
+- **Unrelated, noted while reading configs:** `~/.config/opencode/opencode.json`
+  carries a live-looking Sarvam API key in plaintext under
+  `provider.sarvam.options.headers`. It is *not* in the repo (`grep` over
+  `/workspace` is clean) — it arrives from the host seed — but it sits readable
+  by every agent in the container. Rotating it and moving it to an env var
+  (`AIDC_PASSTHROUGH_ENV_KEYS`) would match how `CURSOR_API_KEY` is handled.
+- The class of bug in (1) and (2) is the same: a failure mode that a fail-open
+  guard converts into silence. Fail-open is right for a reporting hook, but the
+  parse should distinguish "no data" from "data I could not read" — hence
+  `[0-9]\+`.
+
+---
+
 ## 2026-09-10 — `aidc ci`: replay the wrapped project's GitHub workflows natively (opt-in product feature)
 
 **Summary:** New `aidc ci` subcommand + scaffolded engine

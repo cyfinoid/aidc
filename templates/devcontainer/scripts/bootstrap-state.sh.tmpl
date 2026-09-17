@@ -266,15 +266,46 @@ sync_omp() {
   wire_rtk_omp
 }
 
+# The rtk_data volume mounts at ~/.local/share/rtk, where rtk keeps history.db —
+# the single db every rtk-wired agent appends to and 'rtk gain' reads. The image
+# pre-creates that path as vscode so a *fresh* volume inherits the ownership, but
+# Docker seeds a named volume only when it is first created: a volume that
+# already materialised root-owned (built by an image predating that mkdir) stays
+# root-owned through any number of rebuilds, and every rtk invocation then fails
+# its db init with EACCES — silently, because rtk still filters fine and the
+# SessionEnd reporter is deliberately fail-open. Repair it here; sudo is
+# passwordless in the container and this is a no-op once ownership is right.
+ensure_rtk_data_dir() {
+  local dir="$home_dir/.local/share/rtk"
+  [[ -d "$dir" ]] || ensure_dir "$dir" 2>/dev/null || true
+  [[ -d "$dir" ]] || return 0
+  # -w is the condition that actually matters (uid/gid can differ from 1000 when
+  # align_uid has remapped vscode); only escalate when the check fails.
+  [[ -w "$dir" ]] && return 0
+  sudo -n chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
+  # Re-test rather than trusting chown's exit status: sudo may be absent or
+  # non-passwordless, and a chown that reports success still leaves the dir
+  # unusable if the mode denies the owner write. Warn, but never fail — this
+  # runs from the container entrypoint under `set -e`, where aborting would
+  # trade "savings untracked" for "container dead".
+  [[ -w "$dir" ]] && return 0
+  echo "[bootstrap] $dir not writable and could not be repaired — 'rtk gain' will record nothing" >&2
+}
+
 # rtk wiring for the non-claude agents rtk supports (coverage matrix in
 # docs/security.md: claude via rtk init in install_agent_hooks, opencode plugin,
 # cursor hooks.json, omp via rtk's pi extension; codex/grok unsupported
 # upstream). All no-ops without rtk (slim builds) and safe to re-run on every
 # init/sync — rtk init --auto-patch is idempotent.
+#
+# Each helper verifies the artifact actually landed rather than trusting rtk's
+# exit code: these run with output discarded, so an unverified failure is
+# invisible until someone goes looking for the savings that were never recorded.
 wire_rtk_opencode() {
   command -v rtk >/dev/null 2>&1 || return 0
-  rtk init --global --auto-patch --hook-only --opencode >/dev/null 2>&1 \
-    || echo "[bootstrap] rtk init --opencode failed" >&2
+  rtk init --global --auto-patch --hook-only --opencode >/dev/null 2>&1 || true
+  [[ -f "$home_dir/.config/opencode/plugins/rtk.ts" ]] \
+    || echo "[bootstrap] rtk opencode plugin missing after init" >&2
 }
 
 wire_rtk_cursor() {
@@ -282,8 +313,9 @@ wire_rtk_cursor() {
   # rtk 0.48.0 writes ~/.cursor/hooks.json tmp+rename style but never creates
   # the directory first — pre-create it or init exits 1.
   ensure_dir "$home_dir/.cursor"
-  rtk init --global --auto-patch --hook-only --agent cursor >/dev/null 2>&1 \
-    || echo "[bootstrap] rtk init --agent cursor failed" >&2
+  rtk init --global --auto-patch --hook-only --agent cursor >/dev/null 2>&1 || true
+  [[ -f "$home_dir/.cursor/hooks.json" ]] \
+    || echo "[bootstrap] rtk cursor hooks.json missing after init" >&2
 }
 
 wire_rtk_omp() {
@@ -300,10 +332,10 @@ wire_rtk_omp() {
        rtk init --global --auto-patch --hook-only --agent pi >/dev/null 2>&1 \
      && [[ -f "$tmp/.pi/agent/extensions/rtk.ts" ]]; then
     ensure_dir "$(dirname "$dst")"
-    cp "$tmp/.pi/agent/extensions/rtk.ts" "$dst" 2>/dev/null \
-      || echo "[bootstrap] could not install rtk omp extension" >&2
+    cp "$tmp/.pi/agent/extensions/rtk.ts" "$dst" 2>/dev/null || true
   fi
   rm -rf "$tmp"
+  [[ -f "$dst" ]] || echo "[bootstrap] rtk omp extension missing after init" >&2
 }
 
 sync_cursor() {
@@ -440,6 +472,10 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
     init)
       align_uid
       ensure_dir "/commandhistory"
+      # Before anything that shells out to rtk (the wire_rtk_* helpers and
+      # install_agent_hooks all do), and after align_uid, which is what can
+      # change the uid the ownership has to match.
+      ensure_rtk_data_dir
       sync_tool "all"
       sync_gitconfig_overlay
       install_agent_hooks
@@ -447,6 +483,10 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
       run_firewall_if_enabled
       ;;
     sync)
+      # Also on sync: this is the only repair path for a container whose
+      # rtk_data volume already exists root-owned, since rebuilding the image
+      # cannot re-seed an existing named volume.
+      ensure_rtk_data_dir
       sync_tool "$tool"
       ;;
     *)
