@@ -8,6 +8,198 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-21 — pre-merge audit of the `enhancements` branch: CI test drift, a red suite, the unported half of PR #32, and the missing Cursor guide
+
+**Summary:** An audit ahead of opening the `enhancements` → `main` pull request,
+to confirm every open PR and issue is either landed or consciously deferred.
+The ledger came back clean — but the audit turned up a test suite that was red
+on the branch, the CI gap that hid it, one item of community PR #32 that was
+never ported, and issue #26 still genuinely open. All four are fixed here.
+
+**Trigger:** "identify all the pull requests and issues, if anything is pending
+we need to fix that" before raising the PR.
+
+### Audit result (the ledger)
+
+All 26 GitHub items were still open, because the branch's work was *ported*
+rather than merged — GitHub has no way to know. Nine community PRs and their
+issues are implemented on this branch (`#23→#22`, `#21→#6`, `#16→#10`,
+`#14→#13`, `#15→#8`, `#17→#11`, `#19→#12`, `#18→#7`, `#20→#9`), as are three
+issues that never had a PR (`#24` omp, `#25` Apple containers, `#5` opencode
+desktop → `aidc opencode-web`). `#32`/`#31` (rtk tracking db) was solved
+independently and more thoroughly on 2026-09-17. Left deliberately open as
+post-merge work: `#28` (Antigravity CLI), `#30` (per-agent layers), `#27`
+(survey other agents).
+
+### What was wrong
+
+**1. `tests/agent-auth-seed.test.sh` was failing on the branch.**
+The 2026-09-17 rtk work added `ensure_rtk_session_end_settings` to
+`sync_claude`. That suite deliberately runs `sync_*` with the copy primitives
+stubbed out — `ensure_dir() { :; }` and a recording `copy_file_from_seed` — so
+`$HOME/.claude/` and `settings.json` never exist. The two pre-existing real
+helpers (`strip_host_hooks`, `ensure_agent_guardrail_settings`) were
+neutralized for exactly this reason; the new third one was not. Its Python
+writer opened `settings.json` for write in a directory that wasn't there:
+
+```
+Traceback (most recent call last):
+  File "<stdin>", line 33, in <module>
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/tmp.XXXX/home/.claude/settings.json'
+```
+
+Under `set -euo pipefail` that aborted the suite at case 4 of 7. **Production
+was never affected** — the real `ensure_dir "$home_dir/.claude"` runs first in
+`sync_claude`. A test-harness gap, but a red test.
+
+**2. CI ran 23 of 32 suites — which is why nobody saw defect 1.**
+`.github/workflows/shellcheck.yml` listed each suite by name across ~15 steps.
+Nine suites existed in `tests/` that no workflow referenced at all:
+`agent-auth-seed`, `claude-config-dir`, `debug-flag`, `devcontainer-env`,
+`docker-provider`, `init-force`, `opencode-web`, `resolve-oauth-token`,
+`scan-link`. Hand-maintained enumeration next to a growing directory drifts;
+adding nine more lines would have reset the clock, not fixed the class.
+
+**3. PR #32's third item was never ported.** The community PR fixed the rtk db
+permission problem three ways; the branch's own 2026-09-17 work addressed the
+real root cause (a root-owned named volume) far better, so the PR was treated
+as superseded. But one independent item didn't carry over:
+`install_agent_hooks` writes a marker to short-circuit re-runs, and wrote it
+unconditionally — even when `rtk init --global` had failed. Since the marker
+lives on the `claude_home` volume, a single transient failure left the
+container hookless until `aidc destroy`. rtk also exits 0 on partial success,
+so the existing `|| echo failed` guard could not detect it either.
+
+**4. Issue #26 (Cursor how-to) was genuinely unaddressed.** Cursor support
+shipped in `8daeded`, and `docs/install.md`/`docs/security.md` mention it in
+passing, but the issue asks for something specific — "document exact commands
+and config to make the system be the base for cursor code execution part" —
+and no such guide existed.
+
+### How they were fixed
+
+**Defect 1** — `tests/agent-auth-seed.test.sh`: added
+`ensure_rtk_session_end_settings() { :; }` beside the other two stubs, with a
+comment naming the invariant (*any helper `sync_claude` gains must be stubbed
+here, because the directory does not exist under these stubs*) so the next
+addition doesn't repeat it.
+
+**Defect 2** — `.github/workflows/shellcheck.yml`: replaced the enumerated
+steps with one discovery step:
+
+```yaml
+- name: Run unit test suites
+  run: |
+    set -uo pipefail
+    shopt -s nullglob
+    suites=(tests/*.test.sh)
+    ...
+    for suite in "${suites[@]}"; do
+      echo "::group::$suite"
+      if bash "$suite"; then echo "::endgroup::"
+      else echo "::endgroup::"; echo "::error file=$suite::suite failed"; failed+=("$suite"); fi
+    done
+```
+
+Deliberate choices: `set -uo pipefail` **without** `-e` so one failing suite
+doesn't mask the rest; a guard that fails if the glob matches nothing (a moved
+directory must not read as "all green"); `::group::` per suite to keep the
+named-step readability the enumeration provided. Verified first that all nine
+newly-covered suites are hermetic — their `docker`/`semgrep`/`gitleaks`
+mentions are comments or stubs, so they need nothing beyond bash and the
+shellcheck the workflow already installs.
+
+Collapsing the steps broke one assertion, which is worth recording because it
+is the kind of coupling that is easy to miss: `tests/local-ci.test.sh` runs
+`aidc ci --list` against the repo's *real* workflows and grepped for the step
+name `Run rtk savings unit tests` to prove `--list` surfaces run-step names.
+That step no longer exists; the assertion now greps `Run unit test suites`.
+The test's intent (a `--list` smoke check against real YAML) is unchanged — it
+just needed a step name that still exists.
+
+**Defect 3** — `bootstrap-state.sh.tmpl`, `install_agent_hooks` now confirms
+the artifact before marking itself done, matching the pattern the `wire_rtk_*`
+helpers already use:
+
+```diff
+     rtk init --global --auto-patch --hook-only >/dev/null 2>&1 \
+       || echo "[bootstrap] rtk init --global failed" >&2
++    if ! grep -q '"rtk hook' "$home_dir/.claude/settings.json" 2>/dev/null; then
++      echo "[bootstrap] rtk claude hook missing after init — retrying on next start" >&2
++      return 0
++    fi
+   fi
+   mkdir -p "$(dirname "$marker")"
+   touch "$marker"
+```
+
+The pattern is `"rtk hook`, not `rtk`: the real `settings.json` also holds a
+`SessionEnd` entry whose command is
+`/workspace/.devcontainer/scripts/rtk-session-end.sh`, which a bare `rtk` match
+would happily accept as proof the PreToolUse hook exists. Confirmed against a
+live file — `PreToolUse -> rtk hook claude`. A build with no rtk on `PATH`
+still writes the marker: there is nothing to retry, and omitting it would
+re-run the probe on every start forever.
+
+**Defect 4** — new `docs/cursor.md`, linked from the README doc index and the
+`docs/install.md` command table. Written from the verified mechanics rather
+than from the feature description: the `initializeCommand` rationale (the
+extension runs `docker compose up` itself, without aidc's env, so all seven
+no-default `AIDC_*` bind sources resolve empty), `.devcontainer/.env` being
+aidc-managed at `0600` and regenerated per up/rebuild/rescan, the
+`cursor-agent --sandbox disabled -f` invocation, the `AIDC_AGENTS` gate, the
+Keychain constraint forcing `CURSOR_API_KEY`, the `cursor_agent_home` volume
+mounting `~/.cursor` (not `~/.cursor-agent`), rtk's `hooks.json` wiring, and
+the fact that host session sync is *not* wired for cursor-agent.
+
+### Commands
+
+```bash
+# Audit
+git rev-list --left-right --count main...enhancements   # 0  22 — clean fast-forward
+git merge-base main enhancements                        # == main HEAD
+# PR/issue state read from the GitHub REST API (gh is not installed here)
+
+# Verification
+bash tests/agent-auth-seed.test.sh                      # 7 passed, 0 failed (was aborting at 4)
+bash tests/rtk-gain.test.sh                             # 37 passed, 0 failed (was 33)
+for t in tests/*.test.sh; do bash "$t"; done            # 32 suites, all green
+.github/scripts/test-bootstrap-state.sh                 # passed=13 failed=0
+.github/scripts/bash-compat-check.sh                    # OK
+.github/scripts/check-module-deps.sh                    # OK
+shellcheck --severity=warning lib/aidc.sh lib/aidc/*.sh tests/*.test.sh completions/aidc.bash
+python3 -c "import yaml; yaml.safe_load(open('.github/workflows/shellcheck.yml'))"
+aidc-scan                                               # clean above LOW
+```
+
+### Verification
+
+Full suite 32/32 green (was 31/32 with one red). `tests/rtk-gain.test.sh` gained
+four cases for the marker contract — hook present → marker written; init
+produced no hook → **no** marker plus a warning, with the fixture deliberately
+containing the `rtk-session-end.sh` path to prove the match isn't fooled by it;
+no rtk on `PATH` → marker still written; existing marker short-circuits, proven
+by the *absence* of a warning rather than by the marker's presence (which would
+hold either way). shellcheck, bash-compat, module-deps and `aidc-scan` all
+clean; the workflow YAML parses.
+
+### Notes
+
+- **Not fixed, flagged:** `aidc-scan --all` reports one semgrep finding —
+  `bin/aidc-clipboard-server:23`, `os.chmod(socket_dir, 0o700)` flagged as
+  "widely permissive". It is **pre-existing on `main`** (initial codebase,
+  untouched by this branch) and the scoped `aidc-scan` is clean. It also reads
+  as a false positive: `0o700` is the correct restrictive mode for a directory
+  holding a Unix socket, and the rule's suggested `0o644` would strip the
+  traverse bit and break it. Raised with the user rather than suppressed
+  unilaterally, per the repo's "fix or flag, never silently skip" rule.
+- **Versioning deliberately untouched.** `AIDC_VERSION` stays `2.1.0` and this
+  work stays under **Unreleased**; the release cut is the user's separate call.
+- **Commits are the user's to make** (signing key). Nothing staged or
+  committed; the merge is theirs to do via pull request.
+
+---
+
 ## 2026-09-17 — rtk savings tracking was never recording: root-owned volume, unparseable reporter, unverified wiring
 
 **Summary:** `rtk gain` reported nothing in any container, for every wired

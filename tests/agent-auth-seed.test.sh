@@ -36,9 +36,13 @@ ensure_dir() { :; }
 copy_file_from_seed() { CALLS+="FILE|$1|$2"$'\n'; }
 copy_dir_from_seed()  { CALLS+="DIR|$1|$2"$'\n'; }
 # sync_claude also runs these real file/python helpers — neutralize them so the
-# seed wiring is all we exercise.
+# seed wiring is all we exercise. Any helper sync_claude gains must be added
+# here: with copy_file_from_seed and ensure_dir stubbed out, settings.json and
+# its parent directory never exist, so a real helper that writes to that path
+# dies on FileNotFoundError and takes the suite down with it under `set -e`.
 strip_host_hooks() { :; }
 ensure_agent_guardrail_settings() { :; }
+ensure_rtk_session_end_settings() { :; }
 
 seeds() { printf '%s' "$CALLS" | grep -Fq "$1"; }
 run()   { CALLS=""; "$1"; }

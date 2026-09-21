@@ -79,6 +79,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 
 - [`docs/install.md`](docs/install.md) — prereqs, platform matrix, install, daily commands, what lives where, per-project customisation, cleanup
 - [`docs/claude-profiles.md`](docs/claude-profiles.md) — alternate Claude API targets, local-model profiles, one-time OAuth login, session sync
+- [`docs/cursor.md`](docs/cursor.md) — host Cursor GUI with container-side execution ("Reopen in Container"), `aidc cursor-agent`, `CURSOR_API_KEY` auth
 - [`docs/security.md`](docs/security.md) — `aidc scan`, scanners, image supply chain, container hardening, agent guardrails (rtk), opt-in egress firewall
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — symptom → cause → fix for the common failures (`aidc doctor` first)
 - [`docs/uninstall.md`](docs/uninstall.md) — per-project and host-wide removal

@@ -55,8 +55,8 @@ aidc up            # build + start container
 | `aidc opencode` | start OpenCode |
 | `aidc grok` | start Grok Build |
 | `aidc omp` | start omp (oh-my-pi) |
-| `aidc cursor-agent` | start Cursor Agent |
-| `aidc cursor` | open host Cursor on the repo |
+| `aidc cursor-agent` | start Cursor Agent ([docs/cursor.md](cursor.md)) |
+| `aidc cursor` | open host Cursor on the repo, then "Reopen in Container" ([docs/cursor.md](cursor.md)) |
 | `aidc status` | container + config/mounts status for this folder |
 | `aidc status --global` | one-line summary of every aidc container on this host |
 | `aidc down` | stop the container, keep volumes |

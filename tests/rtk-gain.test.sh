@@ -533,5 +533,55 @@ else
   fail "auto-sync piggyback"
 fi
 
+# ── 24. install_agent_hooks: the absent marker IS the retry channel ──────────
+# The marker lives on the claude_home volume, so touching it after a failed
+# `rtk init` would pin the container hookless until `aidc destroy`. It may only
+# be written once the PreToolUse hook is actually in settings.json.
+CLAUDE_SETTINGS="$AIDC_CONTAINER_HOME/.claude/settings.json"
+MARKER="$AIDC_CONTAINER_HOME/.claude/.aidc-agent-hooks-installed"
+mkdir -p "$AIDC_CONTAINER_HOME/.claude"
+
+# 24a. Hook landed -> marker written.
+rm -f "$MARKER"
+printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"command":"rtk hook claude"}]}]}}' >"$CLAUDE_SETTINGS"
+PATH="$STUB_BIN:$PATH" install_agent_hooks 2>/dev/null
+if [[ -f "$MARKER" ]]; then
+  ok "install_agent_hooks: marker written once the claude hook landed"
+else
+  fail "install_agent_hooks: marker missing after a successful init"
+fi
+
+# 24b. Init produced no hook -> no marker + a warning, so the next start
+#      retries. settings.json still carries the SessionEnd reporter, whose
+#      *path* contains "rtk": the check must not accept that as the hook.
+rm -f "$MARKER"
+printf '%s\n' '{"hooks":{"SessionEnd":[{"hooks":[{"command":"/workspace/.devcontainer/scripts/rtk-session-end.sh"}]}]}}' >"$CLAUDE_SETTINGS"
+warn24="$(PATH="$STUB_BIN:$PATH" install_agent_hooks 2>&1 >/dev/null)"
+if [[ ! -e "$MARKER" && "$warn24" == *"retrying on next start"* ]]; then
+  ok "install_agent_hooks: failed init leaves no marker (retries next start)"
+else
+  fail "install_agent_hooks retry: marker=$([[ -e $MARKER ]] && echo yes || echo no) warn='$warn24'"
+fi
+
+# 24c. Slim build with no rtk at all: nothing to retry, so the marker is written
+#      and the container doesn't re-run this every start forever.
+rm -f "$MARKER" "$CLAUDE_SETTINGS"
+PATH="/usr/bin:/bin" install_agent_hooks 2>/dev/null
+if [[ -f "$MARKER" ]]; then
+  ok "install_agent_hooks: no rtk on PATH still completes (slim build)"
+else
+  fail "install_agent_hooks: slim build left no marker"
+fi
+
+# 24d. An existing marker short-circuits before any init work — proven by the
+#      silence, since settings.json here carries no hook to find.
+printf '%s\n' '{}' >"$CLAUDE_SETTINGS"
+warn24d="$(PATH="$STUB_BIN:$PATH" install_agent_hooks 2>&1 >/dev/null)"
+if [[ -f "$MARKER" && -z "$warn24d" ]]; then
+  ok "install_agent_hooks: existing marker short-circuits"
+else
+  fail "install_agent_hooks short-circuit: warn='$warn24d'"
+fi
+
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [[ "$failed" -eq 0 ]]

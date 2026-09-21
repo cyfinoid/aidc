@@ -388,6 +388,17 @@ install_agent_hooks() {
   if command -v rtk >/dev/null 2>&1; then
     rtk init --global --auto-patch --hook-only >/dev/null 2>&1 \
       || echo "[bootstrap] rtk init --global failed" >&2
+    # Verify the hook landed instead of trusting rtk's exit code (it exits 0 on
+    # partial success — the same reason the wire_rtk_* helpers assert), and
+    # leave the marker unwritten when it did not. That omission IS the retry
+    # channel: the marker lives on the claude_home volume, so writing it after
+    # a failed init would pin the container hookless until 'aidc destroy'.
+    # Matched on the PreToolUse command rather than the bare string "rtk",
+    # which the SessionEnd reporter's own path would also satisfy.
+    if ! grep -q '"rtk hook' "$home_dir/.claude/settings.json" 2>/dev/null; then
+      echo "[bootstrap] rtk claude hook missing after init — retrying on next start" >&2
+      return 0
+    fi
   fi
 
   mkdir -p "$(dirname "$marker")"

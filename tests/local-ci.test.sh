@@ -56,7 +56,7 @@ run_runner() {
 LIST_OUT="$(AIDC_CI_PROJECT="$REPO_ROOT" bash "$RUNNER" --list 2>&1)" || true
 if grep -qE '^shellcheck  .*triggers: push pull_request$' <<<"$LIST_OUT" \
    && grep -qE '^  job shellcheck +legs:1 steps:[0-9]+$' <<<"$LIST_OUT" \
-   && grep -q 'Run rtk savings unit tests' <<<"$LIST_OUT"; then
+   && grep -q 'Run unit test suites' <<<"$LIST_OUT"; then
   ok "--list on real workflows shows shellcheck (1 job, run-step batch names)"
 else
   fail "--list output unexpected: $(head -5 <<<"$LIST_OUT")"

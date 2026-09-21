@@ -20,6 +20,11 @@ references/
 /CLAUDE.md
 /AGENTS.md
 /logs
+# Generated scan output. `aidc-scan --all` runs the SBOM + license gate, which
+# writes sbom/{code.cdx.json,code.spdx.json,license-report.json} into the repo
+# root. Build artifacts, regenerated on demand — never commit them.
+/sbom/
+
 # Editor / OS noise
 .DS_Store
 *.swp

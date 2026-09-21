@@ -37,72 +37,37 @@ jobs:
       - name: Run bootstrap unit tests
         run: .github/scripts/test-bootstrap-state.sh
 
-      - name: Run SBOM + license unit tests
+      # Discovered, not enumerated. This step used to list each suite by name,
+      # which silently drifted: nine suites existed in tests/ that no workflow
+      # ever ran, so a broken one (agent-auth-seed) sat red while CI stayed
+      # green. Globbing means a new tests/*.test.sh is covered the moment it
+      # lands. Every suite is hermetic (docker/compose and the host are stubbed)
+      # and needs nothing beyond bash + the shellcheck installed above.
+      - name: Run unit test suites
         run: |
-          set -euo pipefail
-          bash tests/license-resolve.test.sh
-          bash tests/license-check.test.sh
-          bash tests/sbom-diff.test.sh
-
-      - name: Run scaffold-validator unit tests
-        run: bash tests/validate-scaffold.test.sh
-
-      - name: Run supply-chain pin unit tests
-        run: |
-          set -euo pipefail
-          bash tests/update-pins.test.sh
-          bash tests/check-image-pins.test.sh
-
-      - name: Run compose file-chain unit tests
-        run: bash tests/compose-file-args.test.sh
-
-      - name: Run firewall unit tests
-        run: bash tests/init-firewall.test.sh
-
-      - name: Run token-delivery unit tests
-        run: bash tests/token-delivery.test.sh
-
-      - name: Run doctor + update unit tests
-        run: |
-          set -euo pipefail
-          bash tests/doctor.test.sh
-          bash tests/update.test.sh
-
-      - name: Run upgrade unit tests
-        run: bash tests/upgrade.test.sh
-
-      - name: Run aidc-scan unit tests
-        run: bash tests/aidc-scan.test.sh
-
-      - name: Run CLI polish unit tests
-        run: bash tests/cli-errors.test.sh
-
-      - name: Run session-sync unit tests
-        run: bash tests/sync-sessions.test.sh
-
-      - name: Run build/agent-selection unit tests
-        run: |
-          set -euo pipefail
-          bash tests/compose-up.test.sh
-          bash tests/agents-opt-in.test.sh
-
-      - name: Run image-split + toolchain-volume unit tests
-        run: bash tests/toolchain-volume.test.sh
+          set -uo pipefail
+          shopt -s nullglob
+          suites=(tests/*.test.sh)
+          if [[ "${#suites[@]}" -eq 0 ]]; then
+            echo "no test suites found under tests/ — expected at least one" >&2
+            exit 1
+          fi
+          failed=()
+          for suite in "${suites[@]}"; do
+            echo "::group::$suite"
+            if bash "$suite"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error file=$suite::suite failed"
+              failed+=("$suite")
+            fi
+          done
+          echo "ran ${#suites[@]} suite(s), ${#failed[@]} failed"
+          if [[ "${#failed[@]}" -gt 0 ]]; then
+            printf 'failed: %s\n' "${failed[@]}" >&2
+            exit 1
+          fi
 
       - name: Check lib module layering
         run: .github/scripts/check-module-deps.sh
-
-      - name: Run scan-hook + insights unit tests
-        run: |
-          set -euo pipefail
-          bash tests/scan-hook.test.sh
-          bash tests/insights.test.sh
-
-      - name: Run rtk savings unit tests
-        run: bash tests/rtk-gain.test.sh
-
-      - name: Run aidc-ci engine + subcommand unit tests
-        run: |
-          set -euo pipefail
-          bash tests/local-ci.test.sh
-          bash tests/ci-cmd.test.sh
