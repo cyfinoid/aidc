@@ -67,9 +67,28 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: /tmp/.buildx-cache
-          key: aidc-image-buildx-${{ hashFiles('.devcontainer/Dockerfile', '.devcontainer/Dockerfile.base') }}
+          key: aidc-image-buildx-${{ hashFiles('templates/devcontainer/Dockerfile.tmpl', 'templates/devcontainer/Dockerfile.base.tmpl') }}
           restore-keys: |
             aidc-image-buildx-
+
+      # `.devcontainer/` is generated scaffold and gitignored (this repo
+      # dogfoods itself), so it does not exist in a fresh checkout — building
+      # from it failed with "unable to prepare context: path .devcontainer not
+      # found". Build from the tracked templates instead, the same way
+      # image-size.yml does. They carry no placeholders, so they are buildable
+      # as-is; only project-setup.sh has to be stubbed, since Dockerfile.tmpl
+      # COPYs it out of the build context.
+      - name: Scaffold build context from templates
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          cp templates/devcontainer/Dockerfile.tmpl work/Dockerfile
+          cp templates/devcontainer/Dockerfile.base.tmpl work/Dockerfile.base
+          cat > work/project-setup.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          :
+          EOF
 
       - name: Build devcontainer image
         run: |
@@ -79,10 +98,10 @@ jobs:
           docker buildx build \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
-            --load -t aidc-base:ci -f .devcontainer/Dockerfile.base .devcontainer
+            --load -t aidc-base:ci -f work/Dockerfile.base work
           docker buildx build \
             --build-arg AIDC_BASE_IMAGE=aidc-base:ci \
-            --load -t aidc-image-scan:ci .devcontainer
+            --load -t aidc-image-scan:ci -f work/Dockerfile work
           # Swap instead of appending so the cache does not grow unboundedly.
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache

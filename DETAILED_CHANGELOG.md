@@ -152,6 +152,67 @@ Keychain constraint forcing `CURSOR_API_KEY`, the `cursor_agent_home` volume
 mounting `~/.cursor` (not `~/.cursor-agent`), rtk's `hooks.json` wiring, and
 the fact that host session sync is *not* wired for cursor-agent.
 
+### Two latent CI failures, surfaced by opening the PR
+
+Both workflows below are Docker-dependent and trigger on `push`/`pull_request`
+to `main`. This branch had never been PR'd to `main`, so **neither had ever run
+against this code** — every session log on the branch flagged the Docker checks
+as "needs a host, deferred". Opening PR #33 ran them for the first time and both
+failed immediately. Neither is caused by the work above.
+
+**5. `validate-scaffold.sh` fed a directory path to compose's numeric knobs.**
+To render the scaffolded compose file without a live aidc environment, the
+validator stubbed every `${AIDC_*}` variable it could find with one throwaway
+temp dir:
+
+```bash
+done < <(grep -o '\${AIDC_[A-Z_]*' "$proj/.devcontainer/compose.yaml" | sed 's/^\${//' | sort -u)
+```
+
+That grep is indiscriminate. Three of the variables are not paths —
+`pids_limit: ${AIDC_PIDS_LIMIT:-4096}`, `mem_limit: ${AIDC_MEM_LIMIT:-0}`,
+`cpus: ${AIDC_CPU_LIMIT:-0}` — and compose rejected them:
+
+```
+error while interpolating services.workspace.pids_limit: failed to cast to
+expected type: strconv.ParseInt: parsing "/tmp/tmp.jdUK87a7ab": invalid syntax
+FAIL: compose.yaml failed docker compose config
+```
+
+Three failures, since both hardening overrides merge onto the same base file.
+The fix keys off the template's own convention rather than a name list: stub
+only the bare `${AIDC_FOO}` form, which is how the template writes bind-mount
+sources (a host path has no sensible default), and leave every
+`${AIDC_FOO:-default}` unset so its default renders. `grep -oE
+'\$\{AIDC_[A-Z_]+\}'` splits them exactly — 12 path variables stubbed, 7
+defaulted ones (the 3 numeric knobs plus `AIDC_AGENTS`, `AIDC_BASE_IMAGE`,
+`AIDC_SECURITY_TOOLS`, `AIDC_TOOLCHAINS`) left alone. Self-maintaining: a new
+bind source is picked up automatically, a new defaulted knob is ignored
+automatically. Verified the two hardening overrides reference no `${AIDC_*}`
+variables of their own, so the base file was the whole story.
+
+**6. The SBOM `image-scan` job built a build context that doesn't exist.**
+
+```
+ERROR: failed to build: unable to prepare context: path ".devcontainer" not found
+```
+
+`.devcontainer/` is generated scaffold and is gitignored — the repo dogfoods
+itself, so the directory is present locally and absent in every fresh checkout.
+The job built from it directly, and its buildx cache key hashed the same absent
+files (`hashFiles('.devcontainer/Dockerfile', …)` → empty, hence the
+`Cache not found for input keys: aidc-image-buildx-` in the log). The Wave 3
+session log had already noted this job as "pre-existing, out of scope".
+
+Fixed by mirroring `image-size.yml`, which had it right all along: copy the
+tracked `Dockerfile.tmpl`/`Dockerfile.base.tmpl` into a `work/` context and
+build from there. The templates carry no placeholders, so they build as-is;
+only `project-setup.sh` needs stubbing, because `Dockerfile.tmpl` `COPY`s it
+out of the context. The cache key now hashes the template paths. Swept the
+other workflows for the same assumption — the remaining `.devcontainer`
+references are all in `aidc-e2e.yml`, which runs a real `aidc init` first, so
+they are correct.
+
 ### Commands
 
 ```bash
