@@ -213,6 +213,44 @@ other workflows for the same assumption — the remaining `.devcontainer`
 references are all in `aidc-e2e.yml`, which runs a real `aidc init` first, so
 they are correct.
 
+### Round 3 — the same rule, wrong in a second place
+
+The `validate-scaffold` fix worked on the next CI run (`compose.yaml renders`,
+both overrides merge, `validate-scaffold: all checks passed`). The e2e job then
+failed a few steps later, at "hardening posture":
+
+```
+error while interpolating services.workspace.cpus: failed to cast to expected
+type: strconv.ParseFloat: parsing "/home/runner/work/_temp/compose-stub": invalid syntax
+```
+
+Identical defect, second location: `aidc-e2e.yml` inlined its own copy of the
+stub-variable grep rather than calling the validator.
+
+```bash
+for v in $(grep -o '\${AIDC_[A-Z_]*' .devcontainer/compose.yaml | sed 's/^\${//' | sort -u); do
+  export "$v=$stub"
+done
+```
+
+**Process note worth keeping:** after fixing the first copy the sweep was for
+`.devcontainer` references — the symptom of the *other* bug — not for the
+pattern just fixed. A `grep -rn "AIDC_\[A-Z_\]"` across the repo would have
+found both copies immediately, and that is what finally did. When a fix lands,
+grep for the *pattern* repo-wide, not just the file.
+
+Rather than apply the same correction twice, the rule was extracted to
+`.github/scripts/compose-stub-vars.sh` — one script, both callers
+(`validate-scaffold.sh` via its own `script_dir`, the e2e step via
+`$GITHUB_WORKSPACE`). It documents *why* the split exists, absorbs grep's
+no-match exit 1 explicitly (an empty list is a valid result, and `set -o
+pipefail` would otherwise turn it into a failure), and is bash-3.2-safe like
+the rest of `.github/scripts`. Five new cases in
+`tests/validate-scaffold.test.sh` (6 → 11) cover the bind-source/defaulted
+split with dedup, an explicit guard that the three numeric knobs are never
+stubbed, the empty-result path, the usage error, and a pin on the real
+template's 12-variable split.
+
 ### Commands
 
 ```bash

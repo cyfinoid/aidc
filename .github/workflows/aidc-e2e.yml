@@ -289,7 +289,11 @@ jobs:
           cd "$work"
           stub="$RUNNER_TEMP/compose-stub"
           mkdir -p "$stub"
-          for v in $(grep -o '\${AIDC_[A-Z_]*' .devcontainer/compose.yaml | sed 's/^\${//' | sort -u); do
+          # Which AIDC_* vars need a stub path — and which must stay unset so
+          # their own defaults render — is decided by compose-stub-vars.sh.
+          # Stubbing the numeric knobs (pids_limit/mem_limit/cpus) with a
+          # directory makes compose fail a type cast instead of rendering.
+          for v in $("$GITHUB_WORKSPACE/.github/scripts/compose-stub-vars.sh" .devcontainer/compose.yaml); do
             export "$v=$stub"
           done
           export COMPOSE_PROJECT_NAME=aidc_posture

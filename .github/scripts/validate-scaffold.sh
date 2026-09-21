@@ -22,6 +22,7 @@ if [[ $# -ne 1 || ! -d "${1:-}" ]]; then
   exit 2
 fi
 proj="$(cd "$1" && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 failures=0
 fail() { printf 'FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
@@ -122,15 +123,9 @@ fi
 
 # --- 5. compose file renders --------------------------------------------------
 # Stub the ${AIDC_*} variables the compose file references so `config` can
-# render without a live aidc environment. Values are throwaway paths — so stub
-# ONLY the bare `${AIDC_FOO}` form, which is how the template writes bind mount
-# sources (no sensible default exists for a host path). Anything written
-# `${AIDC_FOO:-default}` is left unset on purpose so its own default renders:
-# those are the non-path knobs, and three of them are numeric —
-# `pids_limit: ${AIDC_PIDS_LIMIT:-4096}`, `mem_limit:`, `cpus:`. Handing those a
-# temp directory made `docker compose config` fail on a type cast
-# (`strconv.ParseInt: parsing "/tmp/tmp.XXXX"`), which is what a blanket
-# assignment used to do.
+# render without a live aidc environment. Which variables need a throwaway path
+# (and, just as importantly, which must be left alone so their own defaults
+# render) is decided by compose-stub-vars.sh — see that script for why.
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   stub_dir="$(mktemp -d)"
   trap 'rm -rf "$stub_dir"' EXIT
@@ -138,8 +133,7 @@ if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; 
   while IFS= read -r var; do
     [[ -n "$var" ]] || continue
     compose_env+=("$var=$stub_dir")
-  done < <(grep -oE '\$\{AIDC_[A-Z_]+\}' "$proj/.devcontainer/compose.yaml" \
-             | sed -e 's/^\${//' -e 's/}$//' | sort -u)
+  done < <("$script_dir/compose-stub-vars.sh" "$proj/.devcontainer/compose.yaml")
   if env COMPOSE_PROJECT_NAME=aidc_scaffold_validate \
        ${compose_env[@]+"${compose_env[@]}"} \
        docker compose -f "$proj/.devcontainer/compose.yaml" config -q; then

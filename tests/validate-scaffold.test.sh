@@ -126,5 +126,70 @@ else
   fail "missing argument: expected exit 2, got $rc"
 fi
 
+# ── 7. compose-stub-vars.sh: which vars get a stub path ─────────────────────
+# The rule that matters: bind-mount sources (bare ${AIDC_FOO}) need a stub,
+# defaulted knobs (${AIDC_FOO:-x}) must NOT get one — three of them are numeric
+# and compose fails a type cast when handed a directory path. This used to be a
+# copy-pasted grep in two places and was wrong in both.
+STUB_VARS="$REPO_ROOT/.github/scripts/compose-stub-vars.sh"
+fixture="$TMP_ROOT/compose-vars.yaml"
+cat >"$fixture" <<'YAML'
+services:
+  workspace:
+    pids_limit: ${AIDC_PIDS_LIMIT:-4096}
+    mem_limit: ${AIDC_MEM_LIMIT:-0}
+    cpus: ${AIDC_CPU_LIMIT:-0}
+    image: ${AIDC_BASE_IMAGE:-aidc-base:latest}
+    volumes:
+      - ${AIDC_WORKSPACE}:/workspace
+      - ${AIDC_HOST_SEED_CLAUDE}:/host-seed/claude
+      - ${AIDC_WORKSPACE}:/dup
+YAML
+got="$("$STUB_VARS" "$fixture" | tr '\n' ' ')"
+if [[ "$got" == "AIDC_HOST_SEED_CLAUDE AIDC_WORKSPACE " ]]; then
+  ok "compose-stub-vars: only bare \${AIDC_*} bind sources, deduplicated"
+else
+  fail "compose-stub-vars: got '$got'"
+fi
+
+# The numeric knobs are the regression that broke CI — assert explicitly.
+if ! "$STUB_VARS" "$fixture" | grep -qE 'AIDC_(PIDS|MEM|CPU)_LIMIT'; then
+  ok "compose-stub-vars: numeric knobs excluded (keep their defaults)"
+else
+  fail "compose-stub-vars: a defaulted numeric knob would be stubbed with a path"
+fi
+
+# A compose file with no AIDC_* refs is a valid empty result, not a failure —
+# grep exits 1 there and `set -o pipefail` would otherwise propagate it.
+printf 'services:\n  workspace:\n    image: busybox\n' >"$TMP_ROOT/bare.yaml"
+rc=0
+out="$("$STUB_VARS" "$TMP_ROOT/bare.yaml")" || rc=$?
+if [[ "$rc" -eq 0 && -z "$out" ]]; then
+  ok "compose-stub-vars: no matches exits 0 with empty output"
+else
+  fail "compose-stub-vars no-match: rc=$rc out='$out'"
+fi
+
+rc=0
+"$STUB_VARS" >/dev/null 2>&1 || rc=$?
+if [[ "$rc" -eq 2 ]]; then
+  ok "compose-stub-vars: missing argument exits 2"
+else
+  fail "compose-stub-vars usage: expected exit 2, got $rc"
+fi
+
+# 8. The real template must keep rendering under this rule: every bare
+#    ${AIDC_*} is reported, and nothing else is.
+real="$REPO_ROOT/templates/devcontainer/compose.yaml.tmpl"
+if [[ -f "$real" ]]; then
+  n_stub="$("$STUB_VARS" "$real" | wc -l | tr -d ' ')"
+  if [[ "$n_stub" -gt 0 ]] \
+     && ! "$STUB_VARS" "$real" | grep -qE 'AIDC_(PIDS|MEM|CPU)_LIMIT|AIDC_BASE_IMAGE'; then
+    ok "compose-stub-vars: real template splits into $n_stub path vars, no defaulted knobs"
+  else
+    fail "compose-stub-vars on real template: $("$STUB_VARS" "$real" | tr '\n' ' ')"
+  fi
+fi
+
 printf '\n%d passed, %d failed\n' "$passed" "$failed"
 [[ "$failed" -eq 0 ]]
