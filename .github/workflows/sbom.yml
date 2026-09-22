@@ -99,9 +99,18 @@ jobs:
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --load -t aidc-base:ci -f work/Dockerfile.base work
-          docker buildx build \
+          # The thin layer is `FROM ${AIDC_BASE_IMAGE}` = aidc-base:ci, which
+          # only exists in the *daemon's* image store (that is what --load
+          # above puts it in). setup-buildx-action selects a docker-container
+          # builder, and that driver cannot see the daemon store — it tries to
+          # pull aidc-base:ci from Docker Hub and fails with
+          # "pull access denied, repository does not exist". Build this stage on
+          # the default docker-driver builder, which resolves local images.
+          # The base build keeps the container driver because that is what
+          # supports `--cache-to type=local`, and it is the expensive half.
+          docker buildx build --builder default \
             --build-arg AIDC_BASE_IMAGE=aidc-base:ci \
-            --load -t aidc-image-scan:ci -f work/Dockerfile work
+            -t aidc-image-scan:ci -f work/Dockerfile work
           # Swap instead of appending so the cache does not grow unboundedly.
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
