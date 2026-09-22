@@ -314,6 +314,56 @@ is by far the expensive half; the thin layer builds with `--builder default`,
 which resolves `aidc-base:ci` out of the local store. `--load` dropped from the
 second build — with the docker driver the image lands in the store anyway.
 
+### Round 5 — the same purge bug, one directory over
+
+`.devcontainer/` was gone; the e2e's assertion loop simply advanced to the next
+entry:
+
+```
+##[error]destroy --purge-scaffold left .ai-container behind
+```
+
+`aidc upgrade` had written `.ai-container/backup/20260922-003016/` earlier in
+the same job (visible in the log), and the scan hook writes
+`.ai-container/scan-hook.log`. Neither is in `AIDC_MANAGED_PATHS`, so the
+non-recursive `rmdir` no-opped exactly as it had for `.devcontainer/`.
+
+**Why round 4's test did not catch it.** The fixture was built from what `aidc
+init` writes. `.ai-container/` therefore contained only `project.env`, so
+removing that one managed file left the directory empty and the `rmdir`
+succeeded — the test passed while the real-world path was still broken. A
+fixture modelled on the *initial* state cannot catch a bug that only appears in
+the *accumulated* state.
+
+Two corrections, one for the bug and one for the pattern that produced it:
+
+**1. Stop enumerating `.ai-container/`.** Every file in it is aidc's —
+`project.env`, `backup/`, `scan-hook.log`, `.aidc-stamp.XXXXXX` temp files from
+an interrupted stamp rewrite — and the directory is git-excluded as a unit.
+`--purge-scaffold` is documented to remove it, settings included (`config.sh`
+even tells users per-project settings are lost). So it is now `rm -rf`'d as a
+tree. That is immune to future state files, which enumeration provably is not:
+enumeration missed two here and one in `.devcontainer/` a round earlier.
+
+`.devcontainer/` keeps enumerate-then-`rmdir`, because it legitimately holds
+files that are *not* aidc's — a devcontainer asset you added stays, and the
+directory survives with it. Its unmanaged aidc files (`project-setup.sh`,
+`.env`, and now `.env.aidc-tmp.*` from an interrupted atomic write) are removed
+explicitly. The comment now states which directories get which treatment and
+why.
+
+**2. A structural guard against the whole class.** The root cause is always a
+file aidc writes that no list knows how to remove. `init-force.test.sh` already
+guards overwrite-map → template-exists; nothing guarded the direction that
+matters here, map *target* → `AIDC_MANAGED_PATHS`. Added to
+`tests/destroy-scaffold.test.sh`, so registering a new scaffold template
+without adding it to the managed list now fails a test instead of silently
+breaking the purge.
+
+The fixture was also rebuilt to model the post-upgrade state: `backup/` with a
+nested file, `scan-hook.log`, and both interrupted-write temp files. 7 → 9
+cases. Verified by stashing the fix: **5 passed, 3 failed**, matching CI.
+
 ### Commands
 
 ```bash
