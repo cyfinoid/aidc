@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 #
-# Unit tests for strip_host_hooks() in the devcontainer bootstrap script.
+# Unit tests for the devcontainer bootstrap script: strip_host_hooks() and
+# install_tool_links().
 #
 # Sources the template (made importable by its exec-guard) and exercises the
 # hook-stripping logic on fixture settings.json blobs: gryph/cot commands are
 # removed, rtk + user hooks are preserved, emptied events are pruned, the
-# transform is idempotent, and malformed/missing input doesn't crash.
+# transform is idempotent, and malformed/missing input doesn't crash. The
+# link installer is driven by overriding its home_dir/scripts_dir globals.
 #
 # Run:   .github/scripts/test-bootstrap-state.sh
 # CI:    wired into .github/workflows/shellcheck.yml
@@ -109,6 +111,22 @@ assert_eq "malformed file untouched" 'this is not json' "$(cat "$f5")"
 # --- Case 6: missing file is a no-op (exit 0) -------------------------------
 strip_host_hooks "$tmp/does-not-exist.json" && rc=0 || rc=$?
 assert_eq "missing file exits 0" '0' "$rc"
+
+# --- Case 7: install_tool_links symlinks aidc-scan + aidc-ci when present ---
+t7="$tmp/t7"; mkdir -p "$t7/scripts"
+printf '#!/usr/bin/env bash\n' >"$t7/scripts/aidc-scan.sh"
+printf '#!/usr/bin/env bash\n' >"$t7/scripts/aidc-ci.sh"
+( home_dir="$t7/home" scripts_dir="$t7/scripts" install_tool_links )
+assert_eq "aidc-scan link target" "$t7/scripts/aidc-scan.sh" \
+  "$(readlink "$t7/home/.local/bin/aidc-scan")"
+assert_eq "aidc-ci link target" "$t7/scripts/aidc-ci.sh" \
+  "$(readlink "$t7/home/.local/bin/aidc-ci")"
+
+# --- Case 8: no scripts present -> no links, exit 0 --------------------------
+t8="$tmp/t8"; mkdir -p "$t8/scripts"
+( home_dir="$t8/home" scripts_dir="$t8/scripts" install_tool_links ) && rc=0 || rc=$?
+assert_eq "no scripts: exits 0" '0' "$rc"
+assert_eq "no links created" '' "$(ls "$t8/home/.local/bin" 2>/dev/null | tr '\n' ' ')"
 
 echo
 echo "passed=$pass failed=$fail"

@@ -1,0 +1,12 @@
+name: env-ctx-fixture
+on: [push]
+env:
+  WF_V: wf-value
+jobs:
+  envctx:
+    runs-on: ubuntu-latest
+    steps:
+      - name: use-env-ctx
+        run: printf '%s\n' "${{ env.WF_V }}" > "$RUNNER_TEMP/env-ctx-seen"
+      - name: missing-env-ctx
+        run: echo "${{ env.MISSING }}"

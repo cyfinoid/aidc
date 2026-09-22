@@ -1,0 +1,21 @@
+name: ctx-fixture
+on: [push]
+jobs:
+  ctx:
+    runs-on: ubuntu-latest
+    steps:
+      - name: capture
+        # Interpolation happens in env: values (the pattern semgrep's
+        # run-shell-injection rule mandates); the run: body only reads the
+        # variables. The engine expands ${{ }} in step env values, so this
+        # still proves the widened github.* contexts resolve.
+        env:
+          CTX_REF_NAME: ${{ github.ref_name }}
+          CTX_ACTOR: ${{ github.actor }}
+          CTX_REPO: ${{ github.repository }}
+          CTX_HEAD_REF: ${{ github.head_ref }}
+        run: |
+          printf '%s\n' "ref_name=$CTX_REF_NAME" > "$RUNNER_TEMP/ctx-ref_name"
+          printf '%s\n' "actor=$CTX_ACTOR" > "$RUNNER_TEMP/ctx-actor"
+          printf '%s\n' "repo=$CTX_REPO" > "$RUNNER_TEMP/ctx-repo"
+          printf '%s\n' "head_ref=[$CTX_HEAD_REF]" > "$RUNNER_TEMP/ctx-head_ref"

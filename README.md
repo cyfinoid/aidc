@@ -4,7 +4,7 @@
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 [![macOS only](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#prereqs)
 
-**aidc** — short for **AI Dev Container** — is a one-command devcontainer wrapper for AI coding agents (`claude`, `codex`, `opencode`, `grok`, `cursor-agent`). It scaffolds a hardened Linux container per repo, mounts your code at `/workspace`, persists agent state in named Docker volumes (so agents don't read your `~/.ssh` or your shell history), and bakes in always-on security scanners and supply-chain guardrails.
+**aidc** — short for **AI Dev Container** — is a one-command devcontainer wrapper for AI coding agents (`claude`, `codex`, `opencode`, `grok`, `omp`, `cursor-agent`). It scaffolds a hardened Linux container per repo, mounts your code at `/workspace`, persists agent state in named Docker volumes (so agents don't read your `~/.ssh` or your shell history), and bakes in always-on security scanners and supply-chain guardrails.
 
 If you're already running these agents directly on your Mac and have been quietly nervous about it, this is for you.
 
@@ -15,7 +15,7 @@ Pre-1.0, rolling-release, personal-ish. The author uses it daily; the API may st
 ## Prereqs
 
 - **macOS** (host-side bits assume Mac — Keychain, LaunchAgent, `pbpaste`, `~/.local/bin` aliases)
-- **Docker** running (Docker Desktop / OrbStack / Colima)
+- **Docker** running (Docker Desktop / OrbStack / Colima) — or, experimentally, Apple's native `container` runtime via socktainer (see [docs/apple-container.md](docs/apple-container.md))
 - **git**
 - *(optional, high-security mode)* **Lima** on macOS or **Firecracker** on Linux — only needed if you enable `--isolate-vm`
 
@@ -37,7 +37,7 @@ aidc init          # one-time scaffold; writes .devcontainer/, .ai-container/, C
 aidc claude        # auto-runs `aidc up` if needed, then drops you into Claude Code in the container
 ```
 
-Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `cursor-agent`) auto-bootstrap the container on first run.
+Tool commands (`aidc claude` / `codex` / `opencode` / `grok` / `omp` / `cursor-agent`) auto-bootstrap the container on first run.
 
 ## Claude authentication
 
@@ -62,24 +62,30 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 
 - creates local-only `.devcontainer/`, `.ai-container/`, `CLAUDE.md`, `AGENTS.md`, and `.cursor/rules/00-core-logics.mdc`
 - mounts project code only at `/workspace`; overlays `/workspace/.devcontainer` read-only inside the container
-- installs the coding agents (`claude`, `codex`, `opencode`, `grok`) as native prebuilt binaries — no npm-global, no Node runtime dependency for the agents themselves
+- installs the coding agents (`claude`, `codex`, `opencode`, `grok`, `omp`) as native prebuilt binaries — no npm-global, no Node runtime dependency for the agents themselves
 - persists tool state in per-repo Docker volumes instead of mounting whole host homes
 - seeds selected config from host read-only mounts on first startup
 - creates one `CORE_LOGICS` git worktree per repo and mounts it at `/opt/CORE_LOGICS` for shared cross-repo notes
 - detects the project's toolchains (Go, Rust, Ruby, Java, PHP, Node, Python — plus shell scripts) and installs them automatically; `aidc rescan` re-detects later for a repo that started empty
+- shares one `aidc-base` image (OS, Python, scanners, agents) across all projects — each project's image is a thin toolchain delta on top — and keeps Go/Rust/JDK in one read-only `aidc_toolchains` volume (`aidc tools install`) instead of a full copy per project
 - bakes always-on security scanners (`semgrep`, `gitleaks`, `trufflehog`) plus per-toolchain linters (`gosec`, `bandit`, `cargo-audit`, `bundler-audit`, `shellcheck`) into the image
 - seeds non-negotiable guidance into `CLAUDE.md` / `AGENTS.md` for every project — security guardrails, test-coverage discipline, and changelog/session-log conventions
 - seeds committed project docs once, never overwriting your edits — `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and a `logs/` session journal
 - auto-syncs in-container agent session transcripts back to the host on container start and exit, so the host's `/insights` stays current
-- ships SafeDep's `pmg` / `vet` for supply-chain interception and `rtk` for token-saving CLI proxying
+- ships SafeDep's `pmg` / `vet` for supply-chain interception and `rtk` for token-saving CLI proxying — rtk is wired into every agent it supports (claude, opencode, cursor-agent, omp experimentally), prints a savings summary when a Claude session ends, persists its history across rebuilds, and merges container savings into the host's own rtk db so a plain host `rtk gain` shows the combined total
 - offers an opt-in default-deny egress firewall with a sane allowlist
 
 ## Documentation
 
-- [`docs/install.md`](docs/install.md) — prereqs, install, daily commands, what lives where, per-project customisation, cleanup
+- [`docs/install.md`](docs/install.md) — prereqs, platform matrix, install, daily commands, what lives where, per-project customisation, cleanup
 - [`docs/claude-profiles.md`](docs/claude-profiles.md) — alternate Claude API targets, local-model profiles, one-time OAuth login, session sync
-- [`docs/security.md`](docs/security.md) — scanners, supply-chain guardrails, agent guardrails (rtk), opt-in egress firewall
+- [`docs/cursor.md`](docs/cursor.md) — host Cursor GUI with container-side execution ("Reopen in Container"), `aidc cursor-agent`, `CURSOR_API_KEY` auth
+- [`docs/security.md`](docs/security.md) — `aidc scan`, scanners, image supply chain, container hardening, agent guardrails (rtk), opt-in egress firewall
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — symptom → cause → fix for the common failures (`aidc doctor` first)
+- [`docs/uninstall.md`](docs/uninstall.md) — per-project and host-wide removal
+- [`docs/releasing.md`](docs/releasing.md) — how releases are cut
 - [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md) — host-clipboard → container PNG paste bridge
+- [`docs/local-ci.md`](docs/local-ci.md) — `aidc ci`: replaying the wrapped project's GitHub workflows locally (opt-in)
 - [`CHANGELOG.md`](CHANGELOG.md) — high-level release notes; [`DETAILED_CHANGELOG.md`](DETAILED_CHANGELOG.md) — long-form per-change rationale
 - [`SECURITY.md`](SECURITY.md) — how to report vulnerabilities in aidc itself
 
@@ -91,6 +97,7 @@ aidc up [--clipboard] [--isolate-vm]
 aidc down
 aidc rebuild [--clipboard] [--isolate-vm]
 aidc rescan
+aidc tools <install [go|rust|java|all]|status>
 aidc status [--global]
 aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
 aidc shell
@@ -98,12 +105,23 @@ aidc exec -- <command>...
 aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
 aidc codex [-- ...]
 aidc opencode [-- ...]
+aidc opencode-web [--port N] [--no-auth] [--username NAME] [-- ...]
 aidc grok [-- ...]
+aidc omp [-- ...]
 aidc cursor-agent [-- ...]
 aidc cursor
 aidc sync-claude-aliases
-aidc sync-config <claude|codex|opencode|grok|all>
-aidc sync-sessions [claude|codex|opencode|grok|all]
+aidc sync-config <claude|codex|opencode|grok|omp|all>
+aidc sync-sessions [claude|codex|opencode|grok|omp|all]
+aidc sbom
+aidc licenses [--fail]
+aidc scan [--all|--staged|paths...] [--json]
+aidc ci [--list|--workflow <glob>|--job <id>|--all|--strict|-- ...]
+aidc doctor
+aidc insights [--since DATE]
+aidc update
+aidc upgrade [--dry-run|--diff] [-y]
+aidc version
 ```
 
 `aidc status` shows the container + mounts/config for the current folder. `--global` lists every aidc container on the host with disk/CPU/memory and a totals line.
@@ -114,7 +132,22 @@ Session transcripts auto-sync from the container to the host on container start,
 
 Toggle it with `AIDC_AUTO_SYNC_SESSIONS`: set it host-wide in `~/.config/aidc/config.env` (universal default for every project) or per project in `.ai-container/project.env` (overrides the global default). `0` disables auto-sync; manual `aidc sync-sessions` always works regardless.
 
+`aidc opencode-web` gives opencode its "desktop feeling" inside the container: it runs opencode's browser UI (`opencode web`) and publishes it on the **host loopback** at `http://127.0.0.1:4096/` (change with `--port N` or `AIDC_OPENCODE_WEB_PORT`), so a host browser drives an agent that lives in the reproducible container — while the LAN never sees it (opencode binds `0.0.0.0` *inside* the container; the host publish is `127.0.0.1`-only). Auth is on by default: a random `OPENCODE_SERVER_PASSWORD` is generated and printed (set your own by exporting it first; `--username` overrides the default `opencode` user). `--no-auth` disables it — safe only because the port is loopback-only. Opting in (re)creates the container to add the port, exactly like the firewall/hardened overrides; a later plain `aidc <tool>` recreates it back without the port.
+
 `--provider` remains as a compatibility alias for `--profile`.
+
+## Cursor / VS Code as the UI, aidc as the container
+
+You can keep the **IDE running on your host** and have all the actual work — editing, terminals, builds, agents, scanners — happen **inside the aidc container**:
+
+1. `aidc cursor` (or open the folder in Cursor/VS Code).
+2. Command Palette → **Dev Containers: Reopen in Container**.
+
+aidc's scaffolded `devcontainer.json` handles the setup the Dev Containers extension doesn't do on its own: its `initializeCommand` runs `aidc up` on the host first, which writes `.devcontainer/.env` (so the extension's own `docker compose up` resolves the same `AIDC_*` bind sources and `COMPOSE_PROJECT_NAME` aidc uses), builds the shared base image, and creates the toolchain volume. Then the extension attaches to that same container. The integrated terminal is the aidc zsh, `/workspace` is your repo, and the security guardrails all apply.
+
+`aidc cursor-agent` runs Cursor's CLI agent inside the container instead. Its config/login live under `~/.cursor` (persisted in a named volume; seed host settings with `aidc sync-config cursor`, or authenticate with `cursor-agent login` in the container / a `CURSOR_API_KEY`).
+
+> macOS note: `initializeCommand` uses `bash -lc 'aidc up'` so `~/.local/bin/aidc` is found even when the IDE is launched from the GUI. If it still isn't found, edit `initializeCommand` in `.devcontainer/devcontainer.json` to aidc's absolute path.
 
 ## Isolation modes
 
@@ -125,6 +158,8 @@ aidc runs in one of two isolation modes. **Normal mode is the default and is wha
 Runs your project inside a Docker container. On macOS, Docker Desktop/OrbStack/Colima already wraps that container inside a Linux VM — your code is isolated from the host by both the container boundary *and* the VM boundary. All aidc containers share the same Docker VM, so they're isolated from each other by standard container namespacing (PID, network, filesystem, IPC) but not by a hypervisor boundary.
 
 **This is fine for practically everyone.** The container + VM double boundary on macOS, combined with aidc's always-on scanners, read-only mounts, named volumes (no host home directory access), and optional egress firewall, already provides strong isolation between the AI agent and your host system.
+
+> **Experimental: Apple `container` provider.** On macOS 26 + Apple Silicon you can point aidc at Apple's native [`container`](https://github.com/apple/container) runtime (via the socktainer Docker-API shim) with `AIDC_DOCKER_PROVIDER=apple`. It runs **each container in its own lightweight VM**, so it provides per-container VM isolation without `--isolate-vm`. Unverified end-to-end — see [docs/apple-container.md](docs/apple-container.md).
 
 ### High-security mode (`--isolate-vm`)
 
@@ -166,6 +201,7 @@ echo "AIDC_ISOLATE_VM=1" >> .ai-container/project.env
 ## Notes
 
 - Generated files are added to `.git/info/exclude` when the target directory is a git repo, so your project stays clean. The seeded project docs (`CHANGELOG.md`, `DETAILED_CHANGELOG.md`, `logs/`) are *not* excluded — they belong to your repo and are meant to be committed.
+- **Updating**: `aidc update` pulls the latest aidc (ff-only) and re-runs the installer; `aidc upgrade` then brings an existing project's scaffold up to the new templates — it shows a diff first, backs up anything it rewrites (to `.ai-container/backup/`), and never touches user-owned files. Implicit commands (`aidc up`, `aidc claude`, …) only *create missing* scaffold files and print a one-line notice when the scaffold is out of date; they never rewrite your files. `aidc doctor` diagnoses common setup problems.
 - Settings can be set host-wide in `~/.config/aidc/config.env` (universal defaults for every project) or per project in `.ai-container/project.env`, which overrides the global default. Both files are sourced for env vars like `AIDC_AUTO_SYNC_SESSIONS`, `AIDC_ENABLE_EGRESS_FIREWALL`, and `AIDC_ISOLATE_VM`.
 - Container egress is open by default; set `AIDC_ENABLE_EGRESS_FIREWALL=1` in `.ai-container/project.env` for a default-deny allowlist. See [`docs/security.md`](docs/security.md#optional-egress-firewall).
 - The host-clipboard bridge is **off by default** — no host clipboard socket is mounted into the container. Opt in per (re)create with `aidc up --clipboard` / `aidc rebuild --clipboard`, or persist `AIDC_ENABLE_CLIPBOARD=1` in `.ai-container/project.env`. See [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md).

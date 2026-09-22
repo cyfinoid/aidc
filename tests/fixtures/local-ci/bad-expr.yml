@@ -1,0 +1,8 @@
+name: bad-expr-fixture
+on: [push]
+jobs:
+  secretive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: uses-secret
+        run: echo "${{ secrets.LEAK }}"

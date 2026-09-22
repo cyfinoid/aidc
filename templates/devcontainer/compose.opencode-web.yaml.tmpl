@@ -1,0 +1,14 @@
+# aidc-managed
+# Compose override applied automatically by 'aidc opencode-web' (sets
+# AIDC_OPENCODE_WEB=1). It publishes the opencode web-UI port on the host
+# LOOPBACK ONLY (127.0.0.1) so the host browser can reach the agent running
+# inside the container, while the LAN cannot. opencode itself binds 0.0.0.0
+# *inside* the container (required for the forwarded port to reach it); the
+# loopback host-publish here is what keeps that off the network. Auth stays on
+# by default — 'aidc opencode-web' generates an OPENCODE_SERVER_PASSWORD unless
+# you pass --no-auth. The port defaults to 4096; override with
+# AIDC_OPENCODE_WEB_PORT (or 'aidc opencode-web --port N').
+services:
+  workspace:
+    ports:
+      - "127.0.0.1:${AIDC_OPENCODE_WEB_PORT:-4096}:${AIDC_OPENCODE_WEB_PORT:-4096}"

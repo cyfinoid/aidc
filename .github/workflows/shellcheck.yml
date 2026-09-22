@@ -13,7 +13,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends shellcheck
@@ -36,3 +36,38 @@ jobs:
 
       - name: Run bootstrap unit tests
         run: .github/scripts/test-bootstrap-state.sh
+
+      # Discovered, not enumerated. This step used to list each suite by name,
+      # which silently drifted: nine suites existed in tests/ that no workflow
+      # ever ran, so a broken one (agent-auth-seed) sat red while CI stayed
+      # green. Globbing means a new tests/*.test.sh is covered the moment it
+      # lands. Every suite is hermetic (docker/compose and the host are stubbed)
+      # and needs nothing beyond bash + the shellcheck installed above.
+      - name: Run unit test suites
+        run: |
+          set -uo pipefail
+          shopt -s nullglob
+          suites=(tests/*.test.sh)
+          if [[ "${#suites[@]}" -eq 0 ]]; then
+            echo "no test suites found under tests/ — expected at least one" >&2
+            exit 1
+          fi
+          failed=()
+          for suite in "${suites[@]}"; do
+            echo "::group::$suite"
+            if bash "$suite"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error file=$suite::suite failed"
+              failed+=("$suite")
+            fi
+          done
+          echo "ran ${#suites[@]} suite(s), ${#failed[@]} failed"
+          if [[ "${#failed[@]}" -gt 0 ]]; then
+            printf 'failed: %s\n' "${failed[@]}" >&2
+            exit 1
+          fi
+
+      - name: Check lib module layering
+        run: .github/scripts/check-module-deps.sh

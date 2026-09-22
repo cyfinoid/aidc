@@ -1,0 +1,10 @@
+# aidc-managed
+# Compose override applied automatically when AIDC_ENABLE_EGRESS_FIREWALL=1.
+# The default-deny egress firewall (scripts/init-firewall.sh) needs iptables +
+# ipset, which require these capabilities; default (firewall-off) containers
+# run without them.
+services:
+  workspace:
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW

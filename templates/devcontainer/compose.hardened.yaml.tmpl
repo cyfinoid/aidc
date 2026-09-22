@@ -1,0 +1,11 @@
+# aidc-managed
+# Compose override applied automatically when AIDC_NO_NEW_PRIVILEGES=1
+# (off by default). Blocks privilege escalation inside the container —
+# including setuid binaries, which means **interactive `sudo` stops working**
+# (no more `sudo apt-get install` inside the container). Incompatible with
+# the egress firewall, whose init needs runtime sudo; aidc warns and skips
+# this override when both are enabled.
+services:
+  workspace:
+    security_opt:
+      - no-new-privileges:true

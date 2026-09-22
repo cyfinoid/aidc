@@ -5,16 +5,25 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
+        AIDC_BASE_IMAGE: ${AIDC_BASE_IMAGE:-aidc-base:latest}
         AIDC_TOOLCHAINS: ${AIDC_TOOLCHAINS:-}
         AIDC_SECURITY_TOOLS: ${AIDC_SECURITY_TOOLS:-}
+        AIDC_AGENTS: ${AIDC_AGENTS:-}
     init: true
     stdin_open: true
     tty: true
     user: vscode
     working_dir: /workspace
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
+    # No cap_add here: Docker's default capability set is enough for normal
+    # development (ping, sudo, chown all work). NET_ADMIN/NET_RAW are granted
+    # only when the egress firewall is enabled, via compose.firewall.yaml —
+    # aidc adds that file to the compose invocation automatically.
+    # Resource knobs (host-wide in ~/.config/aidc/config.env or per project in
+    # .ai-container/project.env). Defaults: pids capped (fork-bomb guard,
+    # invisible in normal use), memory/CPU unlimited.
+    pids_limit: ${AIDC_PIDS_LIMIT:-4096}
+    mem_limit: ${AIDC_MEM_LIMIT:-0}
+    cpus: ${AIDC_CPU_LIMIT:-0}
     environment:
       HOME: /home/vscode
       HISTFILE: /commandhistory/.zsh_history
@@ -22,6 +31,14 @@ services:
       AIDC_CONTAINER_HOME: /home/vscode
       AIDC_CORE_LOGICS_DIR: /opt/CORE_LOGICS
       AIDC_WORKSPACE_DIR: /workspace
+      # Claude Code writes its global config to ~/.claude.json — a *sibling* of
+      # ~/.claude, so OUTSIDE the claude_home volume below. Left at the default it
+      # lives in the container layer and is wiped on every recreation, losing MCP
+      # registrations, project-trust and onboarding (the same class of bug that
+      # bit opencode's XDG data dir). Pointing CLAUDE_CONFIG_DIR at the volume dir
+      # relocates .claude.json (and .credentials.json) INSIDE it, so all of
+      # Claude's global state persists like every other agent's.
+      CLAUDE_CONFIG_DIR: /home/vscode/.claude
     command:
       - /bin/bash
       - -lc
@@ -50,8 +67,20 @@ services:
         target: /host-seed/opencode
         read_only: true
       - type: bind
+        source: ${AIDC_HOST_SEED_OPENCODE_DATA}
+        target: /host-seed/opencode-data
+        read_only: true
+      - type: bind
         source: ${AIDC_HOST_SEED_GROK}
         target: /host-seed/grok
+        read_only: true
+      - type: bind
+        source: ${AIDC_HOST_SEED_OMP}
+        target: /host-seed/omp
+        read_only: true
+      - type: bind
+        source: ${AIDC_HOST_SEED_CURSOR}
+        target: /host-seed/cursor
         read_only: true
       - type: bind
         source: ${AIDC_GITCONFIG_SOURCE}
@@ -73,17 +102,51 @@ services:
       - type: volume
         source: opencode_home
         target: /home/vscode/.config/opencode
+      # opencode keeps its auth (auth.json) in the XDG *data* dir, not the config
+      # dir — persist it so logins survive container recreation.
+      - type: volume
+        source: opencode_data_home
+        target: /home/vscode/.local/share/opencode
+      # Cursor CLI (cursor-agent) stores config + login under ~/.cursor
+      # (~/.cursor/cli-config.json), NOT ~/.cursor-agent — so the volume mounts
+      # there to persist logins across container recreation.
       - type: volume
         source: cursor_agent_home
-        target: /home/vscode/.cursor-agent
+        target: /home/vscode/.cursor
       - type: volume
         source: grok_home
         target: /home/vscode/.grok
+      - type: volume
+        source: omp_home
+        target: /home/vscode/.omp
+      # rtk's savings history (history.db — the record every rtk-wired agent
+      # appends to). Without a volume it lives in the container layer and every
+      # recreation wipes the stats; 'aidc sync-sessions' still merges whatever
+      # accumulated to the host before that.
+      - type: volume
+        source: rtk_data
+        target: /home/vscode/.local/share/rtk
+      # Shared read-only toolchain store (issue #9): one copy of Go/Rust/JDK
+      # (+ gosec/cargo-audit) serves all projects, populated by
+      # 'aidc tools install'. Read-only so agents can't tamper with the shared
+      # toolchain; revoke by repopulating the volume.
+      - type: volume
+        source: aidc_toolchains
+        target: /opt/toolchains
+        read_only: true
 
 volumes:
   command_history:
+  # Shared across ALL projects (not project-scoped), so it is external: aidc
+  # creates/populates it via 'aidc tools install' and never removes it on a
+  # per-project 'aidc destroy'. aidc ensures it exists before compose runs.
+  aidc_toolchains:
+    external: true
   claude_home:
   codex_home:
   opencode_home:
+  opencode_data_home:
   cursor_agent_home:
   grok_home:
+  omp_home:
+  rtk_data:

@@ -1,0 +1,20 @@
+name: download-fixture
+on: [push]
+jobs:
+  art:
+    runs-on: ubuntu-latest
+    steps:
+      - name: make
+        run: printf 'roundtrip\n' > "$RUNNER_TEMP/dl.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dl-artifact
+          path: ${{ runner.temp }}/dl.txt
+      # fictional vendor + SHA-pinned (never fetched; the engine dispatches
+      # on the base name only) — pins the download-artifact path
+      - uses: actions/download-artifact@2222222222222222222222222222222222222222
+        with:
+          name: dl-artifact
+          path: ${{ runner.temp }}/from-artifact
+      - name: verify
+        run: test "$(cat "$RUNNER_TEMP/from-artifact/dl.txt")" = roundtrip

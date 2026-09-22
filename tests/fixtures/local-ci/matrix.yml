@@ -1,0 +1,12 @@
+name: matrix-fixture
+on: [push]
+jobs:
+  mx:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bash: ["3.2", "5.2"]
+    steps:
+      - name: record
+        run: echo "${{ matrix.bash }}" > "$RUNNER_TEMP/seen-${{ matrix.bash }}"

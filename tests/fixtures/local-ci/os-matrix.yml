@@ -1,0 +1,11 @@
+name: os-matrix-fixture
+on: [push]
+jobs:
+  e2e:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: greet
+        run: echo "on $(uname -s)"

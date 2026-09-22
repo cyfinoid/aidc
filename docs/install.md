@@ -2,11 +2,28 @@
 
 ## Prereqs
 
-- macOS
-- Docker running (Docker Desktop / OrbStack / Colima)
+- macOS (primary platform) or Linux (experimental — see the matrix below)
+- Docker running (Docker Desktop / OrbStack / Colima on macOS; the docker
+  engine + compose plugin on Linux). Experimentally, Apple's native `container`
+  runtime via socktainer with `AIDC_DOCKER_PROVIDER=apple` — see
+  [apple-container.md](apple-container.md).
 - git
 
-`aidc` is macOS-only by design. The host-side bits (clipboard bridge, Keychain integration, LaunchAgent, profile aliases in `~/.local/bin`) assume a Mac.
+### Platform support
+
+aidc is **macOS-first**. The container side is Linux either way; what differs
+is the host integration:
+
+| Feature | macOS | Linux host |
+|---|---|---|
+| Container lifecycle (`init`/`up`/`scan`/agents/…) | ✅ | ✅ (exercised in CI on ubuntu) |
+| Claude token from Keychain | ✅ | ❌ — export `CLAUDE_CODE_OAUTH_TOKEN` yourself (or log in interactively once; it persists in the volume) |
+| Clipboard bridge (`pbpaste` in-container) | ✅ | ❌ (LaunchAgent + `pbpaste` are macOS-only) |
+| Claude profile aliases / completions in `~/.local/bin` | ✅ | ✅ |
+| `--isolate-vm` | Lima | Firecracker (rough edges expected) |
+
+On Linux, `aidc doctor` reports the unavailable host features as
+informational lines, not failures.
 
 ## Install
 
@@ -37,12 +54,15 @@ aidc up            # build + start container
 | `aidc codex` | start OpenAI Codex |
 | `aidc opencode` | start OpenCode |
 | `aidc grok` | start Grok Build |
-| `aidc cursor-agent` | start Cursor Agent |
-| `aidc cursor` | open host Cursor on the repo |
+| `aidc omp` | start omp (oh-my-pi) |
+| `aidc cursor-agent` | start Cursor Agent ([docs/cursor.md](cursor.md)) |
+| `aidc cursor` | open host Cursor on the repo, then "Reopen in Container" ([docs/cursor.md](cursor.md)) |
 | `aidc status` | container + config/mounts status for this folder |
 | `aidc status --global` | one-line summary of every aidc container on this host |
 | `aidc down` | stop the container, keep volumes |
 | `aidc rebuild` | rebuild the image and restart |
+| `aidc tools install [go\|rust\|java\|all]` | populate the shared read-only toolchain volume |
+| `aidc tools status` | show which shared toolchains are installed |
 | `aidc destroy` | remove container + volumes + image (prompts; `-f` to skip) |
 
 ## What lives where (inside the container)
@@ -51,15 +71,22 @@ aidc up            # build + start container
 /workspace                       your repo (rw bind)
 /workspace/.devcontainer         scaffold (ro bind)
 /opt/CORE_LOGICS                 shared cross-repo notes (rw, git worktree)
-/home/vscode/.claude             Claude state (named volume)
+/home/vscode/.claude             Claude state (named volume; CLAUDE_CONFIG_DIR keeps .claude.json here too)
 /home/vscode/.codex              Codex state (named volume)
-/home/vscode/.config/opencode    OpenCode state (named volume)
+/home/vscode/.config/opencode    OpenCode config (named volume)
+/home/vscode/.local/share/opencode  OpenCode auth + sessions — XDG data dir (named volume)
 /home/vscode/.grok               Grok state (named volume)
+/home/vscode/.omp                omp (oh-my-pi) state (named volume)
+/home/vscode/.cursor             Cursor CLI (cursor-agent) config/login (named volume)
 /commandhistory                  bash + zsh history (named volume)
-/host-seed/{claude,codex,opencode,grok,gitconfig}   read-only host seeds
+/host-seed/{claude,codex,opencode,grok,omp,cursor,gitconfig}   read-only host seeds
 ```
 
 `GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).
+
+Session transcripts sync **back to the host** (`aidc sync-sessions`, plus auto-sync on container start / agent exit / `down` / `destroy`): claude → `~/.claude/projects/`, codex → `~/.codex/sessions/`, grok → `~/.grok/sessions/`, omp → `~/.omp/agent/sessions/`, and opencode → `~/.local/share/aidc/sessions/opencode/<repo-slug>/`. The opencode copy is per-project, excludes `auth.json` (credentials never leave the container), and keeps `opencode.db` (or `storage/` on older builds).
+
+opencode sessions are **additionally merged into the host's own data dir** (`~/.local/share/opencode/`) so session viewers reading the default location (e.g. agent-sessions) see container sessions without being pointed elsewhere. The merge is **additive and non-destructive**: legacy `storage/` JSON is folder-copied per session file, and `opencode.db` rows are inserted with `INSERT OR IGNORE` (existing host rows always win on a session-id collision). Before touching the host db, aidc snapshots it (a `.aidc-bak` sidecar, also a busy/lock probe) and verifies the container's and host's opencode schemas match — on any mismatch, lock, or missing `sqlite3` it logs and skips, leaving only the per-project quarantine copy. Requires `sqlite3` on the **host**. Opt out (keep only the per-project copy) with `AIDC_OPENCODE_MERGE_TO_BASE=0`.
 
 ## Per-project customisation
 
@@ -69,23 +96,49 @@ aidc inspects the repo on every `aidc up` and installs matching toolchains:
 
 | Marker file(s) | Toolchain |
 |---|---|
-| `go.mod` | Go — apt `golang-go` |
-| `Cargo.toml`, `rust-toolchain.toml`, `rust-toolchain` | Rust stable via rustup (minimal profile) |
+| `go.mod` | Go (+ `gosec`) — shared toolchain volume |
+| `Cargo.toml`, `rust-toolchain.toml`, `rust-toolchain` | Rust stable (+ `cargo-audit`) — shared toolchain volume |
 | `Gemfile` | Ruby — apt `ruby-full` |
-| `pom.xml`, `build.gradle`, `build.gradle.kts` | JDK — apt `default-jdk` |
+| `pom.xml`, `build.gradle`, `build.gradle.kts` | JDK 21 — shared toolchain volume |
 | `composer.json` | PHP CLI — apt `php-cli` |
-| `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` | Node 22 (already in base) |
+| `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` | Node 22 — nodesource apt (installed on detection) |
 | `requirements.txt`, `uv.lock`, `pyproject.toml`, `Pipfile`, `Pipfile.lock`, `poetry.lock` | Python 3.13 via uv (already in base) |
 
-Node and Python markers don't trigger a language install (the base image already has them) — they're listed so you can see in the build log what aidc detected, and so explicit `AIDC_TOOLCHAINS=node,python` works for clarity. The Python detection still installs `bandit`; see [security.md](security.md#per-toolchain-linters-auto-installed).
+Node is installed from the nodesource apt repo when the `node` toolchain is detected (or pinned via `AIDC_TOOLCHAINS=node`) — it's no longer baked into the base image, so projects that don't use Node don't carry it. Python 3.13 (uv-managed) stays in the base image; the Python marker still triggers a `bandit` install (see [security.md](security.md#per-toolchain-linters-auto-installed)).
 
 The detected list is passed as a Docker `--build-arg AIDC_TOOLCHAINS=go,rust,...` so it caches per combination — switching between repos doesn't rebuild.
+
+### Shared image + toolchain volume
+
+aidc's image is split so N projects don't each carry a full ~3 GB copy:
+
+- **Shared base image** (`aidc-base:<hash>`) — OS, uv/Python, the pinned security
+  scanners, pmg, and the coding agents. Built **once** per content hash (of
+  `.devcontainer/Dockerfile.base` + the `AIDC_AGENTS` selection) and reused by
+  every project; the per-project image is a thin `FROM aidc-base` layer with just
+  the detected toolchains and project-setup. Pin a custom base with
+  `AIDC_BASE_IMAGE=<tag>` in `.ai-container/project.env`.
+- **Shared toolchain volume** (`aidc_toolchains`) — Go, Rust, and the JDK (plus
+  `gosec`/`cargo-audit`) live in **one** read-only Docker volume mounted at
+  `/opt/toolchains` in every container, instead of being baked per project. It's
+  populated automatically for detected go/rust/java toolchains on `aidc up`, or
+  manually with `aidc tools install [go|rust|java|all]` (`aidc tools status` lists
+  what's present). Because it's read-only and shared, revoke a bad toolchain once
+  with `docker volume rm aidc_toolchains` and repopulate.
 
 **Override** in `.ai-container/project.env`:
 
 ```bash
 AIDC_TOOLCHAINS=go,ruby      # force-install this list, ignore detection
 AIDC_TOOLCHAINS=             # disable installs entirely (empty value, still set)
+AIDC_AGENTS=claude,codex     # slim the shared base to only these agents (builds
+                             #   a base variant). Default 'all' bakes in every
+                             #   agent once in the shared base (issue #7), so the
+                             #   per-project cost of all agents is already zero.
+AIDC_NO_BUILD=1              # never build implicitly — 'aidc up' fails fast if
+                             #   the image is missing (build it with 'aidc rebuild')
+AIDC_BASE_IMAGE=my-base:tag  # pin a custom shared base instead of the built
+                             #   content-hashed aidc-base:<hash>
 ```
 
 ### Custom setup hook
@@ -104,7 +157,7 @@ go install golang.org/x/tools/gopls@latest
 
 Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/rtk) stay cached.
 
-After editing, `aidc rebuild` (or just `aidc up` — `--build` is implicit) picks up the change.
+After editing, run `aidc rebuild` to pick up the change — `aidc up` and the agent commands build only when the image is **missing** (fast path), so they won't rebuild an existing image on their own.
 
 It's `.gitignore`'d via `.git/info/exclude` along with the rest of `.devcontainer/`. `git add -f .devcontainer/project-setup.sh` if you want to track it.
 
