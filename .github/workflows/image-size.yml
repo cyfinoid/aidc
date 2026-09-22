@@ -66,8 +66,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          set -euo pipefail
-          gh pr comment "$PR_NUMBER" --body "**aidc image size** (toolchains: go,node,python): \`${IMAGE_SIZE}\` — 6 GB soft ceiling, informational until the size-reduction PRs all land."
+          set -uo pipefail
+          # Reporting only — never fail the build on it. This workflow's budget
+          # is deliberately a soft gate, so the *comment* must not be harder
+          # than the assertion it reports: GITHUB_TOKEN is read-only for
+          # fork PRs regardless of the permissions block above, and a job that
+          # built the image successfully should not go red because it could not
+          # post about it.
+          gh pr comment "$PR_NUMBER" --body "**aidc image size** (toolchains: go,node,python): \`${IMAGE_SIZE}\` — 6 GB soft ceiling, informational until the size-reduction PRs all land." \
+            || echo "::warning::could not post the image-size comment (token likely read-only on a fork PR); size was ${IMAGE_SIZE}"
 
       - name: Budget assertion (soft)
         run: |

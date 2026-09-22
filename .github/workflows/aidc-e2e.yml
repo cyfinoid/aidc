@@ -367,9 +367,21 @@ jobs:
           fi
 
           # Re-init must reproduce the managed scaffold identically.
+          #
+          # Compare the *scaffold*, not aidc's accumulated state. .ai-container/
+          # is both: project.env is scaffold and is reproduced, but the same
+          # directory also collects state a fresh init has no reason to recreate
+          # — backup/ is written by the `aidc upgrade` step earlier in this very
+          # job, scan-hook.log by the in-container scan hook, .aidc-stamp.* by
+          # an interrupted stamp rewrite. Diffing those against a fresh init
+          # compares accumulated state with initial state, which can never
+          # match. (This only became reachable once destroy started removing
+          # .ai-container/ properly; before that the assertion above failed
+          # first and this diff never ran.)
           ( cd "$work" && aidc init ) || fail "re-init after destroy failed"
           for d in .devcontainer .ai-container scripts/ci .cursor; do
-            diff -r "$snapshot/$d" "$work/$d" \
+            diff -r -x backup -x scan-hook.log -x '.aidc-stamp.*' \
+              "$snapshot/$d" "$work/$d" \
               || fail "re-init produced a different $d than the first init"
           done
           echo "lifecycle OK"

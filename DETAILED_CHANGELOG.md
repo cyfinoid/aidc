@@ -364,6 +364,56 @@ The fixture was also rebuilt to model the post-upgrade state: `backup/` with a
 nested file, `scan-hook.log`, and both interrupted-write temp files. 7 → 9
 cases. Verified by stashing the fix: **5 passed, 3 failed**, matching CI.
 
+### Round 6 — a test-harness flaw, and a forward audit to stop the cycle
+
+```
+Only in /home/runner/work/_temp/scaffold-before/.ai-container: backup
+Error: re-init produced a different .ai-container than the first init
+```
+
+Not a product bug. The e2e's lifecycle step snapshots the scaffold, destroys
+it, re-inits, and diffs. But the snapshot is taken *after* the `aidc upgrade`
+step, which writes `.ai-container/backup/<timestamp>/`; a fresh `aidc init` has
+no reason to create a backup directory. So it compared accumulated state with
+initial state — impossible to satisfy. Unreachable until now only because the
+`left .ai-container behind` assertion failed first.
+
+Fixed by excluding aidc's accumulated/runtime state from the comparison
+(`backup/`, `scan-hook.log`, `.aidc-stamp.*`), leaving it comparing the
+scaffold, which is what the step claims to check. Verified `diff -r -x` skips
+*directories* (not just files) and that the fixed invocation passes against a
+simulated snapshot reproducing the exact CI condition.
+
+**Why this kept happening, and what was done about it.** Five consecutive
+rounds each fixed one failure and surfaced the next. The common cause is
+structural: `aidc-e2e.yml`, `sbom.yml` and `image-size.yml` all trigger on
+pull_request-to-main, and this branch had never been PR'd — so a long
+Docker-dependent job was executing for the first time, failing at its first
+unrun assertion, and only then exposing the second. Fixing serially guarantees
+one round per latent defect.
+
+So this round the *remaining* job was audited ahead of the next run rather than
+waiting for it:
+
+- **e2e** — the lifecycle step is the last in the job; its remaining assertions
+  were checked by hand. `project.env` is generated deterministically
+  (`write_project_env`: version, workspace, slug, core root/branch/worktree —
+  no timestamps or randomness), so it re-inits byte-identically.
+  `scripts/ci/license-matrix.tsv` is user-owned and survives destroy, then
+  `copy_template_once` leaves it alone on re-init, so that tree matches too.
+  The volume check greps for volumes that no step in this job creates.
+- **sbom job** — runs `scripts/ci/aidc-sbom-all.sh`. The same gate runs locally
+  under `aidc-scan --all`, which is clean (`vet: ok`, `license-check: ok`), so
+  this is expected to pass.
+- **image-size** — found one real hazard and fixed it: the `gh pr comment` step
+  ran under `set -e`, so a reporting failure would fail a job that had built
+  the image fine. `GITHUB_TOKEN` is read-only on fork PRs whatever the
+  `permissions:` block says. The workflow's own header calls the budget "a soft
+  gate (a warning, not a failure)" — the comment is now equally soft, matching
+  the fail-open-for-reporting principle already established for the rtk hook.
+- **shellcheck / bash-compat** — fully reproduced locally (33 suites, lint,
+  compat, module-deps all green).
+
 ### Commands
 
 ```bash
