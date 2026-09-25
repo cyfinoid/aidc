@@ -398,7 +398,11 @@ RUN pmg setup install \
 
 FROM base AS agent-opencode-1
 ARG OPENCODE_VERSION
-RUN curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh \
+# Stage self-sufficiency: base has no ~/.local/bin (the final main stage
+# creates it), and installers only create their own dirs — every agent stage
+# pre-creates the dirs it writes to (structural guard: tests/base-image-stages.test.sh).
+RUN mkdir -p /home/vscode/.local/bin /home/vscode/.opencode \
+    && curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh \
     && VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path \
     && ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode \
     && rm -f /tmp/install-opencode.sh
@@ -410,7 +414,8 @@ FROM agent-opencode-${WITH_OPENCODE} AS sel-opencode
 
 FROM base AS agent-claude-1
 ARG CLAUDE_VERSION
-RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
+RUN mkdir -p /home/vscode/.local/bin \
+    && curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
     && bash /tmp/install-claude.sh "$CLAUDE_VERSION" \
     && rm -f /tmp/install-claude.sh
 FROM base AS agent-claude-0
@@ -419,7 +424,8 @@ FROM agent-claude-${WITH_CLAUDE} AS sel-claude
 
 FROM base AS agent-codex-1
 ARG CODEX_VERSION
-RUN curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
+RUN mkdir -p /home/vscode/.local/bin \
+    && curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
     && sh /tmp/install-codex.sh --release "$CODEX_VERSION" \
     && rm -f /tmp/install-codex.sh
 FROM base AS agent-codex-0
@@ -427,7 +433,8 @@ RUN mkdir -p /home/vscode/.local/bin
 FROM agent-codex-${WITH_CODEX} AS sel-codex
 
 FROM base AS agent-cursor-agent-1
-RUN curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh \
+RUN mkdir -p /home/vscode/.local/bin \
+    && curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh \
     && bash /tmp/install-cursor.sh \
     && { cursor-agent --version || true; } \
     && rm -f /tmp/install-cursor.sh
@@ -437,7 +444,8 @@ FROM agent-cursor-agent-${WITH_CURSOR_AGENT} AS sel-cursor-agent
 
 FROM base AS agent-grok-1
 ARG GROK_VERSION
-RUN curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
+RUN mkdir -p /home/vscode/.local/bin \
+    && curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
     && GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" \
     && rm -f /tmp/install-grok.sh
 FROM base AS agent-grok-0
@@ -446,7 +454,8 @@ FROM agent-grok-${WITH_GROK} AS sel-grok
 
 FROM base AS agent-omp-1
 ARG OMP_VERSION
-RUN curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh \
+RUN mkdir -p /home/vscode/.local/bin \
+    && curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh \
     && PI_INSTALL_DIR=/home/vscode/.local/bin sh /tmp/install-omp.sh --binary --ref "v$OMP_VERSION" \
     && rm -f /tmp/install-omp.sh
 FROM base AS agent-omp-0

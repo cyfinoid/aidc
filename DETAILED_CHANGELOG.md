@@ -162,6 +162,22 @@ re-downloaded every agent.
   function's `exit` (aidc::die) is caught by a subshell, not by `|| true`;
   and side effects inside `$( )` (exports, globals) never reach the parent —
   observe them via files or run in the current shell.
+- **First real build caught a stage-isolation bug the offline validation
+  could not**: `agent-opencode-1`'s `ln -sf …/.local/bin/opencode` failed
+  with "No such file or directory" — the old monolithic RUN pre-created
+  `~/.local/bin` before installing, but the staged layout starts each agent
+  stage from `base`, which has no `~/.local/bin` (the final `main` stage
+  creates it), and the installer only creates `~/.opencode/bin`. Fix: every
+  `agent-*-1` stage now `mkdir -p`s its target dirs as the RUN's first
+  command (self-sufficiency regardless of installer behavior). New
+  `tests/base-image-stages.test.sh` (32 cases) is the structural guard so CI
+  — which also has no docker — catches this class: per-agent stage trios,
+  mkdir-first in every install stage, global-scope ARGs before the first
+  FROM, `main` merging every selector, and `bash -n` over all RUN blocks
+  (with `--mount=` flags stripped the way the builder consumes them). The
+  guard was validated against a mutation (removing opencode's mkdir makes
+  exactly that one case fail). A completed-but-failed build keeps its stage
+  cache, so the retry resumes at the failed stage.
 
 ### Change 4 — build-time strips in `Dockerfile.base.tmpl`
 
