@@ -96,9 +96,18 @@ jobs:
           # Image split (issue #7): build the shared base first, then the thin
           # per-project layer FROM it.
           docker buildx build \
+            --build-arg AIDC_AGENTS=all \
+            --build-arg WITH_CLAUDE=1 --build-arg WITH_CODEX=1 --build-arg WITH_OPENCODE=1 \
+            --build-arg WITH_CURSOR_AGENT=1 --build-arg WITH_GROK=1 --build-arg WITH_OMP=1 \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --load -t aidc-base:ci -f work/Dockerfile.base work
+          # All six WITH_* flags on purpose: the remaster base builds agents in
+          # per-agent conditional stages (default: opencode only), but this CI
+          # build must bake EVERY pinned agent so check-image-pins.sh can
+          # verify all of them (codex, grok, omp would otherwise be absent
+          # and "fail" their probes). The WITH_* mapping mirrors
+          # aidc::agents_build_flags (lib/aidc/runtime.sh).
           # The thin layer is `FROM ${AIDC_BASE_IMAGE}` = aidc-base:ci, which
           # only exists in the *daemon's* image store (that is what --load
           # above puts it in). setup-buildx-action selects a docker-container

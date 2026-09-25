@@ -50,7 +50,15 @@ jobs:
           # Image split (issue #7): build the shared base, then the thin layer
           # FROM it. Go/Rust/Java live in the shared volume now (issue #9), so
           # this per-project image measures base + node/python deltas.
-          docker build -f work/Dockerfile.base -t aidc-base:probe work
+          docker build -f work/Dockerfile.base \
+            --build-arg AIDC_AGENTS=opencode \
+            --build-arg WITH_OPENCODE=1 \
+            -t aidc-base:probe work
+          # AIDC_AGENTS=opencode + its WITH_* flag pinned explicitly: that is
+          # the remaster template default (slim base, per-agent stages), and
+          # the probe should measure what users get even if the default ever
+          # changes. The WITH_* mapping mirrors aidc::agents_build_flags
+          # (lib/aidc/runtime.sh).
           docker build \
             --build-arg AIDC_BASE_IMAGE=aidc-base:probe \
             --build-arg AIDC_TOOLCHAINS=go,node,python \

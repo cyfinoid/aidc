@@ -60,11 +60,11 @@ aidc cursor-agent -- --help   # pass flags through to cursor-agent
 
 aidc runs it as `cursor-agent --sandbox disabled -f`: the container is already the isolation boundary, so cursor-agent's own sandbox is redundant.
 
-The binary is only in the image if `cursor-agent` is in the agent set. It is by default (`AIDC_AGENTS=all`), but if you've pinned the set, include it:
+The binary is only in the image if `cursor-agent` is in the agent set. Since the remaster the default is `AIDC_AGENTS=opencode` (slim base), but you don't have to configure anything: invoking `aidc cursor-agent` auto-extends the selection (persisted in `.ai-container/project.env`) and rebuilds — only cursor-agent's layer builds, the rest is cached. To pin it up front:
 
 ```bash
 # .ai-container/project.env
-AIDC_AGENTS=claude,cursor-agent
+AIDC_AGENTS=opencode,cursor-agent
 ```
 
 Then `aidc rebuild` — an existing image fast-starts without the new agent.

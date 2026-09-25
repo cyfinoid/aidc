@@ -9,8 +9,33 @@
 #
 # Base image and uv stage pinned by index (multi-arch) digest.
 # To repin: `docker pull <ref>:<tag>` then read the "Digest:" line.
+#
+# Per-agent build flags (remaster) — declared BEFORE the first FROM so they are
+# global-scope and usable in the FROM selector lines of the agent stages below.
+# One ARG per agent, 0/1: each agent's install layer is cached INDEPENDENTLY,
+# so adding an agent to the selection runs only that agent's install and
+# everything already built is reused (this is what makes the 'aidc <tool>'
+# auto-extend rebuild fast). aidc::agents_build_flags (lib/aidc/runtime.sh)
+# derives the flags from the AIDC_AGENTS selection; CI passes them explicitly.
+# AIDC_AGENTS itself remains the selection source of truth (it keys the base
+# image content hash) and is passed as provenance.
+ARG AIDC_AGENTS="opencode"
+ARG WITH_CLAUDE=0
+ARG WITH_CODEX=0
+ARG WITH_OPENCODE=0
+ARG WITH_CURSOR_AGENT=0
+ARG WITH_GROK=0
+ARG WITH_OMP=0
+# Agent version pins — global-scope for the same reason; refreshed by
+# scripts/update-pins.sh, asserted by .github/scripts/check-image-pins.sh.
+ARG CLAUDE_VERSION=2.1.266
+ARG CODEX_VERSION=0.153.4
+ARG OPENCODE_VERSION=1.18.30
+ARG GROK_VERSION=1.0.24
+ARG OMP_VERSION=18.1.15
+
 FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec AS uv
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
+FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae AS base
 
 ARG GIT_DELTA_VERSION=0.19.2
 
@@ -23,7 +48,6 @@ RUN apt-get update \
       bubblewrap \
       ca-certificates \
       curl \
-      dnsutils \
       fd-find \
       fzf \
       gh \
@@ -32,7 +56,6 @@ RUN apt-get update \
       iptables \
       iproute2 \
       jq \
-      nano \
       ripgrep \
       rsync \
       socat \
@@ -46,6 +69,10 @@ RUN apt-get update \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
+# Trimmed from the list above (disk experiments, remaster): `nano` (vim is
+# already present) and `dnsutils` (nothing in the scaffold calls dig/nslookup;
+# `getent hosts` covers the quick check). Install either per project via
+# project-setup.sh if wanted — ~15MB combined.
 
 # Download-and-verify helper used by every pinned tool below. Fails the build
 # on checksum mismatch. The literal sha "SKIP" disables verification — only
@@ -91,7 +118,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv python install 3.13 \
     && ln -sf "$(uv python find 3.13)" /usr/local/bin/python3 \
     && ln -sf /usr/local/bin/python3 /usr/local/bin/python \
-    && uv tool install ast-grep-cli
+    && uv tool install ast-grep-cli \
+# Stdlib slimming: the test suite, idle, and tkinter are never used in a
+# container agent shell, and libpython's static archive only serves static
+# CPython embedding. All removals are globbed and rm -rf-tolerant. Precompiled
+# __pycache__ is deliberately KEPT: PYTHONDONTWRITEBYTECODE=1 (below) means
+# removed bytecode would never be regenerated, slowing every python start.
+    && rm -rf /opt/uv/python/*/lib/python3.13/test \
+              /opt/uv/python/*/lib/python3.13/idlelib \
+              /opt/uv/python/*/lib/python3.13/tkinter \
+              /opt/uv/python/*/lib/libpython3.13.a
 
 ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
     NPM_CONFIG_AUDIT=true \
@@ -178,7 +214,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && aidc-fetch-verified "https://github.com/trufflesecurity/trufflehog/releases/download/${TH_TAG}/trufflehog_${TH_VER}_linux_${TH_ARCH}.tar.gz" /tmp/trufflehog.tar.gz "$TH_SHA" \
     && tar -xzf /tmp/trufflehog.tar.gz -C /usr/local/bin trufflehog \
     && chmod 0755 /usr/local/bin/trufflehog \
-    && rm /tmp/trufflehog.tar.gz
+    && rm /tmp/trufflehog.tar.gz \
+# semgrep is the heaviest uv tool in the image. Its venv ships vendored test
+# suites and __pycache__ that are dead weight at runtime (semgrep's CLI and
+# engine never import its own tests). Distro packaging drops these the same
+# way. dist-info metadata is deliberately KEPT (importlib + console scripts
+# need it), and the strip runs before the layer is committed.
+    && find /opt/uv/tools/semgrep -type d -name tests -prune -exec rm -rf {} + \
+    && find /opt/uv/tools/semgrep -type d -name __pycache__ -prune -exec rm -rf {} + \
+    && find /opt/uv/tools/semgrep -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
 # Pinned. To bump: check https://github.com/gitleaks/gitleaks/releases for the
 # newest tag, update GITLEAKS_VERSION, rebuild, and commit. "latest" still
@@ -325,9 +369,10 @@ ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/
 RUN pmg setup install \
     && pmg setup doctor || true
 
-# Coding agents as native prebuilt binaries, version-pinned. Each installer is
-# fetched to a file and then executed (never piped) so the executed bytes can
-# be inspected. Version contracts verified against each vendor's installer:
+# Coding agents as native prebuilt binaries, version-pinned, ONE STAGE EACH.
+# Each installer is fetched to a file and then executed (never piped) so the
+# executed bytes can be inspected. Version contracts verified against each
+# vendor's installer:
 #   claude:   positional arg (stable|latest|X.Y.Z); verifies the binary against
 #             its manifest SHA256 internally.
 #   codex:    --release X.Y.Z → github.com/openai/codex release rust-vX.Y.Z.
@@ -342,18 +387,85 @@ RUN pmg setup install \
 # first" invariant above still holds. Grok's binary is forced into
 # ~/.local/bin via GROK_BIN_DIR so the grok_home volume mounted at ~/.grok at
 # runtime cannot shadow it.
-# AIDC_AGENTS opt-in (issue #8): install only the requested agents so a project
-# that only uses one doesn't pay ~1 GB for all five. Comma-separated; "all"
-# (the default, for back-compat) installs every agent. aidc seeds this from the
-# tool being run on a first build. Because AIDC_AGENTS is part of the base image
-# content hash (see aidc::base_image_tag), changing the selection builds a fresh
-# base. Version pins and the fetch-to-file (never piped) contract are unchanged.
-ARG CLAUDE_VERSION=2.1.266
-ARG CODEX_VERSION=0.153.4
-ARG OPENCODE_VERSION=1.18.30
-ARG GROK_VERSION=1.0.24
-ARG OMP_VERSION=18.1.15
-ARG AIDC_AGENTS="all"
+#
+# AIDC_AGENTS selection (issue #8; remaster): default 'opencode'. Comma-
+# separated; 'all' = every agent, 'none' = scanner-only base. aidc turns the
+# selection into the WITH_* flags (aidc::agents_build_flags) and auto-extends
+# it when an invoked agent is missing (cached stages make that rebuild fast);
+# the selection is persisted per project in .ai-container/project.env and keys
+# the base image content hash (see aidc::base_image_tag). Version pins and the
+# fetch-to-file (never piped) contract are unchanged.
+
+FROM base AS agent-opencode-1
+ARG OPENCODE_VERSION
+RUN curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh \
+    && VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path \
+    && ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode \
+    && rm -f /tmp/install-opencode.sh
+FROM base AS agent-opencode-0
+# Not selected: only pre-create the directories the final stage COPY reads, so
+# the selector resolves for both flag values and contributes a byte-scale layer.
+RUN mkdir -p /home/vscode/.local/bin /home/vscode/.opencode
+FROM agent-opencode-${WITH_OPENCODE} AS sel-opencode
+
+FROM base AS agent-claude-1
+ARG CLAUDE_VERSION
+RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
+    && bash /tmp/install-claude.sh "$CLAUDE_VERSION" \
+    && rm -f /tmp/install-claude.sh
+FROM base AS agent-claude-0
+RUN mkdir -p /home/vscode/.local/bin
+FROM agent-claude-${WITH_CLAUDE} AS sel-claude
+
+FROM base AS agent-codex-1
+ARG CODEX_VERSION
+RUN curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
+    && sh /tmp/install-codex.sh --release "$CODEX_VERSION" \
+    && rm -f /tmp/install-codex.sh
+FROM base AS agent-codex-0
+RUN mkdir -p /home/vscode/.local/bin
+FROM agent-codex-${WITH_CODEX} AS sel-codex
+
+FROM base AS agent-cursor-agent-1
+RUN curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh \
+    && bash /tmp/install-cursor.sh \
+    && { cursor-agent --version || true; } \
+    && rm -f /tmp/install-cursor.sh
+FROM base AS agent-cursor-agent-0
+RUN mkdir -p /home/vscode/.local/bin
+FROM agent-cursor-agent-${WITH_CURSOR_AGENT} AS sel-cursor-agent
+
+FROM base AS agent-grok-1
+ARG GROK_VERSION
+RUN curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
+    && GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" \
+    && rm -f /tmp/install-grok.sh
+FROM base AS agent-grok-0
+RUN mkdir -p /home/vscode/.local/bin
+FROM agent-grok-${WITH_GROK} AS sel-grok
+
+FROM base AS agent-omp-1
+ARG OMP_VERSION
+RUN curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh \
+    && PI_INSTALL_DIR=/home/vscode/.local/bin sh /tmp/install-omp.sh --binary --ref "v$OMP_VERSION" \
+    && rm -f /tmp/install-omp.sh
+FROM base AS agent-omp-0
+RUN mkdir -p /home/vscode/.local/bin
+FROM agent-omp-${WITH_OMP} AS sel-omp
+
+# Final (tagged) stage: merge the selected agent payloads back onto base.
+# Binaries land at the SAME ~/.local/bin etc. paths the monolithic install
+# used, so PATH, named-volume layout, and the CI pin probes are unchanged.
+# Multiple COPY merges into .local/ are safe: agent binary names never collide.
+FROM base AS main
+COPY --from=sel-opencode --chown=vscode:vscode /home/vscode/.opencode /home/vscode/.opencode
+COPY --from=sel-opencode --chown=vscode:vscode /home/vscode/.local/ /home/vscode/.local/
+COPY --from=sel-claude --chown=vscode:vscode /home/vscode/.local/ /home/vscode/.local/
+COPY --from=sel-codex --chown=vscode:vscode /home/vscode/.local/ /home/vscode/.local/
+COPY --from=sel-cursor-agent --chown=vscode:vscode /home/vscode/.local/ /home/vscode/.local/
+COPY --from=sel-grok --chown=vscode:vscode /home/vscode/.local/ /home/vscode/.local/
+COPY --from=sel-omp --chown=vscode:vscode /home/vscode/.local/ /home/vscode/.local/
+
 # Every path a named volume mounts over is pre-created here, as vscode: Docker
 # seeds a fresh named volume from the image directory at its target, inheriting
 # that directory's ownership. Miss one and the volume materialises root-owned,
@@ -368,33 +480,4 @@ RUN mkdir -p \
       /home/vscode/.local/share/rtk \
       /home/vscode/.cursor \
       /home/vscode/.grok \
-      /home/vscode/.omp \
-    && agents="${AIDC_AGENTS:-all}" \
-    && if [ "$agents" = "all" ]; then agents="claude,codex,opencode,cursor-agent,grok,omp"; fi \
-    && for agent in $(echo "$agents" | tr ',' ' '); do \
-         case "$agent" in \
-           claude) \
-             curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh && \
-             bash /tmp/install-claude.sh "$CLAUDE_VERSION" ;; \
-           codex) \
-             curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh && \
-             sh /tmp/install-codex.sh --release "$CODEX_VERSION" ;; \
-           opencode) \
-             curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
-             VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path && \
-             ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode ;; \
-           cursor-agent) \
-             curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh && \
-             bash /tmp/install-cursor.sh && \
-             { cursor-agent --version || true; } ;; \
-           grok) \
-             curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh && \
-             GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" ;; \
-           omp) \
-             curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh && \
-             PI_INSTALL_DIR=/home/vscode/.local/bin sh /tmp/install-omp.sh --binary --ref "v$OMP_VERSION" ;; \
-           *) \
-             echo "aidc: unknown agent '$agent' (skipped)" >&2 ;; \
-         esac; \
-       done \
-    && rm -f /tmp/install-*.sh
+      /home/vscode/.omp

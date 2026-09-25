@@ -64,6 +64,8 @@ aidc up            # build + start container
 | `aidc tools install [go\|rust\|java\|all]` | populate the shared read-only toolchain volume |
 | `aidc tools status` | show which shared toolchains are installed |
 | `aidc destroy` | remove container + volumes + image (prompts; `-f` to skip) |
+| `aidc clean` | reclaim disk from stale `aidc-base`/toolchain-store images + dangling leftovers (dry-run by default; `--apply` to remove, `--cache` to also prune the build cache) |
+| `scripts/image-size-report.sh` | per-layer + per-component disk breakdown of the shared base image (measure slimming experiments) |
 
 ## What lives where (inside the container)
 
@@ -126,15 +128,28 @@ aidc's image is split so N projects don't each carry a full ~3 GB copy:
   what's present). Because it's read-only and shared, revoke a bad toolchain once
   with `docker volume rm aidc_toolchains` and repopulate.
 
+> **Don't panic at the images tab (OrbStack/Docker Desktop).** Every thin image
+> is listed at ~the base's size (e.g. one `aidc_<project>-…:latest` per project,
+> each "3.4 GB") because per-image size is the sum of its layers and the shared
+> base layers are counted once *per image*. On disk they are stored once —
+> `docker system df` shows the deduplicated truth (look at the Images row's
+> `SIZE` vs the sum of the tab, and `SHARED SIZE`). Real extra copies are only
+> the orphaned `aidc-base:<oldhash>` tags left by pin bumps and selection
+> changes — `aidc clean` lists and reclaims those.
+
 **Override** in `.ai-container/project.env`:
 
 ```bash
 AIDC_TOOLCHAINS=go,ruby      # force-install this list, ignore detection
 AIDC_TOOLCHAINS=             # disable installs entirely (empty value, still set)
-AIDC_AGENTS=claude,codex     # slim the shared base to only these agents (builds
-                             #   a base variant). Default 'all' bakes in every
-                             #   agent once in the shared base (issue #7), so the
-                             #   per-project cost of all agents is already zero.
+AIDC_AGENTS=opencode,codex   # agents baked into the shared base. Default is
+                             #   'opencode' only — each extra agent costs
+                             #   ~100-200MB. Agents build in per-agent layers,
+                             #   so adding one later is a one-layer rebuild:
+                             #   just run 'aidc <tool>' and it auto-extends
+                             #   this file (or set AIDC_AGENTS=all / =none).
+                             #   AIDC_AUTO_EXTEND_AGENTS=0 requires manual
+                             #   AIDC_AGENTS edits instead.
 AIDC_NO_BUILD=1              # never build implicitly — 'aidc up' fails fast if
                              #   the image is missing (build it with 'aidc rebuild')
 AIDC_BASE_IMAGE=my-base:tag  # pin a custom shared base instead of the built
@@ -169,4 +184,7 @@ aidc destroy                                 # wipe container + volumes + image
 aidc destroy --purge-worktree                # also drop ~/.local/share/aidc/core-worktrees/<slug> and its branch
 aidc destroy --purge-scaffold                # also remove .devcontainer/, .ai-container/, CLAUDE.md, AGENTS.md, cursor rule
 aidc destroy -f --purge-worktree --purge-scaffold   # full uninstall for this repo, no prompt
+aidc clean                                   # host-wide: list stale aidc-base / toolchain-store images (dry run)
+aidc clean --apply                           # remove them (prompt; -f skips)
+aidc clean --apply --cache                   # also prune the docker build cache (rebuilds get slower)
 ```

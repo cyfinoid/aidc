@@ -507,6 +507,83 @@ aidc::cmd_cursor() {
   aidc::log "aidc prepares the env automatically (initializeCommand runs 'aidc up': .env, base image, volumes)"
 }
 
+# Probe-only: does the requested agent binary exist in the project's image?
+# Non-agent tool names pass through. One exec per launch (~100ms) — cheap
+# next to an agent session. The die-with-fix behavior lives in run_tool, which
+# decides between auto-extend (default) and a hard error.
+aidc::agent_installed() {
+  local workspace="$1"
+  local tool="$2"
+  case "$tool" in
+    claude|codex|opencode|grok|omp|cursor-agent) ;;
+    *) return 0 ;;
+  esac
+  if aidc::compose "$workspace" exec -T workspace sh -c 'command -v "$1" >/dev/null 2>&1' sh "$tool"; then
+    return 0
+  fi
+  return 1
+}
+
+# Map an AIDC_AGENTS selection to per-agent `--build-arg WITH_X=1` flags for
+# the base image build (Dockerfile.base's conditional agent stages). This is
+# the canonical mapping; CI workflows and scripts/image-size-report.sh mirror
+# it inline — keep them in sync.
+aidc::agents_build_flags() {
+  local sel="${1:-opencode}"
+  local agent
+  case "$sel" in
+    all) sel="claude,codex,opencode,cursor-agent,grok,omp" ;;
+    none) sel="" ;;
+  esac
+  for agent in claude codex opencode cursor-agent grok omp; do
+    case ",$sel," in
+      *",$agent,"*)
+        printf -- '--build-arg %s=1 ' \
+          "WITH_$(printf '%s' "$agent" | tr 'a-z' 'A-Z' | tr '-' '_')"
+        ;;
+    esac
+  done
+}
+
+# Auto-extend (remaster): 'aidc <tool>' on a project whose image lacks the
+# agent adds it to the AIDC_AGENTS selection (persisted in project.env) and
+# returns 0 so run_tool can rebuild — the per-agent stage layout makes that a
+# one-layer build, not a reinstall of every agent. Returns 1 when the
+# selection need not or must not change: auto-extend disabled
+# (AIDC_AUTO_EXTEND_AGENTS=0), unknown tool, 'all' selected, or the tool
+# already selected (then the image is simply stale → rebuild hint).
+aidc::agents_extend_selection() {
+  local workspace="$1"
+  local tool="$2"
+  [[ "${AIDC_AUTO_EXTEND_AGENTS:-1}" == "1" ]] || return 1
+  case "$tool" in
+    claude|codex|opencode|cursor-agent|grok|omp) ;;
+    *) return 1 ;;
+  esac
+  local current="${AIDC_AGENTS:-opencode}"
+  case ",$current," in
+    *,all,*|*",$tool,"*) return 1 ;;
+    *,none,*) current="$tool" ;;
+    *) current="${current},${tool}" ;;
+  esac
+
+  # Persist in project.env (the selection's source of truth once aidc runs —
+  # sourcing it overrides the process env), then export for this run.
+  local env_file="$workspace/.ai-container/project.env"
+  if [[ -f "$env_file" ]]; then
+    if grep -qE '^AIDC_AGENTS=' "$env_file"; then
+      sed -i.bak "s/^AIDC_AGENTS=.*/AIDC_AGENTS=$current/" "$env_file" \
+        && rm -f "$env_file.bak"
+    else
+      printf '\n# Added by aidc: agent '"'"'%s'"'"' was invoked but not in the image (AIDC_AGENTS default: opencode).\nAIDC_AGENTS=%s\n' \
+        "$tool" "$current" >>"$env_file"
+    fi
+  fi
+  export AIDC_AGENTS="$current"
+  aidc::log "agent '$tool' is not in this project's image — extended AIDC_AGENTS to '$current'; rebuilding (only the new agent's layer builds; the rest is cached)"
+  return 0
+}
+
 aidc::run_tool() {
   local tool="$1"
   local profile="$2"
@@ -515,14 +592,25 @@ aidc::run_tool() {
   local workspace
   workspace="$(aidc::default_workspace)"
 
-  # Agent selection is NOT seeded from the tool: the shared base image (issue #7)
-  # amortizes all agents across every project, so the default bakes in all of
-  # them (one shared base, no per-project agent cost). Set AIDC_AGENTS explicitly
-  # in .ai-container/project.env to build a slim single/few-agent base variant —
-  # the base is content-hashed on the selection and the thin image rebuilds when
-  # it changes (see aidc::image_base_is_current).
-
+  # The default selection is opencode only (slim-by-default remaster), but a
+  # missing agent is not an error: run_tool probes the binary
+  # (aidc::agent_installed) and, on a miss, auto-extends the selection
+  # (persisted in project.env) and rebuilds — the per-agent stage layout in
+  # Dockerfile.base means only the missing agent's layer actually builds.
+  # AIDC_AUTO_EXTEND_AGENTS=0 restores the hard-error behavior.
   aidc::ensure_container_running "$workspace"
+  if ! aidc::agent_installed "$workspace" "$tool"; then
+    if aidc::agents_extend_selection "$workspace" "$tool"; then
+      aidc::ensure_base_image "$workspace"
+      aidc::write_devcontainer_env "$workspace"
+      aidc::compose_up "$workspace"
+      aidc::ensure_tool_links "$workspace"
+    else
+      aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent; AIDC_AUTO_EXTEND_AGENTS=0 disables auto-extend)"
+    fi
+  fi
 
   if [[ "$tool" == "claude" ]]; then
     aidc::resolve_claude_oauth_token
@@ -824,7 +912,7 @@ aidc::base_image_tag() {
     cmd="shasum -a 256"
   fi
   input="$(cat "$workspace/.devcontainer/Dockerfile.base" 2>/dev/null)"
-  input+="|AIDC_AGENTS=${AIDC_AGENTS:-all}"
+  input+="|AIDC_AGENTS=${AIDC_AGENTS:-opencode}"
   hash="$(printf '%s' "$input" | $cmd | awk '{print $1}' | cut -c1-12)"
   printf 'aidc-base:%s' "${hash:-latest}"
 }
@@ -845,9 +933,14 @@ aidc::ensure_base_image() {
   fi
   if ! docker image inspect "$tag" >/dev/null 2>&1; then
     aidc::log "building shared base image $tag (one-time; shared across projects)"
+    # WITH_* per-agent flags (aidc::agents_build_flags) drive the conditional
+    # agent stages; only flagged agents' layers build, and each is cached
+    # independently — extending the selection later builds just the new layer.
+    # shellcheck disable=SC2046  # flag args are controlled tokens from the helper
     ( cd "$workspace/.devcontainer" \
         && docker build -f "$workspace/.devcontainer/Dockerfile.base" \
-             --build-arg AIDC_AGENTS="${AIDC_AGENTS:-all}" \
+             --build-arg AIDC_AGENTS="${AIDC_AGENTS:-opencode}" \
+             $(aidc::agents_build_flags "${AIDC_AGENTS:-opencode}") \
              -t "$tag" "$workspace/.devcontainer" ) \
       || aidc::die "failed to build base image $tag"
     aidc::log "base image $tag ready"
@@ -1015,12 +1108,16 @@ aidc::export_compose_env() {
   # base image; this layer adds grype/syft/checkov/bandit when requested).
   export AIDC_SECURITY_TOOLS
   AIDC_SECURITY_TOOLS="${AIDC_SECURITY_TOOLS:-}"
-  # Coding agents baked into the image (AIDC_AGENTS opt-in). Comma-separated
-  # (claude,codex,opencode,cursor-agent,grok,omp); 'aidc <tool>' seeds this to
-  # just that tool for a first build (see run_tool). Unset/empty here means a
-  # plain 'aidc up' bakes in all agents ('all') for back-compat.
+  # Coding agents baked into the image (AIDC_AGENTS selection). Comma-separated
+  # (claude,codex,opencode,cursor-agent,grok,omp). Default is 'opencode' only —
+  # the slim-by-default remaster stance: agents cost ~100-200MB each in the
+  # shared base. Add more per project via .ai-container/project.env
+  # (AIDC_AGENTS=opencode,codex,... or =all / =none); the base is content-
+  # hashed on the selection and per-agent stages are cached independently, so
+  # 'aidc rebuild' — or simply invoking a missing agent, which auto-extends
+  # the selection (see aidc::agents_extend_selection) — applies a change fast.
   export AIDC_AGENTS
-  AIDC_AGENTS="${AIDC_AGENTS:-all}"
+  AIDC_AGENTS="${AIDC_AGENTS:-opencode}"
 
   # Apple `container` already runs each container in its own lightweight VM, so
   # the per-project Lima/Firecracker VM is redundant — and its DOCKER_HOST would

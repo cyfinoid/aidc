@@ -8,6 +8,222 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-25 — remaster disk experiments: image GC (`aidc clean`), a size-measurement harness, and a slimmer base
+
+**Summary:** Ground-up pass on what aidc's images cost on disk. Four levers
+landed: (1) a `aidc clean` command that garbage-collects the stale
+content-hashed images the model has been leaking since issue #7, (2) a
+read-only measurement script (`scripts/image-size-report.sh`) so slimming is
+measurable instead of guesswork, (3) the shared base's biggest controllable
+cost — the agent set — now defaults to `opencode` only, builds in per-agent
+cached stages, and auto-extends when an invoked agent is missing (add the
+layer and move forward), and (4) build-time strips of
+dead weight in the semgrep venv, the uv-managed CPython, and two apt packages.
+`trufflehog` was flagged as dead weight (~150-200 MB, nothing in aidc invokes
+it — `aidc-scan.sh` uses gitleaks for secrets) but was consciously KEPT: it is
+documented as an always-on scanner and referenced as an ad-hoc tool in the
+seeded CLAUDE.md/AGENTS.md guardrails; dropping it is a security-posture
+decision, not an engineering one, and stays open for a separate call.
+
+**Trigger:** "we are now in a new remaster branch … I want to experiment to
+reduce disk required for the base image …" followed by: keep opencode as the
+default; make each agent its own layer so invoking a missing one adds it and
+moves forward, reusing what's already built; and keep base rebuilds a
+host-wide one shot.
+
+### Findings that shaped the work
+
+- **The leak, not just the size.** `aidc::ensure_base_image` and
+  `aidc::ensure_toolchain_image` build a *new* tag per content hash and never
+  removed old ones; compose rebuilds leave dangling images. On a host that
+  tracks aidc development (this one), every pin bump has left a full ~3 GB
+  `aidc-base:<oldhash>` behind. "Massive docker image set" was mostly this.
+- **The default bakes six agents.** `AIDC_AGENTS` defaulted to `all`
+  (~1 GB); the opt-in machinery from issue #8 existed but nothing used it
+  unless the user set it.
+- **No measurement.** `image-size.yml` reports one total against a 6 GB soft
+  ceiling; there was no per-layer/per-component view, so any slimming was
+  unverifiable.
+
+### Change 1 — `aidc clean` (new module `lib/aidc/clean.sh`)
+
+- Candidates: (a) `aidc-base:<12-hex>` tags not referenced by ANY local
+  image's `aidc.base` label (one batched `docker image inspect` over all
+  image IDs; the label is what the fast-path check in `aidc::image_base_is_current`
+  already trusts); (b) `aidc-toolchain-store-<lang>:<12-hex>` tags whose hash
+  differs from the current `aidc::toolchain_image_tag` (the shared volume
+  keeps its contents — only the one-shot store images go); (c) dangling
+  images, via `docker image prune -f` semantics (never an image a container
+  uses).
+- Safety: only tags matching the strict hash patterns are considered — a
+  custom `AIDC_BASE_IMAGE=my-base:tag` or hand-tagged `aidc-base:custom` can
+  never match. Dry-run is the default; `--apply` prompts unless `-f`;
+  `--cache` additionally runs `docker builder prune -f` (off by default: the
+  build cache is what keeps rebuilds fast). Redoing a removed base is a
+  rebuild, not a correctness event.
+- Honesty about sizes: per-image `docker size` overstates the reclaim (base
+  OS layers are shared), so the dry-run line says "approx reclaim" and the
+  apply path prints before/after `docker system df` Images sizes.
+- Wired through `lib/aidc.sh` (dispatch, `known` command list, help text),
+  `completions/aidc.bash` (command table asserted by
+  `tests/cli-errors.test.sh`), README command list, `docs/install.md`
+  (command table + cleanup section).
+- Docker is reached only through `aidc::clean_docker`, so
+  `tests/clean.test.sh` (20 cases) stubs it entirely: dry-run lists/keeps the
+  right refs and mutates nothing, apply removes exactly the stale refs +
+  prunes dangling, failed `rmi` is counted not fatal, the all-in-use set
+  exits early, dangling-only sets still prune, `--cache` prunes the builder
+  cache, the prompt aborts, help/flag validation. Lesson from a red run: a
+  fixture hash must be hex (`oldhash00000` correctly failed the
+  `[0-9a-f]{12}` ownership pattern), and `aidc::die` inside a directly-called
+  function exits the whole suite — wrap in a subshell.
+
+### Change 2 — `scripts/image-size-report.sh`
+
+- Defaults to the exact `aidc-base:<hash>` tag `aidc::base_image_tag` computes
+  (same sha256 input: Dockerfile.base + `|AIDC_AGENTS=<sel>`), so the report
+  always describes the image aidc actually starts. `--image` inspects any
+  ref; `--build` builds the default first (refused with `--image` so pinned
+  refs are never built); `--top N`; `--json`.
+- Sections: largest `docker history` layers (sizes normalized to bytes for
+  sorting; heredoc COPY layers span real newlines and their continuation rows
+  are filtered by requiring a size-shaped first field), then one throwaway
+  `docker run` (read-only `du`, image's default user) with `@@section`
+  markers for: top-level dirs, `/home/vscode` children (agents, config),
+  `/opt` + `/opt/uv` children, `/opt/uv/tools` (semgrep lives here),
+  `/opt/uv/python` (uv-managed CPython), `/usr/local/bin` (scanners,
+  helpers).
+- Offline-tested against a stub `docker` with canned `history`/`du` output;
+  two bugs found and fixed that way (missing `@@top-level` marker, heredoc
+  continuation rows leaking into `--json` with `bytes:0`).
+
+### Change 3 — per-agent stages, `AIDC_AGENTS` defaults to `opencode`, auto-extend on invoke
+
+**Direction from the maintainer:** keep `opencode` as the personal default,
+and make invoking a missing agent *add that layer and move forward* — "since
+images are already built we simply reuse them" — rather than dying with a fix
+message. That required breaking the one constraint that made selection
+changes expensive: all six agents installed in a single RUN, so the
+`AIDC_AGENTS` build-arg was inside one cache key and ANY selection change
+re-downloaded every agent.
+
+- `Dockerfile.base.tmpl` restructured into per-agent conditional stages: a
+  global-scope `ARG WITH_<AGENT>=0` per agent (declared before the first
+  FROM — stage-scoped ARGs are invisible to FROM selector lines, the first
+  draft had them mid-file and the graph validation caught it), an
+  `agent-<name>-1` stage carrying exactly the old per-agent install lines
+  (same vendor installers, same paths), an `agent-<name>-0` stage that only
+  pre-creates the directories the final COPY reads (so a not-selected agent
+  contributes a byte-scale layer instead of a failed COPY), a
+  `FROM agent-<name>-${WITH_<AGENT>}` selector stage, and a final `FROM base
+  AS main` that COPY-merges each selected payload back onto base
+  (`--chown=vscode`). Binaries land at the SAME `~/.local/bin` etc. paths,
+  so PATH, the named-volume mount points, grok's shadow-avoidance, and the
+  CI pin probes are all unchanged. Version-pins moved to the global ARG
+  block (`update-pins.sh`/`check-image-pins.sh` patterns still match).
+  Stage graph + every RUN block validated offline (comment-stripping +
+  continuation-joining, then `bash -n` + a FROM-resolution pass) — no docker
+  in this environment.
+- `lib/aidc/runtime.sh`: `aidc::agents_build_flags` maps a selection
+  (`opencode` default, `all`, `none`, comma lists; unknown names ignored) to
+  `--build-arg WITH_X=1` tokens; `ensure_base_image` passes them (plus
+  `AIDC_AGENTS` as provenance). The three `:-claude` fallbacks (hash input,
+  build-arg, `export_compose_env`) become `:-opencode`.
+- Auto-extend: `aidc::agent_installed` is now a probe-only check (return
+  0/1); `run_tool` on a miss calls `aidc::agents_extend_selection` — which
+  appends the tool to the selection, persists it in
+  `.ai-container/project.env` (replacing an existing `AIDC_AGENTS=` line in
+  place, appending a commented block otherwise; file wins over the process
+  env once sourced, so persistence is the only durable form), re-exports it,
+  and returns 0 — then run_tool runs `ensure_base_image` →
+  `write_devcontainer_env` → `compose_up` → `ensure_tool_links`. Because the
+  selection rehashes the base tag and stages are cached per agent, that
+  rebuild runs exactly one install layer and recreates the container.
+  `AIDC_AUTO_EXTEND_AGENTS=0` (or a selection that already includes the
+  tool, or `all`) falls back to the hard error with the fix message — an
+  already-selected-but-missing binary means a stale image, so the hint is
+  `aidc rebuild`.
+- Migration edge, documented: an image built before this change (or with an
+  explicit selection) plus an unset `AIDC_AGENTS` rehashes to the new
+  default set on the first extend/rebuild — the label-vs-tag fast path
+  rebuilds it once.
+- CI: `sbom.yml` passes all six `WITH_*=1` (pin coverage for every agent);
+  `image-size.yml` pins `AIDC_AGENTS=opencode` + `WITH_OPENCODE=1` so the
+  probe measures the shipping default. `scripts/image-size-report.sh
+  --build` mirrors the flag mapping inline (noted as a mirror — runtime.sh
+  is canonical).
+- Docs: README, `docs/install.md` override block, `docs/cursor.md` (invoking
+  `aidc cursor-agent` now auto-extends; pinning up front still shown).
+- Tests: `tests/agents-opt-in.test.sh` now 14 cases — flags mapping
+  (default/all/none/list/unknown), auto-extend success (project.env
+  persisted + exported + rebuild chain invoked), in-place line replacement,
+  idempotence when already selected, knob-off die, `all`-selected die,
+  present-agent no-rebuild, non-agent passthrough. Two suite lessons: a
+  function's `exit` (aidc::die) is caught by a subshell, not by `|| true`;
+  and side effects inside `$( )` (exports, globals) never reach the parent —
+  observe them via files or run in the current shell.
+
+### Change 4 — build-time strips in `Dockerfile.base.tmpl`
+
+- semgrep (heaviest uv tool): after `uv tool install semgrep`, the venv is
+  stripped of directories named `tests` (`find -type d -name tests -prune
+  -exec rm -rf {} +`) and `__pycache__`/`*.pyc`. `dist-info` is deliberately
+  kept (console scripts + importlib metadata). Same technique distro
+  packaging uses; `check-image-pins.sh` still probes `semgrep --version` in
+  CI.
+- CPython 3.13 (uv-managed): `test`, `idlelib`, `tkinter`, and the static
+  `libpython3.13.a` removed (globbed, `rm -rf`-tolerant). Precompiled stdlib
+  `__pycache__` deliberately KEPT — `PYTHONDONTWRITEBYTECODE=1` means
+  removed bytecode would never be regenerated and every python start would
+  recompile.
+- apt: `nano` dropped (vim present) and `dnsutils` dropped (nothing in
+  scaffold/scripts calls dig/nslookup; a comment at the apt block names both
+  and the per-project path back via `project-setup.sh`). `gh` was audited and
+  KEPT — `aidc-ci.sh` capability-gates on it; `gnupg` kept (node arm uses
+  `gpg --dearmor`); `sqlite3` kept (session merge); the iptables/ipset/
+  bubblewrap/socat set kept (firewall/sandbox/clipboard).
+
+### Verification
+
+- `shellcheck --severity=warning` clean on all new/edited shell.
+- `bash .github/scripts/check-module-deps.sh` → 9 modules, layering OK.
+- Full `tests/*.test.sh` suite green (now including `clean.test.sh`;
+  `agents-opt-in.test.sh` 7 cases).
+- `bash -n` + stubbed-docker smoke of `image-size-report.sh` human + JSON
+  paths.
+- Not runnable here (no docker): a real base rebuild + `semgrep scan` smoke
+  after the strip, the pin-check image build, and the size delta itself —
+  first `aidc up` on a docker host will produce the real numbers via
+  `scripts/image-size-report.sh`; CI's `image-size.yml` now reports the slim
+  default on every PR.
+
+### Notes / open items
+
+- `aidc status --global` gained a `docker disk` block (the maintainer's real
+  numbers made the need concrete: the images tab summed to ~40 GB while
+  `docker system df` said 17.55 GB, with 8.7 GB images + 4.7 GB idle build
+  cache + ~5 GB exited-container layers reclaimable). `aidc::status_host_disk`
+  renders the `system df` rows with the reclaim knob per row; the block
+  degrades silently when the daemon reports nothing. Covered by the new
+  `tests/status-global.test.sh` (fake docker on PATH; 11 cases). Suite
+  lesson: the stub's `case "$1 $2"` patterns must match the real invocation
+  shapes — `docker system df` is `"system df"`, not `"system"`.
+- Doc addition after a maintainer report ("OrbStack images tab shows one
+  `aidc_<project>-…:latest` per folder, each 3.39 GB"): the shared-image
+  section of `docs/install.md` now explains the per-image size double-count
+  (thin images list at ~base size because shared layers are counted per image;
+  `docker system df` is the deduplicated truth) and names `aidc clean` as the
+  reclaim for the real extras (orphaned `aidc-base:<oldhash>` tags).
+- The base-image content hash changes (template edits + default change), so
+  the next `aidc up` rebuilds the shared base once; old bases from before
+  this change are exactly what `aidc clean` then reclaims.
+- Open for a future decision: dropping `trufflehog` (unused by tooling,
+  ~150-200 MB) and whether `aidc-scan`'s "secrets always" should name gitleaks
+  alone; and `syft`/`grype` remain in the base because `aidc-scan`'s license
+  gate (`scripts/ci/aidc-sbom-code.sh`) needs them when manifests change.
+
+---
+
 ## 2026-09-21 — pre-merge audit of the `enhancements` branch: CI test drift, a red suite, the unported half of PR #32, and the missing Cursor guide
 
 **Summary:** An audit ahead of opening the `enhancements` → `main` pull request,

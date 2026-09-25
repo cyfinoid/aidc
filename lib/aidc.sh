@@ -24,6 +24,8 @@ AIDC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$AIDC_LIB_DIR/aidc/runtime.sh"
 # shellcheck source=aidc/sync.sh
 . "$AIDC_LIB_DIR/aidc/sync.sh"
+# shellcheck source=aidc/clean.sh
+. "$AIDC_LIB_DIR/aidc/clean.sh"
 # shellcheck source=aidc/status.sh
 . "$AIDC_LIB_DIR/aidc/status.sh"
 
@@ -74,6 +76,9 @@ aidc::main() {
       ;;
     destroy)
       aidc::cmd_destroy "$@"
+      ;;
+    clean)
+      aidc::cmd_clean "$@"
       ;;
     shell)
       aidc::cmd_shell
@@ -154,7 +159,7 @@ aidc::main() {
 # first letter) before pointing at help and doctor.
 aidc::suggest_command() {
   local cmd="$1"
-  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan ci doctor insights update upgrade version help"
+  local known="init up down rebuild rescan tools status destroy clean shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan ci doctor insights update upgrade version help"
   local suggestions="" k
   for k in $known; do
     case "$k" in
@@ -184,6 +189,7 @@ Usage:
   aidc tools <install [go|rust|java|all]|status>
   aidc status [--global]
   aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
+  aidc clean [--apply] [--cache] [-f]
   aidc shell
   aidc exec -- <command>...
   aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
@@ -237,6 +243,11 @@ Notes:
   - aidc cursor opens the host Cursor app; reopen the repo in the devcontainer.
   - aidc destroy removes the container, named volumes, and image by default.
     Worktree and scaffold removal are opt-in via the listed flags.
+  - aidc clean reclaims disk from stale aidc images (dry-run by default): old
+    content-hashed aidc-base / aidc-toolchain-store tags left behind by pin
+    bumps and AIDC_AGENTS changes, plus dangling compose-rebuild leftovers.
+    --apply removes (prompt unless -f); --cache also prunes the docker build
+    cache (off by default — the cache keeps rebuilds fast).
   - aidc rescan re-detects project languages (handy once a repo that started
     empty gains code) and rebuilds so the matching toolchains/scanners install.
   - aidc tools install [go|rust|java|all] populates the shared, read-only

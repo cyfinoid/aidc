@@ -62,7 +62,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 
 - creates local-only `.devcontainer/`, `.ai-container/`, `CLAUDE.md`, `AGENTS.md`, and `.cursor/rules/00-core-logics.mdc`
 - mounts project code only at `/workspace`; overlays `/workspace/.devcontainer` read-only inside the container
-- installs the coding agents (`claude`, `codex`, `opencode`, `grok`, `omp`) as native prebuilt binaries — no npm-global, no Node runtime dependency for the agents themselves
+- installs the coding agents as native prebuilt binaries — `opencode` by default (slim base); invoking any other agent auto-extends the selection and rebuilds only that agent's cached layer (`AIDC_AGENTS=opencode,codex,...`, `all`, or `none` in `.ai-container/project.env`) — no npm-global, no Node runtime dependency for the agents themselves
 - persists tool state in per-repo Docker volumes instead of mounting whole host homes
 - seeds selected config from host read-only mounts on first startup
 - creates one `CORE_LOGICS` git worktree per repo and mounts it at `/opt/CORE_LOGICS` for shared cross-repo notes
@@ -100,6 +100,7 @@ aidc rescan
 aidc tools <install [go|rust|java|all]|status>
 aidc status [--global]
 aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
+aidc clean [--apply] [--cache] [-f]
 aidc shell
 aidc exec -- <command>...
 aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
