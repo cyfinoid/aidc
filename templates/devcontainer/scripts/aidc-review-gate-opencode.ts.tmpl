@@ -1,0 +1,96 @@
+import type { Plugin } from "@opencode-ai/plugin"
+
+// aidc-managed (installed to ~/.config/opencode/plugins/ by bootstrap-state;
+// source of truth is the project scaffold at
+// /workspace/.devcontainer/scripts/aidc-review-gate-opencode.ts)
+//
+// Pre-completion review gate for opencode — the session.idle equivalent of
+// Claude Code's review Stop hook.
+//
+// opencode has no blocking Stop hook. When a session goes idle (the agent
+// finished its turn), this plugin runs the shared gate check
+// (aidc-review-hook.sh --check — same implementation Claude Code and cursor
+// use, single source of truth for the tree signature) and, when it trips,
+// injects the checklist as a user prompt so the agent continues with the
+// review instead of returning control to the user.
+//
+// Loop protection (opencode has no stop_hook_active / loop_limit): a session
+// is nudged only when the gate trips for a tree state this process has not
+// already nudged it for, capped at AIDC_REVIEW_GATE_MAX_NUDGES (default 3)
+// per session per process. Recording a review satisfies the gate outright;
+// editing code changes the signature and legitimately re-arms it.
+//
+// Fail-open everywhere: knob off, non-aidc project (no scaffold scripts),
+// non-git workspace, or any error — the session simply idles normally.
+
+const MAX_NUDGES = Number(process.env.AIDC_REVIEW_GATE_MAX_NUDGES ?? 3)
+
+export const AidcReviewGatePlugin: Plugin = async ({ client, $, worktree, directory }) => {
+  const ws = worktree ?? directory ?? "/workspace"
+  const checkScript = `${ws}/.devcontainer/scripts/aidc-review-hook.sh`
+
+  const lastNudged = new Map<string, string>()
+  const nudgeCount = new Map<string, number>()
+
+  return {
+    event: async ({ event }: { event: { type: string; properties?: any } }) => {
+      if (event.type !== "session.idle") return
+
+      const sessionID: string | undefined =
+        event.properties?.sessionID ?? event.properties?.info?.id
+      if (!sessionID) return
+
+      let result
+      try {
+        result =
+          await $`bash ${checkScript} --check`
+            .env({ AIDC_REVIEW_HOOK_WORKSPACE: ws })
+            .quiet()
+            .nothrow()
+      } catch {
+        return // fail open: the check could not even run
+      }
+
+      // 1 = trip (stdout carries the checklist, stderr the tree signature);
+      // 0 = allow; 2 = fail-open skip
+      if (result.exitCode !== 1) return
+      const checklist = result.stdout?.toString().trim() ?? ""
+      if (!checklist) return
+
+      // Loop guard: never nudge the same session twice for an identical tree
+      // state (the gate emits its signature on stderr), and cap total nudges
+      // per session.
+      const treeSig = /^sig (\S+)/m.exec(result.stderr?.toString() ?? "")?.[1] ?? checklist
+      if (lastNudged.get(sessionID) === treeSig) return
+      const count = (nudgeCount.get(sessionID) ?? 0) + 1
+      if (count > MAX_NUDGES) return
+
+      lastNudged.set(sessionID, treeSig)
+      nudgeCount.set(sessionID, count)
+
+      try {
+        await client.session.prompt({
+          path: { id: sessionID },
+          body: {
+            parts: [
+              {
+                type: "text",
+                text: `${checklist}\n\n(aidc review gate, nudge ${count}/${MAX_NUDGES} for this tree state)`,
+              },
+            ],
+          },
+        })
+      } catch (error) {
+        await client.app
+          .log({
+            body: {
+              service: "aidc-review-gate",
+              level: "warn",
+              message: `gate tripped but the prompt could not be delivered: ${(error as Error).message}`,
+            },
+          })
+          .catch(() => {})
+      }
+    },
+  }
+}

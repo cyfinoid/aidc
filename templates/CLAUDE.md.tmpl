@@ -28,6 +28,49 @@ A Stop hook enforces this mechanically for Claude Code: finishing while
 `aidc-scan` reports findings is blocked with the findings attached. Do not
 try to bypass the hook; fix the findings.
 
+## Pre-completion review (non-negotiable for code changes)
+
+Deterministic gates — tests, coverage, `aidc-scan` — cannot catch semantic
+bugs: unreachable fallbacks, double-counted aggregations, code that
+contradicts the change's own stated intent. Before declaring any code task
+complete, review the full diff (`git diff <base>` plus untracked files)
+against the checklist below, in two stages:
+
+1. **Self-review** — re-read your own diff, checklist item by item.
+2. **Fresh-eyes review** — hand a fresh subagent (the `Task` tool) only the
+   diff, the task description, and the repo's guidance docs — never your
+   implementation reasoning — and ask it to find checklist violations.
+   Triage every finding: fix the real ones, refute the rest with specifics.
+
+Checklist (distilled from real bugs AI PR reviewers caught after the fact):
+
+- **Fallback-defeating error paths**: no early return or error branch makes
+  a designed or documented fallback unreachable.
+- **Aggregations over shared resources**: per-client/per-process counters
+  are deduplicated by identity; a record with missing or unknown attribution
+  is skipped, never counted against every candidate.
+- **Intent traceability**: every normative statement written for this change
+  (commit-message draft, PR body, README/docs sections touched) is checked
+  against the diff.
+- **Repo directives**: every explicit, checkable directive in the target
+  repo's AGENTS.md / CONTRIBUTING (naming, docstrings, structure) is
+  verified against the diff.
+- **Test hermeticity**: new tests pass on any machine — no dependence on
+  host-installed tools or hardware; tool lookup is injectable so
+  absence-cases test cleanly.
+- **Lookup tables**: device/capability/compatibility tables are verified
+  against a source, not memory.
+
+Then record the outcome:
+
+    aidc-review-record "findings fixed; deferrals with reasons"
+
+A Stop hook enforces the record mechanically for Claude Code: finishing with
+unreviewed changes is blocked until `aidc-review-record` runs, and any edit
+after the review invalidates the record — re-review and re-record. Fix every
+real finding, or surface it to the user with your reasoning; do not try to
+bypass the hook. Docs-only changes skip the gate.
+
 ## Testing & coverage
 
 Every code change ships with tests. Aim for full coverage of the lines you add or change — cover the happy path, edge cases, and error handling, not just the obvious case. If a line is genuinely untestable, say why in the change.

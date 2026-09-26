@@ -141,8 +141,63 @@ Designed to be invisible when things are fine:
 
 Outcomes log to `.ai-container/scan-hook.log`; `aidc insights` summarizes
 them (clean passes / blocked / infra errors). Coverage matrix: Claude Code —
-enforced via hook; codex/opencode/grok/omp — prose guardrail in AGENTS.md only
-(their runtimes lack an equivalent hook point today).
+enforced via hook; codex/opencode/grok/omp — prose guardrail in AGENTS.md
+only. (opencode and cursor do have hook points — they carry the review gate
+below — but the scan gate is not wired there yet; scanners are heavier than
+the checklist and a blocked stop that re-runs semgrep on every nudge is
+poor value at today's speeds. A `--check`-style scan hook is a possible
+follow-up.)
+
+## Review-gate enforcement (Claude Code)
+
+Deterministic gates cannot catch semantic bugs — the class external AI PR
+reviewers (Greptile, CodeRabbit) kept finding on *already pushed* branches:
+fallback-defeating error paths, double-counted aggregations, code that
+contradicts the change's own stated intent, ignored repo directives. The
+seeded CLAUDE.md/AGENTS.md "Pre-completion review" section turns those into a
+ritual: review the diff against a fixed checklist (self-review, then a
+fresh-eyes subagent pass when the runtime can spawn one), fix or flag every
+finding, and record the outcome with `aidc-review-record "<summary>"`.
+
+The ritual is enforced **mechanically** on every agent surface aidc can
+hook — one shared check (`aidc-review-hook.sh`), three front ends:
+
+- **Claude Code** — a Stop hook (`aidc-review-hook.sh`, registered in
+  settings.json): blocks the stop (exit 2) with the checklist on stderr when
+  non-documentation code changed without a matching record; honors
+  `stop_hook_active` as its loop guard.
+- **opencode** — a plugin (`aidc-review-gate.ts`, installed into
+  `~/.config/opencode/plugins/` by the bootstrap): on `session.idle` it runs
+  the same check and injects the checklist as a user prompt, so the agent
+  continues into the review instead of returning control. Loop protection:
+  a session is only nudged for tree states it has not already been nudged
+  for, capped at 3 nudges per session (opencode has no native stop-hook loop
+  guard).
+- **cursor-agent** — a `stop` entry in `~/.cursor/hooks.json`
+  (`aidc-review-gate-cursor.sh`): on clean completions it returns
+  `followup_message` with the checklist, which Cursor auto-continues;
+  Cursor's own `loop_limit` (5) bounds re-triggering.
+
+All three front ends behave the same: **block the "I'm done" moment** when
+non-doc code changed without a review record, and **re-arm on any edit** —
+the record keys a tree signature that includes tracked diffs, status lines,
+*and the content of untracked files*, so an unreviewed late tweak cannot ride
+an old review past the gate.
+
+- **Docs-only diffs skip it** (markdown, logs, plans, changelogs, LICENSE,
+  images — the checklist's bug classes do not live there).
+- **Fails open on every surface** (missing scripts, broken git, disabled
+  knob), matching the scan hook's posture.
+- **Opt-out**: `AIDC_ENFORCE_REVIEW_HOOK=0` (project.env or config.env)
+  disables the gate for all agents — the Claude hook is removed from
+  settings.json on the next container start, and the opencode/cursor front
+  ends degrade to cheap no-ops.
+
+codex, grok, and omp have no feed-back hook point today (codex `notify`
+cannot inject into the turn); for them the gate remains the AGENTS.md prose
+guardrail. The gate cannot verify review *quality* — it makes skipping the
+review a deliberate, logged act (`.ai-container/review-hook.log` and the
+marker's summary line) instead of a silent one.
 
 ## MCP servers
 

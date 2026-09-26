@@ -151,21 +151,29 @@ PY
 }
 
 # Seed the aidc guardrail posture into Claude Code's settings.json:
-#   - a Stop hook running aidc-scan-hook.sh (mechanical enforcement of the
-#     "scan before done" guardrail) — added when AIDC_ENFORCE_SCAN_HOOK=1
-#     (default), removed when 0, other hooks always preserved;
+#   - Stop hooks for the aidc guardrails — aidc-scan-hook.sh (mechanical
+#     enforcement of the "scan before done" guardrail, knob
+#     AIDC_ENFORCE_SCAN_HOOK) and aidc-review-hook.sh (mechanical
+#     enforcement of the "review before done" guardrail, knob
+#     AIDC_ENFORCE_REVIEW_HOOK; both default to on). Each hook is added or
+#     removed independently of the other; other hooks are always preserved.
 #   - enableAllProjectMcpServers pinned to false when absent, so project
 #     .mcp.json servers keep requiring explicit approval.
 # Idempotent; creates the file if the host seeded none.
 ensure_agent_guardrail_settings() {
   local f="$1"
   command -v python3 >/dev/null 2>&1 || return 0
-  local enforce="${AIDC_ENFORCE_SCAN_HOOK:-1}"
-  AIDC_HOOK_ENFORCE="$enforce" python3 - "$f" <<'PY'
+  AIDC_SCAN_HOOK_ENFORCE="${AIDC_ENFORCE_SCAN_HOOK:-1}" \
+    AIDC_REVIEW_HOOK_ENFORCE="${AIDC_ENFORCE_REVIEW_HOOK:-1}" \
+    python3 - "$f" <<'PY'
 import json, os, sys
 p = sys.argv[1]
-enforce = os.environ.get("AIDC_HOOK_ENFORCE", "1") == "1"
-cmd = "/workspace/.devcontainer/scripts/aidc-scan-hook.sh"
+guardrails = [
+    ("/workspace/.devcontainer/scripts/aidc-scan-hook.sh",
+     os.environ.get("AIDC_SCAN_HOOK_ENFORCE", "1") == "1"),
+    ("/workspace/.devcontainer/scripts/aidc-review-hook.sh",
+     os.environ.get("AIDC_REVIEW_HOOK_ENFORCE", "1") == "1"),
+]
 try:
     cfg = json.load(open(p))
 except (FileNotFoundError, ValueError):
@@ -173,23 +181,25 @@ except (FileNotFoundError, ValueError):
 changed = False
 hooks = cfg.setdefault("hooks", {})
 stops = hooks.setdefault("Stop", [])
-have = any(
-    isinstance(e, dict)
-    and any(h.get("command") == cmd for h in e.get("hooks", []) if isinstance(h, dict))
-    for e in stops if isinstance(e, dict)
-)
-if enforce and not have:
-    stops.append({"hooks": [{"type": "command", "command": cmd}]})
-    changed = True
-elif not enforce and have:
-    for e in stops:
-        if isinstance(e, dict) and isinstance(e.get("hooks"), list):
-            kept = [h for h in e["hooks"] if not (isinstance(h, dict) and h.get("command") == cmd)]
-            if len(kept) != len(e["hooks"]):
-                e["hooks"] = kept
-                changed = True
-    hooks["Stop"] = [e for e in stops if not (isinstance(e, dict) and e.get("hooks") == [])]
-if not hooks.get("Stop"):
+for cmd, enforce in guardrails:
+    have = any(
+        isinstance(e, dict)
+        and any(h.get("command") == cmd for h in e.get("hooks", []) if isinstance(h, dict))
+        for e in stops if isinstance(e, dict)
+    )
+    if enforce and not have:
+        stops.append({"hooks": [{"type": "command", "command": cmd}]})
+        changed = True
+    elif not enforce and have:
+        for e in stops:
+            if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+                kept = [h for h in e["hooks"] if not (isinstance(h, dict) and h.get("command") == cmd)]
+                if len(kept) != len(e["hooks"]):
+                    e["hooks"] = kept
+                    changed = True
+# Prune entries emptied by a removal, then the event key itself if bare.
+hooks["Stop"] = [e for e in stops if isinstance(e, dict) and e.get("hooks")]
+if not hooks["Stop"]:
     hooks.pop("Stop", None)
 if not cfg.get("hooks"):
     cfg.pop("hooks", None)
@@ -243,6 +253,9 @@ sync_opencode() {
   # which would wipe a plugin installed before it. Idempotent, so this repairs
   # the wipe on every init/sync.
   wire_rtk_opencode
+  # Same wipe-repair logic for aidc's own review-gate plugin: it must be
+  # (re-)copied after the rsync on every init/sync.
+  wire_aidc_opencode_gate
 }
 
 sync_grok() {
@@ -318,6 +331,60 @@ wire_rtk_cursor() {
     || echo "[bootstrap] rtk cursor hooks.json missing after init" >&2
 }
 
+# Wire the review gate into Cursor's ~/.cursor/hooks.json as a `stop` hook:
+# on clean completions the wrapper runs the shared gate check and, when it
+# trips, returns followup_message (Cursor auto-continues the agent with it).
+# Merge, never clobber: rtk's preToolUse entry and any user hooks are
+# preserved. Idempotent. No removal knob here on purpose — when
+# AIDC_ENFORCE_REVIEW_HOOK=0 the gate check exits allow and the entry
+# degrades to a cheap no-op; the file still self-heals on every init/sync.
+wire_aidc_review_cursor() {
+  local wrapper="$scripts_dir/aidc-review-gate-cursor.sh"
+  [[ -f "$wrapper" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  ensure_dir "$home_dir/.cursor"
+  AIDC_CURSOR_HOOK_SCRIPT="$wrapper" python3 - "$home_dir/.cursor/hooks.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+cmd = os.environ.get("AIDC_CURSOR_HOOK_SCRIPT")
+try:
+    cfg = json.load(open(p))
+except (FileNotFoundError, ValueError):
+    cfg = {}
+changed = False
+cfg.setdefault("version", 1)
+hooks = cfg.setdefault("hooks", {})
+stops = hooks.setdefault("stop", [])
+have = any(
+    isinstance(e, dict) and e.get("command") == cmd
+    for e in stops
+)
+if not have:
+    stops.append({"command": cmd, "loop_limit": 5})
+    changed = True
+if changed:
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+PY
+  [[ -f "$home_dir/.cursor/hooks.json" ]] \
+    || echo "[bootstrap] cursor hooks.json missing after review-gate wiring" >&2
+}
+
+# Install aidc's opencode review-gate plugin. Source of truth is the project
+# scaffold overlay (upgrades on re-init); the copy lands in the global plugin
+# directory. Same wipe-repair contract as wire_rtk_opencode: runs after the
+# plugins rsync on every init/sync.
+wire_aidc_opencode_gate() {
+  local src="$scripts_dir/aidc-review-gate-opencode.ts"
+  local dst="$home_dir/.config/opencode/plugins/aidc-review-gate.ts"
+  [[ -f "$src" ]] || return 0
+  ensure_dir "$(dirname "$dst")"
+  cp "$src" "$dst" 2>/dev/null || true
+  [[ -f "$dst" ]] \
+    || echo "[bootstrap] aidc review-gate opencode plugin missing after install" >&2
+}
+
 wire_rtk_omp() {
   command -v rtk >/dev/null 2>&1 || return 0
   # rtk has no omp target. omp is a pi fork that still loads pi extensions when
@@ -347,6 +414,8 @@ sync_cursor() {
   # see docs/security.md.
   copy_file_from_seed "/host-seed/cursor/cli-config.json" "$home_dir/.cursor/cli-config.json" "0600"
   wire_rtk_cursor
+  # After rtk's merge so both writers coexist (merge is idempotent).
+  wire_aidc_review_cursor
 }
 
 sync_gitconfig_overlay() {
@@ -358,8 +427,9 @@ sync_gitconfig_overlay() {
 }
 
 # Make the aidc container-side tools callable by name (agents run aidc-scan
-# before declaring work done — see the seeded CLAUDE.md/AGENTS.md guardrails;
-# aidc-ci is human/agent convenience for replaying the project's workflows).
+# and aidc-review-record before declaring work done — see the seeded
+# CLAUDE.md/AGENTS.md guardrails; aidc-ci is human/agent convenience for
+# replaying the project's workflows).
 # The scripts themselves live in the read-only /workspace/.devcontainer
 # overlay, so symlinks are all that's needed and they track scaffold
 # upgrades automatically.
@@ -368,7 +438,7 @@ scripts_dir="${AIDC_CONTAINER_SCRIPTS_DIR:-/workspace/.devcontainer/scripts}"
 install_tool_links() {
   local name script
   ensure_dir "$home_dir/.local/bin"
-  for name in aidc-scan aidc-ci; do
+  for name in aidc-scan aidc-review-record aidc-ci; do
     script="$scripts_dir/$name.sh"
     [[ -f "$script" ]] || continue
     ln -sf "$script" "$home_dir/.local/bin/$name"

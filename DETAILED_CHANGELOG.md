@@ -8,6 +8,269 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-26 — release 2.2.0 cut; opencode v2 evaluated, v1 pin advanced to 1.18.32
+
+**Summary:** The review-gate work (multi-agent pre-completion review) is cut
+as `2.2.0` per `docs/releasing.md` (version line in `lib/aidc/common.sh`,
+`[Unreleased]` → `[2.2.0] - 2026-09-26` in CHANGELOG.md, fresh empty
+Unreleased above). Commit/tag/push are left to the maintainer (signing key).
+Alongside: `OPENCODE_VERSION` pin advanced 1.18.30 → 1.18.32 (the version
+this container runs and the plugin was validated against), and OpenCode v2
+was evaluated as a candidate for the default agent — and deferred.
+
+**Trigger:** "bump the version of aidc also please... investigate what are
+the improvements we have in v2 of opencode does that helps us in reducing
+complexity of our code with opencode being our default agent should we bump
+opencode version to v2."
+
+### The v2 evaluation (evidence, not vibes)
+
+Sources: opencode.ai v2 docs (plugins, build/plugins, intro), the installed
+API's own type definitions, GitHub tags. Facts:
+
+- **v2 is a separate major and channel**: v2.0.9 current; installs via
+  `https://opencode.ai/v2/install` / npm `@opencode/cli` / brew
+  `opencode-v2` tap; the v1 script and package are unchanged.
+- **The plugin API is a ground-up rewrite**: v1's hook-object
+  (`{ "tool.execute.before": ... }`) becomes `Plugin.define({ id, setup(ctx) })`
+  with domain contexts (`ctx.session`, `ctx.vcs`, `ctx.storage`,
+  `ctx.event.subscribe`) and typed hooks (`ctx.session.hook("prompt"|"context"|
+  "compaction"|...)`, `ctx.tool.hook`, `ctx.shell.hook`,
+  `ctx.permission.hook`).
+- **Decisive negative**: v2's hook inventory contains *no* end-of-turn /
+  stop / idle interception hook. Session hooks fire at prompt admission,
+  model dispatch, transport, retry; tool/shell/permission hooks fire around
+  operations. Nothing fires when the agent finishes a turn — which is the
+  one moment the review gate needs. The gate's opencode front end
+  (session.idle event → shared check → prompt injection, with signature
+  dedup + nudge cap as loop protection) is therefore required on v2 too;
+  only call shapes improve (`ctx.session.prompt({ sessionID, text })`,
+  `ctx.session.synthetic`, durable `ctx.storage` for the nudge ledger).
+  Net complexity delta for us: ~zero, arguably negative (v2 needs a manual
+  `event.subscribe()` iterator + AbortController cleanup instead of v1's
+  one-line `event` hook).
+- **Migration risk for aidc specifically**: rtk's opencode plugin is a v1
+  named-function export — compatibility with v2's loader is unverified;
+  config schema changes (`plugin` → `plugins` array) touch the seeded
+  `~/.config/opencode/opencode.json` and rtk init; and aidc's session
+  sync/insights parse opencode's storage, whose layout may change across
+  majors (the config-vs-data-dir split pattern in CORE_LOGICS documents how
+  much rides on that format).
+- v1.18.32 is also where object-form plugin loading landed (1.18.29+), the
+  compatibility path v2 docs recommend for dual-support packages.
+
+### Decision
+
+Stay on v1; advance the pin to 1.18.32 with a comment at the pin pointing at
+this analysis. Revisit triggers: rtk ships a v2-compatible plugin; sync/
+insights verified against v2 storage; or opencode adds a completion-time
+hook (which would genuinely simplify the gate). The move is then a two-line
+change (install URL + version ARG).
+
+### Commands & verification
+
+```bash
+git ls-remote --tags https://github.com/anomalyco/opencode   # v1.18.32 latest v1; v2.0.9 latest v2
+bash tests/check-image-pins.test.sh                           # fixture-based, unaffected
+bash tests/review-hook.test.sh && bash tests/scan-hook.test.sh
+aidc-scan
+```
+
+---
+
+## 2026-09-26 — review gate extended beyond Claude Code: opencode plugin + cursor stop hook
+
+**Summary:** The pre-completion review gate shipped earlier today enforced
+only for Claude Code; opencode — the aidc *default* agent since the image
+remaster — and cursor-agent had prose-only guardrails. Both runtimes turn out
+to have usable end-of-turn hook points, so the gate now runs everywhere aidc
+can hook, off one shared check implementation.
+
+**Trigger:** "is it only catering to claude code stop hook. what about
+opencode or other agents we have in system."
+
+### Surface research (what each runtime actually offers)
+
+- **opencode 1.18.32** — plugins (TS) receive `client` (SDK), `$` (Bun
+  shell), `worktree`, `directory`; an `event` hook exposes `session.idle`.
+  Two traps found while reading the *installed* API's type definitions
+  (`packages/plugin/src/index.ts`), not just the docs: (1) the community
+  ralph-loop plugin returns `{ inject }` from the event handler — the
+  current `Hooks.event` signature is `Promise<void>`, so that return path is
+  not a supported contract; (2) the reliable channel is
+  `client.session.prompt(...)` (documented "useful for plugins" for the
+  `noReply` variant; the normal variant triggers an agent turn, which is
+  exactly the block-and-continue semantics wanted here).
+- **cursor-agent** — `hooks.json` has a first-class `stop` hook whose output
+  `{ followup_message }` auto-continues the agent, with a built-in
+  `loop_limit` (default 5). Input carries `status` and `workspace_roots`.
+- **codex** — `notify` fires after turns but cannot inject into them;
+  **grok / omp** — no feed-back hook point. These stay prose-only (omp's pi
+  extension surface is a possible follow-up).
+
+### Design
+
+Single source of truth for the gate logic (the same drift concern the
+checklist warns about): `aidc-review-hook.sh` gained a `--check` mode —
+exit 0 allow / 1 trip (checklist on stdout, tree signature on stderr) /
+2 fail-open-skip — with the Claude Stop hook as the default mode over the
+same core. New front ends are thin:
+
+- `templates/devcontainer/scripts/aidc-review-gate-opencode.ts.tmpl` —
+  plugin: on `session.idle`, run the check via Bun shell with
+  `AIDC_REVIEW_HOOK_WORKSPACE=<worktree>`; on trip, inject the checklist via
+  `client.session.prompt`. Loop protection is self-imposed (opencode has no
+  `stop_hook_active`/`loop_limit`): per-session set of already-nudged tree
+  signatures (the `sig` line) plus a per-session cap,
+  `AIDC_REVIEW_GATE_MAX_NUDGES` (default 3). Installing = copying the file
+  from the read-only scaffold overlay into `~/.config/opencode/plugins/`
+  (`wire_aidc_opencode_gate`, run after the plugins rsync on every
+  init/sync, same wipe-repair contract as rtk's plugin).
+- `templates/devcontainer/scripts/aidc-review-gate-cursor.sh.tmpl` —
+  wrapper: reads Cursor's stdin payload, gates only `status=completed`, maps
+  the first workspace root onto the check, emits
+  `{"followup_message": checklist}` on trip, always exits 0 otherwise
+  (Cursor treats other exit codes as hook failures; the gate's posture is
+  fail-open). Registered into `~/.cursor/hooks.json` by
+  `wire_aidc_review_cursor` — a merge (rtk's `preToolUse` entry and user
+  hooks preserved), `loop_limit: 5`, idempotent, deliberately no removal
+  knob (knob off ⇒ the check exits allow and the entry is a cheap no-op).
+
+`AIDC_ENFORCE_REVIEW_HOOK` now gates all three surfaces from project.env /
+config.env. AGENTS.md template coverage note updated; CLAUDE.md stays
+Claude-phrased (accurate as-is). `lib/aidc/common.sh` registers both new
+scaffold files.
+
+### Testing & honesty notes
+
+- `tests/review-hook.test.sh` grew 23 → 32 cases: `--check` matrix
+  (trip/allow/docs-only/helper-missing, sig line format), cursor wrapper
+  (trip → followup JSON, error status → silent, recorded → silent), and the
+  hooks.json merge (adds stop entry, preserves rtk, idempotent, no-wrapper
+  no-op).
+- **Not testable in this container:** the opencode plugin's TS is never
+  executed here (no standalone bun/node; opencode is a self-contained
+  binary). Its logic is deliberately thin (one event handler, one shell-out,
+  one SDK call), syntax re-read manually, and the failure mode of a bad load
+  is opencode's plugin loader warning + a prose-only gate — fail-open, not
+  silent misbehavior. First live `aidc up` in an opencode project is the
+  real test.
+- Set -e hazards in the new tests (expected-failure commands) were caught by
+  reading before the first run; no false greens shipped.
+
+### Commands & verification
+
+```bash
+bash tests/review-hook.test.sh   # 32/32
+bash tests/scan-hook.test.sh     # 14/14 (no regression)
+shellcheck templates/devcontainer/scripts/aidc-review-{hook,gate-cursor}.sh.tmpl tests/review-hook.test.sh
+aidc-scan
+```
+
+---
+
+## 2026-09-26 — pre-completion review gate: surface the bug class AI PR reviewers kept finding after push
+
+**Summary:** Two llama-swap PRs cut through aidc (#1158 Intel/Metal hw
+detection, #1159 sysfs GPU stats) shipped with P1/P2 logic bugs that every
+in-container gate — tests, coverage, `aidc-scan` — scored clean on; they were
+found only by Greptile/CodeRabbit reviewing the diff *after push*. All of them
+are semantic: a fallback-defeating early return, capacity double-counted for
+integrated GPUs in direct contradiction of the commit's own stated intent,
+fdinfo VRAM sums without per-client dedup, records with missing `drm-pdev`
+counted against every GPU on the host, repo test-naming directives ignored,
+tests that call the real host binary for an absence-case. aidc now attacks
+that class at dev time: a seeded "Pre-completion review" section in
+CLAUDE.md/AGENTS.md (checklist + two-stage protocol), a `aidc-review-record`
+helper, and — Claude Code only — a second Stop hook that blocks "done" until
+a review is recorded for the current tree state and re-arms on any later edit.
+
+**Trigger:** "is it possible we could have surfaced these bugs in aidc itself.
+if yes i want to create a plan on how to do it." — plan approved with: enforce
+by default, both review stages (self + fresh-eyes subagent), hermeticity as a
+checklist bullet.
+
+### What landed
+
+- `templates/AGENTS.md.tmpl` / `templates/CLAUDE.md.tmpl` — "Pre-completion
+  review (non-negotiable for code changes)" section inside the
+  `aidc:core-logics` block: two-stage protocol (self-review; fresh-eyes
+  subagent handed only the diff + task description + repo docs) over a
+  six-item checklist distilled from the llama-swap findings.
+- `templates/devcontainer/scripts/aidc-review-record.sh.tmpl` — the record
+  helper. Keys a tree signature (tracked diff + status + *content of every
+  untracked file*, sorted) and writes `.ai-container/review-done` carrying
+  hash, timestamp, and the caller's findings summary. Exit 1 on empty
+  summary / clean tree, 2 on environment errors.
+- `templates/devcontainer/scripts/aidc-review-hook.sh.tmpl` — the gate.
+  Mirrors the scan hook's posture (fail-open, `stop_hook_active` loop guard,
+  knob `AIDC_ENFORCE_REVIEW_HOOK` default 1, outcomes to
+  `.ai-container/review-hook.log`); adds a docs-only scope skip and blocks
+  with the checklist on stderr (exit 2) when non-doc code changed without a
+  matching record. Fails open when the record helper is missing — the agent
+  would otherwise have no way to satisfy the gate.
+- `templates/devcontainer/scripts/bootstrap-state.sh.tmpl` —
+  `ensure_agent_guardrail_settings` now manages both guardrail hooks
+  independently (per-hook knobs, shared idempotent seeding/pruning);
+  `install_tool_links` exposes `aidc-review-record` on PATH.
+- `lib/aidc/common.sh` — both new scripts added to `AIDC_MANAGED_PATHS` and
+  `AIDC_OVERWRITE_TEMPLATE_MAP` (keeps the destroy-scaffold structural guard
+  green).
+- `lib/aidc/config.sh` — `AIDC_ENFORCE_REVIEW_HOOK` documented in the
+  project.env template.
+- `tests/review-hook.test.sh` — 23 hermetic cases: gate matrix (clean tree /
+  unreviewed / docs-only / mixed docs+code / record→allow / post-review edit
+  re-arm / untracked gating / loop guard / knob / missing helper fail-open),
+  helper usage errors, and the two-hook settings seeding (idempotence,
+  per-knob removal, Stop-key pruning, user-hook preservation).
+- `docs/security.md` — "Review-gate enforcement (Claude Code)" section;
+  README bullet; `/opt/CORE_LOGICS/patternlist.md` — the five patterns added
+  as reusable cross-repo guidance.
+
+### The bug the work itself found (and fixed)
+
+Debouncing both hooks keyed a hash of `git diff HEAD` + `git status
+--porcelain` — content-insensitive for **untracked files** (they hash as a
+bare `?? path` line). A file edited after a clean scan / recorded review
+would ride the old signature past the gate: the scan hook could wave through
+a secret added to a scan-clean untracked file; the review gate could wave
+through post-review edits to new files. Caught in validation step 4 of this
+very change (edit-untracked → expected re-arm, got allow). The signature now
+mixes `sha256sum` of every untracked file (via `git ls-files --others
+--exclude-standard -z`, NUL-safe) into both hooks and the record helper,
+sorted for order stability, with a non-empty-hash guard so an infra failure
+cannot produce a fake match. The identical pre-existing weakness in the scan
+hook debounce was fixed in the same pass rather than left as "pre-existing".
+
+### Commands & verification
+
+- `bash tests/review-hook.test.sh` — 23/23; `bash tests/scan-hook.test.sh` —
+  14/14 (no regression from the seeding rewrite); `bash
+  tests/destroy-scaffold.test.sh` — 9/9 (managed-paths guard).
+- `shellcheck` clean on both new templates and the test suite.
+- End-to-end in a scratch repo (`/tmp/opencode/review-gate-validation`)
+  reconstructing the llama-swap bug classes with `go vet`/`go test` green
+  over them: unreviewed → exit 2; record → exit 0; untracked edit/delete →
+  re-armed (exit 2); helper missing → fail-open.
+- Fresh-eyes protocol dogfood: a general subagent given only the diff, task
+  description, repo directive, and checklist flagged all four visible bug
+  classes with file:line (the fifth — naming — vacuous: the test file was
+  absent at review time) plus three extras, including one real bug embedded
+  unintentionally. Checklist validated against the bug classes it was built
+  from.
+
+### Notes / rollout
+
+- Existing projects pick the new guidance + hooks up on the next explicit
+  `aidc init` (overwrite mode re-merges the marker block, preserving user
+  text; bootstrap-state re-seeds settings.json idempotently). Create-mode
+  paths (auto-bootstrap on `aidc up`) deliberately leave existing blocks
+  untouched.
+- The gate cannot verify review *quality* — by design it converts a silent
+  skip into a logged, deliberate act. Docs-only diffs skip it.
+
+---
+
 ## 2026-09-25 — remaster disk experiments: image GC (`aidc clean`), a size-measurement harness, and a slimmer base
 
 **Summary:** Ground-up pass on what aidc's images cost on disk. Four levers

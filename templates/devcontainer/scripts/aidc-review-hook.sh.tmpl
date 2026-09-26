@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# aidc-managed
+# Pre-completion review gate — shared core for every agent surface aidc wires:
+#   - Claude Code Stop hook (default mode; registered in settings.json)
+#   - `--check` mode, consumed by the opencode plugin
+#     (aidc-review-gate-opencode.ts) and the cursor stop wrapper
+#     (aidc-review-gate-cursor.sh)
+#
+# Unlike aidc-scan, review quality cannot be verified mechanically. This gate
+# enforces the ritual instead: it trips until `aidc-review-record` has
+# recorded a review for the exact tree state being stopped on, and re-arms
+# whenever the tree changes afterwards (post-review fixes owe a re-review).
+# The trip message carries the review checklist, so the reminder lands at
+# the moment it can still change behavior.
+#
+# Modes:
+#   (no args)  Claude Stop hook: payload on stdin. exit 0 (allow) /
+#              2 (block, checklist on stderr).
+#   --check    Gate-only: exit 0 (allow) / 1 (trip, checklist on stdout) /
+#              2 (fail-open skip). No stdin, no loop guard — callers own
+#              loop protection (cursor's loop_limit, the plugin's signature
+#              dedup).
+#
+# Behavior (both modes): allow when the guardrail is disabled, nothing
+# changed, docs-only changes, a record matches this tree state (debounce), or
+# the record helper itself is missing — the gate FAILS OPEN, it must never
+# make the agent unusable.
+#
+# Loop guard (Claude mode): Claude Code sets stop_hook_active in the hook
+# payload when the session is already continuing because a stop hook blocked
+# — never block again in that state.
+#
+# Knob: AIDC_ENFORCE_REVIEW_HOOK (project.env / config.env), default 1.
+# Outcomes are logged to .ai-container/review-hook.log (bind-mounted, so the
+# host's `aidc insights` can read them).
+set -uo pipefail
+
+WS="${AIDC_REVIEW_HOOK_WORKSPACE:-/workspace}"
+MODE="hook"
+[[ "${1:-}" == "--check" ]] && MODE="check"
+
+# Knob (sourced from the project env like the rest of the container config).
+if [[ -f "$WS/.ai-container/project.env" ]]; then
+  # shellcheck disable=SC1091
+  . "$WS/.ai-container/project.env" 2>/dev/null || true
+fi
+[[ "${AIDC_ENFORCE_REVIEW_HOOK:-1}" == "1" ]] || exit 0
+
+if [[ "$MODE" == "hook" ]]; then
+  # Hook payload arrives on stdin; honor the loop guard.
+  payload="$(cat 2>/dev/null || true)"
+  case "$payload" in
+    *'"stop_hook_active":true'* | *'"stop_hook_active": true'*) exit 0 ;;
+  esac
+fi
+
+command -v git >/dev/null 2>&1 || exit 0
+cd "$WS" 2>/dev/null || exit 0
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+
+# Nothing changed -> nothing to gate.
+changes="$(git status --porcelain 2>/dev/null || true)"
+[[ -n "$changes" ]] || exit 0
+
+log() {
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" \
+    >>"$WS/.ai-container/review-hook.log" 2>/dev/null || true
+}
+
+# Scope: docs-only diffs owe no review. Markdown/text/doc-source files, the
+# session log, plans, changelogs, LICENSE, and images cannot carry the bug
+# classes the checklist targets. Anything unrecognized counts as code — the
+# filter errs toward gating.
+doc_only=1
+while IFS= read -r path; do
+  [[ -n "$path" ]] || continue
+  path="${path#\"}"; path="${path%\"}"   # dequote git's quoted paths
+  case "$path" in
+    *.md | *.txt | *.rst | *.adoc | *.png | *.jpg | *.jpeg | *.gif | *.svg | *.drawio | *.pdf) ;;
+    logs/* | plans/* | CHANGELOG* | DETAILED_CHANGELOG* | LICENSE*) ;;
+    *) doc_only=0; break ;;
+  esac
+done < <(printf '%s\n' "$changes" | cut -c4-)
+if [[ "$doc_only" -eq 1 ]]; then
+  log "skip docs-only"
+  exit 0
+fi
+
+# Debounce: a review recorded for byte-identical tree state still stands.
+# The signature must be content-sensitive for untracked files too: they show
+# up in `git status` as a bare `?? path` line, so the hash mixes in each
+# untracked file's content (sorted, for order stability).
+record="$WS/.ai-container/review-done"
+tree_hash="$(
+  {
+    git diff HEAD 2>/dev/null
+    printf '%s' "$changes"
+    while IFS= read -r -d '' f; do
+      sha256sum -- "$f" 2>/dev/null || true
+    done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
+  } | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+)"
+recorded_hash="$(cut -d' ' -f1 "$record" 2>/dev/null || true)"
+if [[ -n "$tree_hash" && -n "$recorded_hash" ]] && [[ "$recorded_hash" == "$tree_hash" ]]; then
+  log "clean $tree_hash"
+  exit 0
+fi
+
+# Fail open: without the helper the agent has no way to satisfy the gate, so
+# blocking would only wedge the session.
+helper="$WS/.devcontainer/scripts/aidc-review-record.sh"
+[[ -x "$helper" ]] || {
+  log "error helper-missing (fail-open)"
+  [[ "$MODE" == "check" ]] && exit 2
+  exit 0
+}
+
+log "blocked $tree_hash"
+checklist="aidc-review: no pre-completion review recorded for the current changes.
+
+Review the full diff (git diff <base> plus untracked files) — self-review
+the checklist below, then a fresh-eyes subagent pass when available:
+  - fallback-defeating error paths (an early return that kills a designed fallback)
+  - aggregations: dedup per-client counters; unattributed records are
+    skipped, never counted against every candidate
+  - intent traceability: your commit draft / PR body / docs claims vs the diff
+  - repo directives: AGENTS.md / CONTRIBUTING naming + docstring rules vs the diff
+  - test hermeticity: no dependence on host-installed tools or real hardware
+  - lookup tables (device IDs, capability maps) verified against a source
+
+Fix or flag every real finding, then record the outcome:
+  aidc-review-record \"<findings fixed; deferrals with reasons>\""
+
+if [[ "$MODE" == "check" ]]; then
+  # The signature lets callers implement loop guards (only re-nudge when the
+  # tree actually changed). stderr keeps stdout pure for the checklist.
+  printf 'sig %s\n' "$tree_hash" >&2
+  printf '%s\n' "$checklist"
+  exit 1
+fi
+
+{
+  echo "$checklist"
+} >&2
+exit 2

@@ -69,6 +69,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 - detects the project's toolchains (Go, Rust, Ruby, Java, PHP, Node, Python — plus shell scripts) and installs them automatically; `aidc rescan` re-detects later for a repo that started empty
 - shares one `aidc-base` image (OS, Python, scanners, agents) across all projects — each project's image is a thin toolchain delta on top — and keeps Go/Rust/JDK in one read-only `aidc_toolchains` volume (`aidc tools install`) instead of a full copy per project
 - bakes always-on security scanners (`semgrep`, `gitleaks`, `trufflehog`) plus per-toolchain linters (`gosec`, `bandit`, `cargo-audit`, `bundler-audit`, `shellcheck`) into the image
+- enforces a pre-completion review ritual for semantic bugs (the class deterministic scanners miss): a seeded checklist + `aidc-review-record`, mechanically gated on every hookable agent — Claude Code (Stop hook), opencode (`session.idle` plugin), cursor-agent (`stop` hook) — blocking "done" until the changed code has been reviewed and re-arming on any later edit
 - seeds non-negotiable guidance into `CLAUDE.md` / `AGENTS.md` for every project — security guardrails, test-coverage discipline, and changelog/session-log conventions
 - seeds committed project docs once, never overwriting your edits — `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and a `logs/` session journal
 - auto-syncs in-container agent session transcripts back to the host on container start and exit, so the host's `/insights` stays current

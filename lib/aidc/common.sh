@@ -7,7 +7,7 @@
 # lints each module file in isolation and cannot see those uses.
 # shellcheck disable=SC2034
 
-AIDC_VERSION="${AIDC_VERSION:-2.1.0}"
+AIDC_VERSION="${AIDC_VERSION:-2.2.0}"
 
 AIDC_CONTAINER_USER="${AIDC_CONTAINER_USER:-vscode}"
 
@@ -54,6 +54,10 @@ AIDC_MANAGED_PATHS=(
   ".devcontainer/scripts/init-firewall.sh"
   ".devcontainer/scripts/aidc-scan.sh"
   ".devcontainer/scripts/aidc-scan-hook.sh"
+  ".devcontainer/scripts/aidc-review-hook.sh"
+  ".devcontainer/scripts/aidc-review-record.sh"
+  ".devcontainer/scripts/aidc-review-gate-cursor.sh"
+  ".devcontainer/scripts/aidc-review-gate-opencode.ts"
   ".devcontainer/scripts/rtk-session-end.sh"
   ".devcontainer/scripts/aidc-ci.sh"
   ".ai-container/project.env"
@@ -88,6 +92,10 @@ AIDC_OVERWRITE_TEMPLATE_MAP=(
   "templates/devcontainer/scripts/init-firewall.sh.tmpl:.devcontainer/scripts/init-firewall.sh:0755"
   "templates/devcontainer/scripts/aidc-scan.sh.tmpl:.devcontainer/scripts/aidc-scan.sh:0755"
   "templates/devcontainer/scripts/aidc-scan-hook.sh.tmpl:.devcontainer/scripts/aidc-scan-hook.sh:0755"
+  "templates/devcontainer/scripts/aidc-review-hook.sh.tmpl:.devcontainer/scripts/aidc-review-hook.sh:0755"
+  "templates/devcontainer/scripts/aidc-review-record.sh.tmpl:.devcontainer/scripts/aidc-review-record.sh:0755"
+  "templates/devcontainer/scripts/aidc-review-gate-cursor.sh.tmpl:.devcontainer/scripts/aidc-review-gate-cursor.sh:0755"
+  "templates/devcontainer/scripts/aidc-review-gate-opencode.ts.tmpl:.devcontainer/scripts/aidc-review-gate-opencode.ts:0755"
   "templates/devcontainer/scripts/rtk-session-end.sh.tmpl:.devcontainer/scripts/rtk-session-end.sh:0755"
   "templates/devcontainer/scripts/aidc-ci.sh.tmpl:.devcontainer/scripts/aidc-ci.sh:0755"
   "templates/cursor-rules/00-core-logics.mdc.tmpl:.cursor/rules/00-core-logics.mdc:0644"

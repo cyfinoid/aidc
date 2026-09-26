@@ -30,7 +30,11 @@ ARG WITH_OMP=0
 # scripts/update-pins.sh, asserted by .github/scripts/check-image-pins.sh.
 ARG CLAUDE_VERSION=2.1.266
 ARG CODEX_VERSION=0.153.4
-ARG OPENCODE_VERSION=1.18.30
+# v1 line: 1.18.29+ loads object-form plugins, and the review-gate plugin is
+# validated against this series. v2 (2.0.x) is a plugin-API rewrite with its
+# own install channel (https://opencode.ai/v2/install) and no stop/idle hook
+# either - reassess after rtk ships a v2-compatible plugin (see CHANGELOG 2.2.0).
+ARG OPENCODE_VERSION=1.18.32
 ARG GROK_VERSION=1.0.24
 ARG OMP_VERSION=18.1.15
 
