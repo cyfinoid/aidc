@@ -73,18 +73,18 @@ aidc up            # build + start container
 /workspace                       your repo (rw bind)
 /workspace/.devcontainer         scaffold (ro bind)
 /opt/CORE_LOGICS                 shared cross-repo notes (rw, git worktree)
-/home/vscode/.claude             Claude state (named volume; CLAUDE_CONFIG_DIR keeps .claude.json here too)
-/home/vscode/.codex              Codex state (named volume)
-/home/vscode/.config/opencode    OpenCode config (named volume)
-/home/vscode/.local/share/opencode  OpenCode auth + sessions — XDG data dir (named volume)
-/home/vscode/.grok               Grok state (named volume)
-/home/vscode/.omp                omp (oh-my-pi) state (named volume)
-/home/vscode/.cursor             Cursor CLI (cursor-agent) config/login (named volume)
+/home/aidc/.claude             Claude state (named volume; CLAUDE_CONFIG_DIR keeps .claude.json here too)
+/home/aidc/.codex              Codex state (named volume)
+/home/aidc/.config/opencode    OpenCode config (named volume)
+/home/aidc/.local/share/opencode  OpenCode auth + sessions — XDG data dir (named volume)
+/home/aidc/.grok               Grok state (named volume)
+/home/aidc/.omp                omp (oh-my-pi) state (named volume)
+/home/aidc/.cursor             Cursor CLI (cursor-agent) config/login (named volume)
 /commandhistory                  bash + zsh history (named volume)
 /host-seed/{claude,codex,opencode,grok,omp,cursor,gitconfig}   read-only host seeds
 ```
 
-`GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).
+`GIT_CONFIG_GLOBAL=/home/aidc/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).
 
 Session transcripts sync **back to the host** (`aidc sync-sessions`, plus auto-sync on container start / agent exit / `down` / `destroy`): claude → `~/.claude/projects/`, codex → `~/.codex/sessions/`, grok → `~/.grok/sessions/`, omp → `~/.omp/agent/sessions/`, and opencode → `~/.local/share/aidc/sessions/opencode/<repo-slug>/`. The opencode copy is per-project, excludes `auth.json` (credentials never leave the container), and keeps `opencode.db` (or `storage/` on older builds).
 
@@ -170,7 +170,7 @@ sudo apt-get install -y --no-install-recommends golang-go
 go install golang.org/x/tools/gopls@latest
 ```
 
-Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/rtk) stay cached.
+Runs as `aidc` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/rtk) stay cached.
 
 After editing, run `aidc rebuild` to pick up the change — `aidc up` and the agent commands build only when the image is **missing** (fast path), so they won't rebuild an existing image on their own.
 

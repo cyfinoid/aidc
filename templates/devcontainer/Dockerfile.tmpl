@@ -20,7 +20,7 @@ LABEL aidc.base="${AIDC_BASE_IMAGE}"
 # on PATH ahead of /usr/local/bin; the dirs are empty (harmless) until the
 # matching toolchain is installed. The volume is not present at build time, so
 # the go/rust/java arms below only record where the toolchain comes from.
-ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/opt/toolchains/go/bin:/opt/toolchains/rust/bin:/opt/toolchains/java/bin:/usr/local/bin:/usr/bin:/bin
+ENV PATH=/home/aidc/.pmg/bin:/home/aidc/.local/bin:/opt/toolchains/go/bin:/opt/toolchains/rust/bin:/opt/toolchains/java/bin:/usr/local/bin:/usr/bin:/bin
 ENV GOROOT=/opt/toolchains/go \
     RUSTUP_HOME=/opt/toolchains/rust/rustup \
     JAVA_HOME=/opt/toolchains/java
@@ -73,7 +73,7 @@ RUN if [ -n "$AIDC_TOOLCHAINS" ]; then \
 
 # Opt-in per-project security tools. aidc reads AIDC_SECURITY_TOOLS from
 # .ai-container/project.env (comma-separated). Tools install under
-# /home/vscode/.local so no sudo needed.
+# /home/aidc/.local so no sudo needed.
 ARG AIDC_SECURITY_TOOLS=""
 RUN if [ -n "$AIDC_SECURITY_TOOLS" ]; then \
       echo "aidc: installing security tools: $AIDC_SECURITY_TOOLS"; \
@@ -102,7 +102,7 @@ RUN if [ -n "$AIDC_SECURITY_TOOLS" ]; then \
 
 # Per-project setup hook. User-owned, copied verbatim from the workspace.
 # Last in the Dockerfile so edits invalidate only this layer.
-COPY --chown=vscode:vscode project-setup.sh /tmp/aidc-project-setup.sh
+COPY --chown=aidc:aidc project-setup.sh /tmp/aidc-project-setup.sh
 RUN bash /tmp/aidc-project-setup.sh && rm /tmp/aidc-project-setup.sh
 
 WORKDIR /workspace

@@ -170,7 +170,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   fi
   # Thin per-project layer — point AIDC_BASE_IMAGE at a resolvable base so its
   # FROM lints (the real base tag is content-hashed at build time).
-  lint_base="mcr.microsoft.com/devcontainers/base:ubuntu-24.04"
+  lint_base="ubuntu:26.04"
   if docker build --check --build-arg "AIDC_BASE_IMAGE=$lint_base" "$proj/.devcontainer" >/dev/null 2>&1; then
     ok "Dockerfile passes docker build --check"
   else

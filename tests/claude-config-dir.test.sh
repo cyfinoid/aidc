@@ -21,7 +21,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE="$REPO_ROOT/templates/devcontainer/compose.yaml.tmpl"
 DOCKERFILE="$REPO_ROOT/templates/devcontainer/Dockerfile.base.tmpl"
 
-VOL_DIR="/home/vscode/.claude"
+VOL_DIR="/home/aidc/.claude"
 
 passed=0
 failed=0
@@ -67,7 +67,7 @@ else
     printf '%s' "$config"
   }
 
-  got="$(derive_config /home/vscode "$VOL_DIR")"
+  got="$(derive_config /home/aidc "$VOL_DIR")"
   if [[ "$got" == "$VOL_DIR/.claude.json" ]]; then
     ok "with CLAUDE_CONFIG_DIR set → $got"
   else

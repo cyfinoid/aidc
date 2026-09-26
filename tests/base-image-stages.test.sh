@@ -70,11 +70,11 @@ for a in $AGENTS; do
     [[ "$keep" -eq 1 && "$l" == FROM* ]] && break
     if [[ "$keep" -eq 1 ]]; then body+="$l"$'\n'; fi
   done
-  if [[ "$body" != *"RUN mkdir -p /home/vscode/.local/bin"* ]]; then
+  if [[ "$body" != *"RUN mkdir -p /home/aidc/.local/bin"* ]]; then
     fail "$a: agent-1 stage does not mkdir ~/.local/bin first (stale-image class of the opencode ln failure)"
     continue
   fi
-  if [[ "$a" == "opencode" && "$body" != *"RUN mkdir -p /home/vscode/.local/bin /home/vscode/.opencode"* ]]; then
+  if [[ "$a" == "opencode" && "$body" != *"RUN mkdir -p /home/aidc/.local/bin /home/aidc/.opencode"* ]]; then
     fail "opencode: agent-1 stage does not pre-create ~/.opencode (the ln -sf target pair)"
     continue
   fi

@@ -12,7 +12,7 @@ services:
     init: true
     stdin_open: true
     tty: true
-    user: vscode
+    user: aidc
     working_dir: /workspace
     # No cap_add here: Docker's default capability set is enough for normal
     # development (ping, sudo, chown all work). NET_ADMIN/NET_RAW are granted
@@ -25,10 +25,10 @@ services:
     mem_limit: ${AIDC_MEM_LIMIT:-0}
     cpus: ${AIDC_CPU_LIMIT:-0}
     environment:
-      HOME: /home/vscode
+      HOME: /home/aidc
       HISTFILE: /commandhistory/.zsh_history
-      GIT_CONFIG_GLOBAL: /home/vscode/.gitconfig.local
-      AIDC_CONTAINER_HOME: /home/vscode
+      GIT_CONFIG_GLOBAL: /home/aidc/.gitconfig.local
+      AIDC_CONTAINER_HOME: /home/aidc
       AIDC_CORE_LOGICS_DIR: /opt/CORE_LOGICS
       AIDC_WORKSPACE_DIR: /workspace
       # Claude Code writes its global config to ~/.claude.json — a *sibling* of
@@ -38,7 +38,7 @@ services:
       # bit opencode's XDG data dir). Pointing CLAUDE_CONFIG_DIR at the volume dir
       # relocates .claude.json (and .credentials.json) INSIDE it, so all of
       # Claude's global state persists like every other agent's.
-      CLAUDE_CONFIG_DIR: /home/vscode/.claude
+      CLAUDE_CONFIG_DIR: /home/aidc/.claude
     command:
       - /bin/bash
       - -lc
@@ -95,37 +95,37 @@ services:
         target: /commandhistory
       - type: volume
         source: claude_home
-        target: /home/vscode/.claude
+        target: /home/aidc/.claude
       - type: volume
         source: codex_home
-        target: /home/vscode/.codex
+        target: /home/aidc/.codex
       - type: volume
         source: opencode_home
-        target: /home/vscode/.config/opencode
+        target: /home/aidc/.config/opencode
       # opencode keeps its auth (auth.json) in the XDG *data* dir, not the config
       # dir — persist it so logins survive container recreation.
       - type: volume
         source: opencode_data_home
-        target: /home/vscode/.local/share/opencode
+        target: /home/aidc/.local/share/opencode
       # Cursor CLI (cursor-agent) stores config + login under ~/.cursor
       # (~/.cursor/cli-config.json), NOT ~/.cursor-agent — so the volume mounts
       # there to persist logins across container recreation.
       - type: volume
         source: cursor_agent_home
-        target: /home/vscode/.cursor
+        target: /home/aidc/.cursor
       - type: volume
         source: grok_home
-        target: /home/vscode/.grok
+        target: /home/aidc/.grok
       - type: volume
         source: omp_home
-        target: /home/vscode/.omp
+        target: /home/aidc/.omp
       # rtk's savings history (history.db — the record every rtk-wired agent
       # appends to). Without a volume it lives in the container layer and every
       # recreation wipes the stats; 'aidc sync-sessions' still merges whatever
       # accumulated to the host before that.
       - type: volume
         source: rtk_data
-        target: /home/vscode/.local/share/rtk
+        target: /home/aidc/.local/share/rtk
       # Shared read-only toolchain store (issue #9): one copy of Go/Rust/JDK
       # (+ gosec/cargo-audit) serves all projects, populated by
       # 'aidc tools install'. Read-only so agents can't tamper with the shared

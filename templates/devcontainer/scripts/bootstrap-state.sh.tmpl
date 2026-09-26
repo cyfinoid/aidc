@@ -3,7 +3,7 @@ set -euo pipefail
 
 mode="${1:-init}"
 tool="${2:-all}"
-home_dir="${AIDC_CONTAINER_HOME:-/home/vscode}"
+home_dir="${AIDC_CONTAINER_HOME:-/home/aidc}"
 
 project_env="/workspace/.ai-container/project.env"
 if [[ -f "$project_env" ]]; then
@@ -281,7 +281,7 @@ sync_omp() {
 
 # The rtk_data volume mounts at ~/.local/share/rtk, where rtk keeps history.db —
 # the single db every rtk-wired agent appends to and 'rtk gain' reads. The image
-# pre-creates that path as vscode so a *fresh* volume inherits the ownership, but
+# pre-creates that path as aidc so a *fresh* volume inherits the ownership, but
 # Docker seeds a named volume only when it is first created: a volume that
 # already materialised root-owned (built by an image predating that mkdir) stays
 # root-owned through any number of rebuilds, and every rtk invocation then fails
@@ -293,7 +293,7 @@ ensure_rtk_data_dir() {
   [[ -d "$dir" ]] || ensure_dir "$dir" 2>/dev/null || true
   [[ -d "$dir" ]] || return 0
   # -w is the condition that actually matters (uid/gid can differ from 1000 when
-  # align_uid has remapped vscode); only escalate when the check fails.
+  # align_uid has remapped aidc); only escalate when the check fails.
   [[ -w "$dir" ]] && return 0
   sudo -n chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
   # Re-test rather than trusting chown's exit status: sudo may be absent or
@@ -476,7 +476,7 @@ install_agent_hooks() {
 }
 
 align_uid() {
-  # No-op unless invoked as root AND /workspace is owned by a non-vscode uid.
+  # No-op unless invoked as root AND /workspace is owned by a non-aidc uid.
   # On macOS (Docker Desktop / OrbStack) bind mounts already present the
   # container user's uid, so this stays dormant. Kept here so the setup is
   # correct if the compose entrypoint is ever switched to root.
@@ -488,8 +488,8 @@ align_uid() {
   host_gid="$(stat -c %g /workspace 2>/dev/null || echo 1000)"
   [[ "$host_uid" -eq 1000 && "$host_gid" -eq 1000 ]] && return 0
 
-  usermod -u "$host_uid" vscode 2>/dev/null || true
-  groupmod -g "$host_gid" vscode 2>/dev/null || true
+  usermod -u "$host_uid" aidc 2>/dev/null || true
+  groupmod -g "$host_gid" aidc 2>/dev/null || true
   chown -R "$host_uid:$host_gid" "$home_dir" /commandhistory 2>/dev/null || true
 }
 

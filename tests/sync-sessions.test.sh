@@ -42,8 +42,8 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; failed=$((failed + 1)); }
 # Container plumbing stubs. Function names resolve at call time, so redefining
 # after sourcing is enough. Both stubs receive the sync path's argv as
 # `<ws> exec -T workspace <cmd...>`; they drop the compose prefix, rewrite any
-# /home/vscode-prefixed path in <cmd> to point into the fixture tree (which
-# mirrors the container's /home/vscode layout), and run the command locally —
+# /home/aidc-prefixed path in <cmd> to point into the fixture tree (which
+# mirrors the container's /home/aidc layout), and run the command locally —
 # so the gate probe (`test ...`) and the tar stream behave as if in-container.
 CONTAINER_ROOT=""
 STUB_ARGV=()
@@ -52,7 +52,7 @@ stub_translate_argv() {
   local a
   for a in "$@"; do
     case "$a" in
-      /home/vscode|/home/vscode/*) a="$CONTAINER_ROOT${a#/home/vscode}" ;;
+      /home/aidc|/home/aidc/*) a="$CONTAINER_ROOT${a#/home/aidc}" ;;
     esac
     STUB_ARGV+=("$a")
   done
@@ -70,7 +70,7 @@ aidc::compose() {
 aidc::log() { :; }
 
 # Build a fresh container-side fixture (standing in for the container's
-# /home/vscode) and point HOME at a clean host tree. Sets CONTAINER_ROOT, HOME
+# /home/aidc) and point HOME at a clean host tree. Sets CONTAINER_ROOT, HOME
 # and host_dst (claude transcripts) in the caller's shell — must NOT run in a
 # subshell or the exports are lost.
 setup_case() {

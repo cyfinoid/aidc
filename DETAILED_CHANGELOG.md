@@ -8,6 +8,186 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-09-26 — container user renamed vscode → aidc (uid/gid 1000 unchanged)
+
+**Summary:** With the base image self-owned (previous entry), the container
+user identity no longer has to match the devcontainers-base convention.
+Renamed to `aidc` everywhere it identifies the *user*: home `/home/aidc`,
+group `aidc`, sudoers file `/etc/sudoers.d/aidc`, `USER aidc`,
+`remoteUser: "aidc"`, compose `user: aidc`. uid/gid stay 1000.
+
+**Trigger:** "now since we are doing this ourselves. replace vscode user to
+aidc user."
+
+**Renamed (files touched):**
+
+- `templates/devcontainer/Dockerfile.base.tmpl` — groupadd/useradd/sudoers
+  block, `.zshrc` COPY target, `/commandhistory` chown, `USER`, `HOME`,
+  PATH shim prefix, agent-stage mkdirs and `COPY --chown` lines, volume
+  mount-point mkdir block, header comments.
+- `templates/devcontainer/Dockerfile.tmpl` — toolchain `ENV PATH` prefix,
+  security-tools comment, `COPY --chown` for project-setup.sh.
+- `templates/devcontainer/compose.yaml.tmpl` — `user:`, `HOME`,
+  `GIT_CONFIG_GLOBAL`, `AIDC_CONTAINER_HOME`, `CLAUDE_CONFIG_DIR`, all eight
+  named-volume mount `target:` paths.
+- `templates/devcontainer/devcontainer.json.tmpl` — `remoteUser` only.
+  `customizations.vscode` and `ms-vscode-remote.*` extension IDs are VS
+  Code-the-editor namespaces — deliberately untouched.
+- `templates/devcontainer/scripts/bootstrap-state.sh.tmpl` — `home_dir`
+  default, `align_uid`'s `usermod`/`groupmod` targets, comments.
+- `templates/devcontainer/project-setup.sh.tmpl` — header comment.
+- `lib/aidc/common.sh` — `AIDC_CONTAINER_USER`/`AIDC_CONTAINER_HOME`
+  defaults (env overrides still win, so anything pinned to the old values
+  keeps working through a transition).
+- `lib/aidc/runtime.sh` — `ensure_tool_links` home default.
+- `lib/aidc/sync.sh` — the six agent session-store container paths.
+- `scripts/image-size-report.sh` — `du` targets and table label.
+- `docs/install.md`, `docs/security.md`, `docs/cursor.md`,
+  `docs/apple-container.md` — path table, exec snippet, prose.
+- Tests: `base-image-os` (provisioning patterns), `base-image-stages`
+  (mkdir patterns), `claude-config-dir`, `rtk-gain` (fixture layout +
+  template grep), `sync-sessions` (fixture remap), `scan-link` (default
+  home + hermeticity fix).
+
+**Why uid/gid 1000 must not move:** host bind-mount compatibility —
+`/workspace` is owned by the host user, normally uid 1000; the whole
+`align_uid` mechanism exists for the cases where it isn't.
+
+**Why existing volumes survive:** named volumes are keyed by *name* and
+re-seed only when fresh. Renaming the user moves the mount *target*
+(`/home/vscode/.claude` → `/home/aidc/.claude`) but the same volume lands
+there, and everything inside is uid 1000 — now `aidc`'s uid. No data
+migration needed.
+
+**Hermeticity bug found by the rename:** `tests/scan-link.test.sh`'s
+default-home case relied on `AIDC_CONTAINER_HOME` being unset in the
+environment — but *this container* (built from the old image) exports
+`AIDC_CONTAINER_HOME=/home/vscode` via compose, so the case silently
+asserted the ambient value instead of the default. It passed on the old
+code only because ambient matched the old literal. The case now forces
+`AIDC_CONTAINER_HOME=''` (`:-` default kicks in) — shellcheck SC1007
+avoided by using `''`.
+
+**Verification:** full suite `tests/*.test.sh`: 37 passed, 1 failed —
+`agent-auth-seed.test.sh`, which fails identically on a pristine HEAD
+worktree (`git worktree add`, both suites run side by side): pre-existing,
+environmental, unrelated to the rename — flagged, not fixed here.
+shellcheck clean on touched shell files; aidc-scan clean.
+
+**Notes:** a running container built from the old image (like this session
+container) still has its `vscode` user and exports
+`AIDC_CONTAINER_HOME=/home/vscode` — the env knobs make scaffold scripts
+behave correctly inside it regardless. New/`aidc rebuild`ed projects get
+the `aidc` user end to end. Historical changelog entries and session logs
+intentionally still say `vscode` — they document the past state. In
+particular, the preceding base-image entry (same Unreleased batch) quotes
+`vscode` provisioning strings because it was authored before this rename;
+that entry describes Change A as merged, this entry supersedes the names.
+
+---
+
+## 2026-09-26 — self-owned minimal OS base: devcontainers base retired for stock ubuntu:26.04
+
+**Summary:** The shared base image (`Dockerfile.base.tmpl`) was built
+`FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd…`.
+That base cost ~110 MB compressed vs ~30 MB for stock ubuntu:24.04 and ~42 MB
+for ubuntu:26.04, and shipped ~70 packages (nano, wget, man-db, ncdu, strace,
+dialog, apt-utils, lsb-release, oh-my-zsh, …) that nothing in the scaffold
+uses — pure grype-triage surface. It was kept because it silently provided
+load-bearing pieces. This change repins to `ubuntu:26.04`
+(`@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78`,
+the OCI index digest as of the 2026-09-16 monthly push) and provisions those
+pieces explicitly.
+
+**Trigger:** "do we really need that as the base image should we create our
+own base image minimal and optimal and reduce the fluff that way" — followed
+by a candidate comparison (debian 13 / ubuntu 26.04 / alpine) on registry
+sizes before committing.
+
+**Candidate evaluation** (Docker Hub compressed sizes, amd64): alpine 3.22
+3.8 MB, ubuntu:24.04 29.8 MB, ubuntu:26.04 41.6 MB, debian:13 49.4 MB,
+devcontainers/base:ubuntu-24.04 ~110 MB. Alpine was ruled out on
+compatibility, not size: semgrep (heaviest always-on scanner) publishes
+manylinux/glibc wheels only — no musl; Temurin ships no musl JDK; the
+claude/opencode native binaries are bun-compiled glibc targets; and every
+checksum-pinned GitHub artifact would need a second musl naming+SHA variant,
+doubling the `update-pins.sh` matrix. Debian 13 was fully compatible but
+strictly worse than Ubuntu here (largest base, no workflow difference).
+26.04 won over 24.04: newer packages, LTS to 2031 vs 2029, +12 MB — and the
+base repin was happening either way, so the migration is not done twice. All
+pinned binaries/debs are glibc-forward-compatible with the newer base;
+`gh` 2.46 confirmed present in resolute/universe; nodesource uses the
+distro-agnostic `nodistro` suite.
+
+**What the devcontainers base was providing (all now explicit):**
+
+- `vscode` user uid/gid 1000 → stock `ubuntu` user/group (uid/gid 1000,
+  shipped by default on ubuntu 24.04+ images — the reviewer's rootfs pull of
+  the pinned digest confirmed `ubuntu:x:1000:1000` in /etc/passwd) is
+  removed with `userdel --remove ubuntu || true` + `groupdel ubuntu || true`
+  first, or `groupadd --gid 1000 vscode` aborts the build; then
+  `useradd --create-home --shell /usr/bin/zsh` in the `base` stage, before
+  `USER vscode`.
+- passwordless sudo → `/etc/sudoers.d/vscode`, `0440` (the thin per-project
+  layer's toolchain arms build as vscode via `sudo apt-get`).
+- `git`, `openssh-client`, `less`, `procps` → added to the apt list (git and
+  openssh-client were entirely invisible before — never installed anywhere in
+  the repo, always inherited).
+- `git config --system --add safe.directory '*'` → preserves devcontainers
+  behavior for bind mounts owned by a non-1000 host uid.
+- zsh config → minimal `.zshrc` heredoc (`HISTFILE=/commandhistory/
+  .zsh_history` matching the existing bash volume wiring, share/ignore-dups
+  setopts, compinit, simple prompt). oh-my-zsh NOT carried over: ~100 MB of
+  the inherited layer, and no scaffold component or agent uses it; humans can
+  add it via project-setup.sh.
+- Dockerfile.toolchain.tmpl → same 26.04 digest; now installs
+  `ca-certificates curl` (stock ubuntu lacks them; every arm fetches over
+  TLS) and keeps its rust-arm `build-essential`.
+
+**Deliberately not carried over:** nano, wget, man-db, ncdu, strace, dialog,
+apt-utils, lsb-release, oh-my-zsh. wget in particular: every pinned fetch in
+all three templates uses curl; projects wanting wget add it in
+project-setup.sh.
+
+**Expected size impact:** ~70 MB less per base image (~110 → ~42 MB
+compressed) — roughly 2–3% of a multi-GB final image, since the tooling
+layers dominate. The primary wins are CVE surface (~70 fewer packages for
+the always-on grype scans) and supply-chain ownership (Canonical index
+digest instead of Microsoft's feature-built image, and no more waiting on
+devcontainers/base rebuilds to pick up distro patches — repin ubuntu directly
+via the existing "docker pull, read Digest" workflow).
+
+**Files changed:** `templates/devcontainer/Dockerfile.base.tmpl` (FROM,
+apt list, user/sudo/git/zsh block), `templates/devcontainer/Dockerfile.toolchain.tmpl`
+(FROM + curl/ca-certificates prelude), `.github/scripts/validate-scaffold.sh`
+(lint shim `lint_base=ubuntu:26.04` — tag not digest, so the lint shim
+doesn't churn on monthly repins), new `tests/base-image-os.test.sh`.
+
+**Verification:** `bash tests/base-image-os.test.sh` (17 cases: same digest
+in both templates, anchored to FROM/ARG pin lines; no non-comment
+mcr/devcontainers references across templates/devcontainer; previously
+inherited packages present; stock-ubuntu-user removal guard present;
+provisioning ordered before `USER vscode`, zsh HISTFILE wired, toolchain
+curl present); `bash tests/base-image-stages.test.sh`
+(32) still green; toolchain-volume/compose-file-args/update-pins/
+check-image-pins/validate-scaffold/devcontainer-env suites all green
+(119 total); `bash -n` + shellcheck clean; aidc-scan clean. Digest resolved
+via the Docker Hub tag API (OCI index, media type
+`application/vnd.oci.image.index.v1+json`), matching the existing
+multi-arch index-pin convention. First real `docker build` of the template
+in CI (image-size.yml, sbom.yml) is the remaining smoke — no docker daemon
+in the working container to pre-verify the build.
+
+**Notes:** `tests/clean.test.sh` uses `ubuntu:24.04` strings as canned
+`docker images` fixtures — cosmetic mock data, left alone. `lib/aidc/vm.sh`
+pins an ubuntu 24.04 *cloud image* for the VM provider — a separate runtime,
+out of scope here. `aidc::base_image_tag` keys the content hash of
+`Dockerfile.base` itself, so every project rebuilds its shared base once
+after pulling this change; old `aidc-base:<hash>` images become garbage
+collectable via `aidc clean`.
+
+---
+
 ## 2026-09-26 — release 2.2.0 cut; opencode v2 evaluated, v1 pin advanced to 1.18.32
 
 **Summary:** The review-gate work (multi-agent pre-completion review) is cut

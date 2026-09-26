@@ -53,11 +53,11 @@ aidc::sync_session_tool() {
 
   case "$tool" in
     claude)
-      container_src="/home/vscode/.claude/projects"
+      container_src="/home/aidc/.claude/projects"
       host_dst="$HOME/.claude/projects"
       ;;
     codex)
-      container_src="/home/vscode/.codex/sessions"
+      container_src="/home/aidc/.codex/sessions"
       host_dst="$HOME/.codex/sessions"
       ;;
     opencode)
@@ -71,7 +71,7 @@ aidc::sync_session_tool() {
       # merge INTO the host's default data dir happens afterwards, additively
       # and safety-gated, in aidc::opencode_merge_to_base (see the hook at the
       # end of this function).
-      container_src="/home/vscode/.local/share/opencode"
+      container_src="/home/aidc/.local/share/opencode"
       host_dst="$HOME/.local/share/aidc/sessions/opencode/$(aidc::repo_slug "${workspace:-/workspace}")"
       # Session artifacts only: credentials never leave the container, and
       # log/repos/snapshot/tool-output/bin are caches, not sessions.
@@ -89,13 +89,13 @@ aidc::sync_session_tool() {
       gate_desc="no session artifacts in $container_src"
       ;;
     grok)
-      container_src="/home/vscode/.grok/sessions"
+      container_src="/home/aidc/.grok/sessions"
       host_dst="$HOME/.grok/sessions"
       ;;
     omp)
       # omp (oh-my-pi) stores conversations as JSONL under
       # ~/.omp/agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl.
-      container_src="/home/vscode/.omp/agent/sessions"
+      container_src="/home/aidc/.omp/agent/sessions"
       host_dst="$HOME/.omp/agent/sessions"
       ;;
     rtk)
@@ -105,7 +105,7 @@ aidc::sync_session_tool() {
       # into the host's OWN rtk db afterwards (aidc::rtk_merge_to_base below) —
       # never extracted over the host's data dir, whose db sits at the same
       # path. tee/ holds raw command-output logs: bulky, not savings data.
-      container_src="/home/vscode/.local/share/rtk"
+      container_src="/home/aidc/.local/share/rtk"
       host_dst="$HOME/.local/share/aidc/rtk/$(aidc::repo_slug "${workspace:-/workspace}")"
       src_excludes=(--exclude=./tee)
       gate=(test -f "$container_src/history.db")

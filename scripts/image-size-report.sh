@@ -109,13 +109,13 @@ layer_rows="$(docker history --no-trunc --format '{{.Size}}|{{.CreatedBy}}' "$IM
       }' | sort -r)"
 
 # ── components: one throwaway container, one sh -c with tagged du sections ───
-# The image's default user (vscode) only reads; @@section markers delimit the
+# The image's default user (aidc) only reads; @@section markers delimit the
 # du groups so the parser stays dumb.
 du_out="$(docker run --rm --entrypoint /bin/sh "$IMAGE" -c '
   echo "@@top-level"
-  du -sk /usr /opt /home/vscode /var /etc /root /commandhistory 2>/dev/null
+  du -sk /usr /opt /home/aidc /var /etc /root /commandhistory 2>/dev/null
   echo "@@home-children"
-  du -sk /home/vscode/* /home/vscode/.[!.]* 2>/dev/null
+  du -sk /home/aidc/* /home/aidc/.[!.]* 2>/dev/null
   echo "@@opt-children"
   du -sk /opt/* /opt/uv/* 2>/dev/null
   echo "@@tools-children"
@@ -192,7 +192,7 @@ emit_table() { # <title> <section> <n>
 }
 
 emit_table "top-level dirs" top-level "$TOP"
-emit_table "/home/vscode (agents, config)" home-children "$TOP"
+emit_table "/home/aidc (agents, config)" home-children "$TOP"
 emit_table "/opt (uv, python, tools)" opt-children "$TOP"
 emit_table "/opt/uv/tools (uv-installed tools)" tools-children "$TOP"
 emit_table "/opt/uv/python (uv-managed runtimes)" python "$TOP"

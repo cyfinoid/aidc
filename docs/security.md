@@ -356,7 +356,7 @@ the volume mounts are placed deliberately:
   volume, else logins and history would vanish on recreation.
 - **Claude Code** writes its global config to `~/.claude.json`, a *sibling* file
   of `~/.claude` and thus outside the `claude_home` volume. The container sets
-  `CLAUDE_CONFIG_DIR=/home/vscode/.claude` so `.claude.json` (and, on Linux,
+  `CLAUDE_CONFIG_DIR=/home/aidc/.claude` so `.claude.json` (and, on Linux,
   `.credentials.json`) land inside that volume and persist across recreation
   along with the rest of Claude's state.
 - **cursor-agent** keeps file state under `~/.cursor` (persisted), but its
@@ -446,7 +446,7 @@ Verify:
 ```bash
 aidc exec -- rtk --version
 aidc exec -- rtk gain                                                     # token savings so far
-aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # rtk PreToolUse/Bash + SessionEnd reporter + aidc Stop hook
+aidc exec -- cat /home/aidc/.claude/settings.json | jq '.hooks // {}'   # rtk PreToolUse/Bash + SessionEnd reporter + aidc Stop hook
 ```
 
 ### Which agents get rtk

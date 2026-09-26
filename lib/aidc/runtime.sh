@@ -197,7 +197,7 @@ aidc::compose_exec() {
 # since `aidc ci` execs the script directly. Idempotent; non-fatal on failure.
 aidc::ensure_tool_links() {
   local workspace="$1"
-  local home="${AIDC_CONTAINER_HOME:-/home/vscode}"
+  local home="${AIDC_CONTAINER_HOME:-/home/aidc}"
   aidc::compose "$workspace" exec -T workspace sh -c '
     mkdir -p "$1/.local/bin"
     for name in aidc-scan aidc-ci; do

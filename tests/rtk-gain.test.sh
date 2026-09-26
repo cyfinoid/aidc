@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 # HOME is redirected into TMP_ROOT below, but CLAUDE_CONFIG_DIR is a *sibling*
 # escape hatch: real rtk (and the stub, which mirrors it) honors it over HOME,
-# and compose exports CLAUDE_CONFIG_DIR=/home/vscode/.claude container-wide. Any
+# and compose exports CLAUDE_CONFIG_DIR=/home/aidc/.claude container-wide. Any
 # `rtk init` the wiring tests drive would therefore write through to the real
 # ~/.claude — running this suite in the container used to overwrite the
 # developer's own RTK.md with the stub's placeholder. Redirect it for the whole
@@ -353,7 +353,7 @@ stub_translate_argv() {
   local a
   for a in "$@"; do
     case "$a" in
-      /home/vscode|/home/vscode/*) a="$CONTAINER_ROOT${a#/home/vscode}" ;;
+      /home/aidc|/home/aidc/*) a="$CONTAINER_ROOT${a#/home/aidc}" ;;
     esac
     STUB_ARGV+=("$a")
   done
@@ -489,10 +489,10 @@ else
   fail "compose volume"
 fi
 
-# 21b. ...and the image pre-creates its mount point as vscode, which is what
+# 21b. ...and the image pre-creates its mount point as aidc, which is what
 #      makes a fresh volume inherit non-root ownership. Every other volume
 #      target in that mkdir already did; rtk's omission is what broke tracking.
-if grep -q '/home/vscode/.local/share/rtk' "$REPO_ROOT/templates/devcontainer/Dockerfile.base.tmpl"; then
+if grep -q '/home/aidc/.local/share/rtk' "$REPO_ROOT/templates/devcontainer/Dockerfile.base.tmpl"; then
   ok "base image pre-creates the rtk data dir"
 else
   fail "rtk data dir not pre-created in image"
