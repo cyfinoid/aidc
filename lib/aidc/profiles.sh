@@ -91,6 +91,9 @@ aidc::append_passthrough_env_args() {
 # key has been dropped from the passthrough list (per-project opt-out via
 # AIDC_PASSTHROUGH_ENV_KEYS), when the Keychain lookup is disabled, or when the
 # `security` tool is unavailable (e.g. non-macOS hosts). Never logs the token.
+# The read itself can stall silently (hidden Keychain ACL dialog, slow
+# securityd), so a watchdog warns visibly once it outlives
+# AIDC_KEYCHAIN_HINT_DELAY seconds (default 5; 0 disables the watchdog).
 aidc::resolve_claude_oauth_token() {
   local already=0
   aidc::secret_begin
@@ -113,18 +116,43 @@ aidc::resolve_claude_oauth_token() {
 
   local account token
   account="${USER:-$(id -un 2>/dev/null || true)}"
-  aidc::debug "reading Claude OAuth token from Keychain (service $AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE, account $account) — if this hangs, macOS is waiting on a Keychain access prompt: click Always Allow, or Ctrl-C and export CLAUDE_CODE_OAUTH_TOKEN"
+  aidc::debug "reading Claude OAuth token from Keychain (service $AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE, account $account)"
   # The -w read of the secret is gated by the Keychain item's ACL; suppress
   # xtrace so the token value never lands in a --debug trace.
   local found="not found"
+  local t0=$SECONDS
   aidc::secret_begin
+  # The read can stall for minutes with nothing on screen: macOS may be
+  # holding it on a Keychain access dialog hidden behind other windows, or
+  # securityd can just be slow. The hint used to be debug-only, which left
+  # first-run users staring at a silent hang — so a watchdog prints it
+  # visibly once the read outlives a grace period
+  # (AIDC_KEYCHAIN_HINT_DELAY seconds, default 5; 0 or malformed disables).
+  # Spawned inside the secret region so a --debug xtrace can't leak into the
+  # subshell; the message is a fixed string with no secret values.
+  local hint_delay="${AIDC_KEYCHAIN_HINT_DELAY:-5}"
+  case "$hint_delay" in
+    0 | '' | *[!0-9]*) hint_delay="" ;;
+  esac
+  local watchdog_pid=""
+  if [[ -n "$hint_delay" ]]; then
+    (
+      sleep "$hint_delay"
+      aidc::warn "Keychain lookup still running after ${hint_delay}s — macOS may be holding it on a hidden Keychain access prompt (find it and click Always Allow), or securityd is just slow; to skip the lookup entirely, Ctrl-C and export CLAUDE_CODE_OAUTH_TOKEN"
+    ) &
+    watchdog_pid=$!
+  fi
   token="$(security find-generic-password -a "$account" -s "$AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE" -w 2>/dev/null || true)"
+  if [[ -n "$watchdog_pid" ]]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+  fi
   if [[ -n "$token" ]]; then
     export CLAUDE_CODE_OAUTH_TOKEN="$token"
     found="found"
   fi
   aidc::secret_end
-  aidc::debug "Keychain lookup complete (token $found)"
+  aidc::debug "Keychain lookup complete (token $found, elapsed $((SECONDS - t0))s)"
 }
 
 aidc::validate_claude_profile_name() {

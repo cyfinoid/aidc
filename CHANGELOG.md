@@ -4,6 +4,10 @@ All notable changes to aidc are tracked here. Format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+
+- **`aidc claude` no longer hangs silently on the Keychain token lookup.** The 2.3.0 on-demand read of `CLAUDE_CODE_OAUTH_TOKEN` from the macOS Keychain (`security find-generic-password -w`) can stall for minutes with nothing on screen — macOS holding it on a Keychain access dialog hidden behind other windows, or `securityd` just being slow — and the only hint was buried in `--debug` output, so a first-run user stared at a silent hang after `agent 'claude' is ready`. A watchdog now prints the hint visibly (no `--debug` needed) once the read outlives a grace period: what is likely blocking, find the dialog and click Always Allow, and the Ctrl-C/export escape hatch. Tunable via `AIDC_KEYCHAIN_HINT_DELAY` (seconds, default 5; `0` or any non-numeric value disables); the completion debug line now reports elapsed time so a slow `securityd` is measurable. Covered by `tests/resolve-oauth-token.test.sh` (11 cases: hint fires on a slow lookup, stays silent on a fast one, and is disableable via `0` or a malformed value).
+
 ## [2.3.0] - 2026-10-03
 
 ### Changed

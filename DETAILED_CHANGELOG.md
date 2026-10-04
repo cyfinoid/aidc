@@ -8,6 +8,65 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-04 — visible watchdog for the Keychain OAuth token lookup
+
+**Summary:** `aidc::resolve_claude_oauth_token` (the 2.3.0 feature that reads
+`CLAUDE_CODE_OAUTH_TOKEN` from the macOS Keychain on demand) can block for a
+very long time with zero on-screen feedback, and its only hint — "if this
+hangs, macOS is waiting on a Keychain access prompt" — was an `aidc::debug`
+line, invisible without `--debug`. A watchdog now prints that hint visibly
+(`aidc::warn`) once the read outlives a grace period, and the completion debug
+line reports elapsed seconds.
+
+**Why:** user report — after `aidc upgrade` to 2.3.0, the first
+`aidc claude` printed `agent 'claude' is ready` and then sat silent "for a
+long long time" before eventually resolving on its own, despite Keychain
+approvals already being in place. Two plausible blocks fit: (1) a Keychain
+ACL dialog hidden behind other windows (Always-Allow grants are per-app and
+can be invalidated by macOS updates or item rewrites, so "approved once"
+doesn't hold forever), or (2) `securityd` simply being slow — notably, case
+(2) explains the self-resolution, since a dialog needs a click. Either way
+the failure mode is the same: the `security -w` read blocks silently and the
+user has no idea aidc is even involved.
+
+**How:** in `lib/aidc/profiles.sh`, the blocking
+`security find-generic-password ... -w` read is now bracketed by a watchdog:
+
+- A background subshell sleeps `AIDC_KEYCHAIN_HINT_DELAY` seconds (default 5;
+  `0` or a malformed value disables it) and then `aidc::warn`s a fixed string:
+  what is likely blocking, find the hidden dialog and click Always Allow, and
+  the Ctrl-C/export-`CLAUDE_CODE_OAUTH_TOKEN` escape hatch. No secret values.
+- Spawned *inside* the `secret_begin`/`secret_end` region so a `--debug`
+  xtrace can't leak into the subshell (the region suppresses xtrace at fork
+  time).
+- Once the read returns, the watchdog subshell is `kill`ed and `wait`ed (both
+  `|| true`) — the killed subshell can no longer print, so there is no
+  spurious hint on the normal fast path, and the code is set -e safe. (The
+  subshell's `sleep` child is not reaped — `kill` signals only the subshell —
+  but the orphan is silent and self-limiting: it exits on its own within
+  hint_delay seconds holding nothing that matters.)
+- Elapsed time added to the completion debug line, so a slow `securityd` is
+  measurable next time.
+
+**Commands:**
+
+    bash tests/resolve-oauth-token.test.sh   # 11 passed, 0 failed
+    shellcheck lib/aidc/profiles.sh tests/resolve-oauth-token.test.sh
+
+**Verification:** `tests/resolve-oauth-token.test.sh` gained a `STUB_DELAY`
+knob on its `security` stub (models the hung lookup) and four cases: the
+hint fires on a slow lookup and the token still resolves; a fast lookup with
+an unfired 30s watchdog stays silent (kill-before-fire works); `0` disables;
+a malformed value (`abc`) disables. Existing 7 cases unchanged and green.
+`aidc-scan` clean (semgrep/gitleaks/shellcheck).
+
+**Notes:** `aidc doctor`'s keychain check (status.sh) reads item *metadata*
+only — no `-w` — which does not trigger the ACL gate, so it can't hang and
+needed no change. The stale `security` binary on PATH caveat: on Linux hosts
+there is no `security` tool at all (no-op arm runs first).
+
+---
+
 ## 2026-10-03 — agent install prompt + first-build bake in run_tool
 
 **Summary:** Invoking an agent that isn't in the project image used to

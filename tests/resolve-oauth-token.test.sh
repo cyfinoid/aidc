@@ -35,12 +35,17 @@ FAILED_FILE="$TMP_ROOT/failed"
 # `security` stub. Behaviour driven by env vars so each case configures it:
 #   STUB_TOKEN  — value to print for `find-generic-password ... -w`
 #   STUB_FAIL=1 — exit non-zero with no output (item-not-found)
+#   STUB_DELAY  — seconds to sleep before answering (models a hung lookup:
+#                 hidden Keychain ACL dialog / slow securityd)
 #   STUB_MARKER — file the stub touches on every invocation (call detection)
 cat >"$STUB_DIR/security" <<'STUB'
 #!/usr/bin/env bash
 [[ -n "${STUB_MARKER:-}" ]] && : >"$STUB_MARKER"
 if [[ "${STUB_FAIL:-0}" == "1" ]]; then
   exit 44
+fi
+if [[ -n "${STUB_DELAY:-}" ]]; then
+  sleep "$STUB_DELAY"
 fi
 printf '%s' "${STUB_TOKEN:-}"
 STUB
@@ -167,6 +172,60 @@ run_resolver() {
     ok "missing security tool is a clean no-op"
   else
     fail "missing-tool case: unexpected token '${CLAUDE_CODE_OAUTH_TOKEN:-}'"
+  fi
+)
+
+# 8. Lookup slower than the watchdog grace period: the hang hint is printed
+#    visibly (not debug-only) and the lookup still resolves when it completes.
+(
+  export PATH="$STUB_DIR:$PATH"
+  export STUB_TOKEN="$FAKE_TOKEN"
+  export STUB_DELAY="2"
+  export AIDC_KEYCHAIN_HINT_DELAY="1"
+  run_resolver
+  if [[ "$RESULT_OUTPUT" == *"Keychain lookup still running"* && "$RESULT_TOKEN" == "$FAKE_TOKEN" ]]; then
+    ok "slow lookup prints a visible hang hint and still resolves"
+  else
+    fail "hang-hint case: token='$RESULT_TOKEN' output='$RESULT_OUTPUT'"
+  fi
+)
+
+# 9. Fast lookup: watchdog killed before it can fire — no hint, no output.
+(
+  export PATH="$STUB_DIR:$PATH"
+  export STUB_TOKEN="$FAKE_TOKEN"
+  export AIDC_KEYCHAIN_HINT_DELAY="30"
+  run_resolver
+  if [[ "$RESULT_OUTPUT" != *"Keychain lookup still running"* && "$RESULT_TOKEN" == "$FAKE_TOKEN" ]]; then
+    ok "fast lookup stays silent"
+  else
+    fail "fast-lookup case: token='$RESULT_TOKEN' output='$RESULT_OUTPUT'"
+  fi
+)
+
+# 10. Watchdog disabled (AIDC_KEYCHAIN_HINT_DELAY=0): no hint, still resolves.
+(
+  export PATH="$STUB_DIR:$PATH"
+  export STUB_TOKEN="$FAKE_TOKEN"
+  export AIDC_KEYCHAIN_HINT_DELAY="0"
+  run_resolver
+  if [[ "$RESULT_OUTPUT" != *"Keychain lookup still running"* && "$RESULT_TOKEN" == "$FAKE_TOKEN" ]]; then
+    ok "hint watchdog can be disabled"
+  else
+    fail "disabled-watchdog case: token='$RESULT_TOKEN' output='$RESULT_OUTPUT'"
+  fi
+)
+
+# 11. Malformed delay value disables the watchdog like 0 does.
+(
+  export PATH="$STUB_DIR:$PATH"
+  export STUB_TOKEN="$FAKE_TOKEN"
+  export AIDC_KEYCHAIN_HINT_DELAY="abc"
+  run_resolver
+  if [[ "$RESULT_OUTPUT" != *"Keychain lookup still running"* && "$RESULT_TOKEN" == "$FAKE_TOKEN" ]]; then
+    ok "malformed delay value disables the watchdog"
+  else
+    fail "malformed-delay case: token='$RESULT_TOKEN' output='$RESULT_OUTPUT'"
   fi
 )
 

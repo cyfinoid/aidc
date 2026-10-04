@@ -411,8 +411,12 @@ the macOS Keychain on demand (service `claude-code-oauth-token`, your `$USER`
 account) so the token never has to be exported into every shell via `~/.zshrc`.
 Override the service name or disable the lookup with
 `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` (set it empty to disable). The lookup is a
-no-op on hosts without the `security` tool. See `docs/claude-profiles.md` for
-setup.
+no-op on hosts without the `security` tool. Because the read can stall silently
+— a Keychain access dialog hidden behind other windows, or a slow `securityd` —
+a watchdog prints a hint (no `--debug` needed) once the read outlives 5 seconds;
+retune with `AIDC_KEYCHAIN_HINT_DELAY` (seconds; `0` or a non-numeric value
+disables). See
+`docs/claude-profiles.md` for setup.
 
 **How the token reaches the agent (file delivery).** The full path is:
 Keychain → aidc's process (only for the duration of the run) → the exec's
