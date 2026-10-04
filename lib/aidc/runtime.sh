@@ -507,10 +507,35 @@ aidc::cmd_cursor() {
   aidc::log "aidc prepares the env automatically (initializeCommand runs 'aidc up': .env, base image, volumes)"
 }
 
+# True when the effective AIDC_AGENTS selection already carries the agent
+# (or 'all'). Requires the selection to be loaded first — run_tool calls
+# ensure_workspace_ready before any decision below. Empty/unset selection
+# resolves to the 'opencode' default, matching export_compose_env.
+aidc::selection_includes() {
+  local tool="$1"
+  local current="${AIDC_AGENTS:-opencode}"
+  case ",$current," in
+    *,all,*|*",$tool,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# True when this workspace has already been materialized on the Docker engine:
+# a container exists (any state) or the per-project thin image was built.
+# False only on a genuinely first-ever run — the signal run_tool uses to bake
+# the invoked agent into the initial build instead of the build→probe→rebuild
+# dance. Call AFTER vm_ensure (isolate-vm) so ps/inspect hit the VM's engine.
+aidc::workspace_materialized() {
+  local workspace="$1"
+  [[ -n "$(aidc::compose_capture "$workspace" ps -aq workspace 2>/dev/null)" ]] && return 0
+  aidc::image_exists "$workspace"
+}
+
 # Probe-only: does the requested agent binary exist in the project's image?
 # Non-agent tool names pass through. One exec per launch (~100ms) — cheap
 # next to an agent session. The die-with-fix behavior lives in run_tool, which
-# decides between auto-extend (default) and a hard error.
+# decides between the install prompt (interactive) and silent auto-extend
+# (non-interactive); see aidc::install_missing_agent.
 aidc::agent_installed() {
   local workspace="$1"
   local tool="$2"
@@ -547,22 +572,27 @@ aidc::agents_build_flags() {
 
 # Auto-extend (remaster): 'aidc <tool>' on a project whose image lacks the
 # agent adds it to the AIDC_AGENTS selection (persisted in project.env) and
-# returns 0 so run_tool can rebuild — the per-agent stage layout makes that a
-# one-layer build, not a reinstall of every agent. Returns 1 when the
-# selection need not or must not change: auto-extend disabled
-# (AIDC_AUTO_EXTEND_AGENTS=0), unknown tool, 'all' selected, or the tool
-# already selected (then the image is simply stale → rebuild hint).
+# returns 0 so the caller can rebuild — the per-agent stage layout makes that
+# a one-layer build, not a reinstall of every agent. With reason "first-build"
+# (workspace not yet materialized) the log line frames it as baking the agent
+# into the initial build. Returns 1 when the selection need not or must not
+# change: auto-extend disabled (AIDC_AUTO_EXTEND_AGENTS=0), unknown tool,
+# 'all' selected, or the tool already selected (then the image is simply
+# stale → rebuild hint).
 aidc::agents_extend_selection() {
   local workspace="$1"
   local tool="$2"
+  local reason="${3:-}"
   [[ "${AIDC_AUTO_EXTEND_AGENTS:-1}" == "1" ]] || return 1
   case "$tool" in
     claude|codex|opencode|cursor-agent|grok|omp) ;;
     *) return 1 ;;
   esac
+  if aidc::selection_includes "$tool"; then
+    return 1
+  fi
   local current="${AIDC_AGENTS:-opencode}"
   case ",$current," in
-    *,all,*|*",$tool,"*) return 1 ;;
     *,none,*) current="$tool" ;;
     *) current="${current},${tool}" ;;
   esac
@@ -580,8 +610,103 @@ aidc::agents_extend_selection() {
     fi
   fi
   export AIDC_AGENTS="$current"
-  aidc::log "agent '$tool' is not in this project's image — extended AIDC_AGENTS to '$current'; rebuilding (only the new agent's layer builds; the rest is cached)"
+  if [[ "$reason" == "first-build" ]]; then
+    aidc::log "no image for this workspace yet — baking agent '$tool' into the first build (AIDC_AGENTS=$current)"
+  else
+    aidc::log "agent '$tool' is not in this project's image — extended AIDC_AGENTS to '$current'; rebuilding (only the new agent's layer builds; the rest is cached)"
+  fi
   return 0
+}
+
+# Decide what to do when the invoked agent's binary is missing from the
+# project's image (run_tool probes before every launch):
+#   - interactive terminal: ask y/n before touching anything. y → extend the
+#     selection (a no-op when it's already selected — the stale-image case),
+#     rebuild with --force-recreate, and re-probe so we never hand the user to
+#     a cryptic 'exec: claude: not found' from a container that wasn't
+#     recreated. n → die with the fix.
+#   - non-interactive (scripts/CI): the historical silent auto-extend.
+#   - AIDC_AUTO_EXTEND_AGENTS=0: hard error in every case.
+#   - AIDC_NO_BUILD=1: hard error (installing requires a build; never build
+#     implicitly).
+aidc::install_missing_agent() {
+  local workspace="$1"
+  local tool="$2"
+  local current="${AIDC_AGENTS:-opencode}"
+
+  # The knob wins over everything, prompt included: hard error in every case
+  # (run_tool's early gate already caught not-selectable agents before the
+  # build, so this arm is the selected-but-stale backstop plus direct calls).
+  if [[ "${AIDC_AUTO_EXTEND_AGENTS:-1}" != "1" ]]; then
+    if aidc::selection_includes "$tool"; then
+      aidc::die "agent '$tool' is selected (AIDC_AGENTS=$current) but missing from the built image (stale build)
+fix: run 'aidc rebuild'"
+    fi
+    aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent; AIDC_AUTO_EXTEND_AGENTS=0 disables auto-install)"
+  fi
+
+  # AIDC_NO_BUILD=1 forbids implicit builds (docs/install.md), and installing a
+  # missing agent REQUIRES a build — refuse with the fix instead of silently
+  # building behind the user's back.
+  if [[ "${AIDC_NO_BUILD:-0}" == "1" ]]; then
+    aidc::die "AIDC_NO_BUILD=1 but agent '$tool' is missing from this project's image — installing it requires a rebuild
+fix: run 'aidc rebuild' (optionally after adding '$tool' to AIDC_AGENTS in .ai-container/project.env), then retry 'aidc $tool'"
+  fi
+
+  if aidc::is_interactive; then
+    local prompt
+    if aidc::selection_includes "$tool"; then
+      prompt="agent '$tool' is selected (AIDC_AGENTS=$current) but missing from the built image (stale build) — rebuild now?"
+    else
+      prompt="agent '$tool' is not in this project's image (AIDC_AGENTS=$current) — install it now?"
+    fi
+    printf '[aidc] %s\n' "$prompt" >&2
+    printf '[aidc]   (extends AIDC_AGENTS in .ai-container/project.env and rebuilds — only the new agent'"'"'s layer builds) [y/N] ' >&2
+    local reply
+    read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES) ;;
+      *)
+        if aidc::selection_includes "$tool"; then
+          aidc::die "agent '$tool' is selected but the image is stale
+fix: run 'aidc rebuild' (or re-run 'aidc $tool' and confirm the rebuild prompt)"
+        fi
+        aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent)"
+        ;;
+    esac
+  else
+    if ! aidc::agents_extend_selection "$workspace" "$tool"; then
+      # extend only refuses when the agent is already selected (or 'all') —
+      # a stale image, so mirror the interactive/knob framing instead of the
+      # contradictory "not in this project's image" advice.
+      if aidc::selection_includes "$tool"; then
+        aidc::die "agent '$tool' is selected (AIDC_AGENTS=${AIDC_AGENTS:-opencode}) but missing from the built image (stale build)
+fix: run 'aidc rebuild'"
+      fi
+      aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS=${AIDC_AGENTS:-opencode})
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent)"
+    fi
+  fi
+
+  # Rebuild. extend_selection is a no-op when the agent is already selected
+  # (stale-image case): the rebuild below is what brings the binary in, and
+  # --force-recreate guarantees the running container is replaced with the new
+  # image, not left behind on the old one.
+  aidc::agents_extend_selection "$workspace" "$tool" || true
+  aidc::ensure_base_image "$workspace"
+  aidc::write_devcontainer_env "$workspace"
+  aidc::compose "$workspace" up -d --build --force-recreate workspace
+  aidc::ensure_tool_links "$workspace"
+  if ! aidc::agent_installed "$workspace" "$tool"; then
+    aidc::die "agent '$tool' is still missing after the rebuild — run 'aidc rebuild' and retry 'aidc $tool'
+(the image rebuilt but the binary never landed — check the build output above)"
+  fi
+  aidc::log "agent '$tool' is ready"
 }
 
 aidc::run_tool() {
@@ -592,24 +717,39 @@ aidc::run_tool() {
   local workspace
   workspace="$(aidc::default_workspace)"
 
-  # The default selection is opencode only (slim-by-default remaster), but a
-  # missing agent is not an error: run_tool probes the binary
-  # (aidc::agent_installed) and, on a miss, auto-extends the selection
-  # (persisted in project.env) and rebuilds — the per-agent stage layout in
-  # Dockerfile.base means only the missing agent's layer actually builds.
-  # AIDC_AUTO_EXTEND_AGENTS=0 restores the hard-error behavior.
+  # Scaffold first (auto-init on a virgin repo) so the AIDC_AGENTS selection —
+  # the input to every agent-availability decision below — is loaded before we
+  # act on it.
+  aidc::ensure_workspace_ready "$workspace"
+
+  if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
+    aidc::vm_ensure "$workspace"
+  fi
+
+  # AIDC_AUTO_EXTEND_AGENTS=0 is the historical hard-error knob: fail before
+  # any build when the agent isn't selectable, so a misconfigured first run
+  # doesn't build a useless image. (The stale-image case dies later, in
+  # install_missing_agent, with the matching rebuild hint.)
+  if [[ "${AIDC_AUTO_EXTEND_AGENTS:-1}" != "1" ]] && ! aidc::selection_includes "$tool"; then
+    aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent; AIDC_AUTO_EXTEND_AGENTS=0 disables auto-install)"
+  fi
+
+  # The default selection is opencode only (slim-by-default remaster). On a
+  # first-ever run — nothing built yet — invoking the agent IS the intent:
+  # bake it into the initial selection so the very first build carries it,
+  # skipping the build→probe→rebuild dance entirely.
+  if ! aidc::workspace_materialized "$workspace"; then
+    aidc::agents_extend_selection "$workspace" "$tool" "first-build" || true
+  fi
+
+  # Probe the binary in the running image; on a miss, install_missing_agent
+  # decides between the interactive y/n install prompt and the legacy silent
+  # auto-extend, rebuilds (--force-recreate), and re-probes before launch.
   aidc::ensure_container_running "$workspace"
   if ! aidc::agent_installed "$workspace" "$tool"; then
-    if aidc::agents_extend_selection "$workspace" "$tool"; then
-      aidc::ensure_base_image "$workspace"
-      aidc::write_devcontainer_env "$workspace"
-      aidc::compose_up "$workspace"
-      aidc::ensure_tool_links "$workspace"
-    else
-      aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
-fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
-(or set AIDC_AGENTS=all to bake in every agent; AIDC_AUTO_EXTEND_AGENTS=0 disables auto-extend)"
-    fi
+    aidc::install_missing_agent "$workspace" "$tool"
   fi
 
   if [[ "$tool" == "claude" ]]; then
@@ -1114,8 +1254,9 @@ aidc::export_compose_env() {
   # shared base. Add more per project via .ai-container/project.env
   # (AIDC_AGENTS=opencode,codex,... or =all / =none); the base is content-
   # hashed on the selection and per-agent stages are cached independently, so
-  # 'aidc rebuild' — or simply invoking a missing agent, which auto-extends
-  # the selection (see aidc::agents_extend_selection) — applies a change fast.
+  # 'aidc rebuild' — or invoking a missing agent, which bakes it into the
+  # first build and otherwise asks y/n (silent extend in non-interactive
+  # runs; see aidc::install_missing_agent) — applies a change fast.
   export AIDC_AGENTS
   AIDC_AGENTS="${AIDC_AGENTS:-opencode}"
 

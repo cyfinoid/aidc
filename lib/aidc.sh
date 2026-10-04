@@ -229,7 +229,11 @@ Notes:
     Keychain token read, or the first container build). Secret values (OAuth
     token, profile API keys) are suppressed from the trace.
   - Run commands from the repo root you want to isolate.
-  - Tool commands auto-bootstrap the repo and container if needed.
+  - Tool commands auto-bootstrap the repo and container if needed. The agent
+    you invoke is baked into the image: on a first-ever run it joins the
+    initial build; on an existing project aidc asks y/n before extending
+    AIDC_AGENTS and rebuilding just that agent's layer (non-interactive runs
+    extend silently; AIDC_AUTO_EXTEND_AGENTS=0 requires manual edits).
   - aidc init refuses to run if the repo already has a file at an aidc-managed
     path (e.g. its own scripts/ci/*.sh). Pass -f/--force to adopt the directory
     anyway, overwriting those managed files with the current templates.

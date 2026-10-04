@@ -146,8 +146,11 @@ AIDC_AGENTS=opencode,codex   # agents baked into the shared base. Default is
                              #   'opencode' only — each extra agent costs
                              #   ~100-200MB. Agents build in per-agent layers,
                              #   so adding one later is a one-layer rebuild:
-                             #   just run 'aidc <tool>' and it auto-extends
-                             #   this file (or set AIDC_AGENTS=all / =none).
+                             #   the first agent you invoke on a fresh project
+                             #   is baked into the initial build; afterwards
+                             #   'aidc <tool>' asks y/n before extending this
+                             #   file (silent in non-interactive runs; or set
+                             #   AIDC_AGENTS=all / =none).
                              #   AIDC_AUTO_EXTEND_AGENTS=0 requires manual
                              #   AIDC_AGENTS edits instead.
 AIDC_NO_BUILD=1              # never build implicitly — 'aidc up' fails fast if

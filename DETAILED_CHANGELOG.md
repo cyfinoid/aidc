@@ -8,6 +8,106 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-03 — agent install prompt + first-build bake in run_tool
+
+**Summary:** Invoking an agent that isn't in the project image used to
+silently auto-extend `AIDC_AGENTS` and rebuild (interactive *and* scripted
+runs alike), and the rebuild ran through compose's fast-path (`up -d --build`)
+without `--force-recreate` and without re-verifying the binary — so when the
+rebuild didn't take, the launch surfaced as a bare `exec: claude: not found`
+from inside the container, with no hint that a rebuild chain had run and
+failed to replace the container. New behavior, per the reported expectation:
+
+1. **First-ever run is baked, not patched.** `run_tool` now scaffolds first
+   (so `project.env` and the selection are loaded), then checks
+   `aidc::workspace_materialized` (container in any state, or built image).
+   On a virgin workspace the invoked agent extends the selection *before*
+   `ensure_container_running`, so the initial build carries it — no
+   build→probe→rebuild dance, no prompt.
+2. **Existing workspace: y/n prompt.** A missing agent on a materialized
+   workspace prompts before touching anything (`aidc::install_missing_agent`).
+   y → extend + rebuild; n → hard error with the fix, selection untouched.
+   An agent that is *selected* but missing (stale image — previously a
+   straight die) gets the same prompt framed as a rebuild. Non-interactive
+   runs (scripts/CI, stdin not a TTY) keep the historical silent auto-extend.
+3. **The rebuild is verified.** The install path rebuilds with
+   `up -d --build --force-recreate` (mirroring `aidc rebuild`) and re-probes
+   `command -v` afterwards; a rebuild that didn't land now dies with
+   "still missing after the rebuild — run 'aidc rebuild'" instead of the
+   cryptic exec error.
+4. **`AIDC_AUTO_EXTEND_AGENTS=0` fails earlier and cheaper:** before any
+   project-image build, when the agent isn't in the selection — a
+   misconfigured first run no longer builds a useless opencode-only image
+   before erroring. (Selected-but-stale with the knob off errors after the
+   container check, with the matching rebuild hint.)
+5. **`AIDC_NO_BUILD=1` is honored in the install path:** it refuses with
+   "installing requires a rebuild" instead of the implicit build the old
+   compose_up-routed path technically allowed to be skipped — parity with
+   the knob's documented "never build implicitly" contract.
+
+**Why:** user report — `aidc claude` as a first command failed with
+"claude not found"; after `aidc opencode`, a later `aidc claude` kept failing
+until a manual `aidc rebuild`. The silent extend was also surprising: a
+multi-minute rebuild should be an explicit yes.
+
+**Changed files:**
+
+- `lib/aidc/runtime.sh` — new `aidc::selection_includes`,
+  `aidc::workspace_materialized`, `aidc::install_missing_agent`;
+  `aidc::agents_extend_selection` gains a "first-build" reason (different log
+  line) and reuses `selection_includes`; `run_tool` restructured
+  (scaffold → VM ensure → knob gate → first-build bake → container → probe →
+  install prompt); `export_compose_env` comment updated.
+- `tests/agents-opt-in.test.sh` — rewritten: 26 hermetic cases covering the
+  first-build bake (persisted before container start), interactive y/n (with
+  `--force-recreate` + re-probe assertions), the stale-image prompt, the
+  non-interactive legacy path, the early knob-off error, the AIDC_NO_BUILD
+  refusal, and unit coverage for the two new helpers. Subshell-capture
+  pitfalls documented in-suite.
+- `tests/token-delivery.test.sh` — harness seam: stub the two new seams
+  (`ensure_workspace_ready`, `workspace_materialized`) so the suite keeps
+  exercising only token delivery.
+- `lib/aidc.sh` (help), `README.md`, `docs/install.md`, `docs/cursor.md` —
+  behavior wording.
+
+**Deliberately not changed:** `templates/devcontainer/Dockerfile.base.tmpl`'s
+comment still says "auto-extends ... when an invoked agent is missing" —
+editing it would change the base content hash and force a fleet-wide base
+rebuild for a comment; the runtime-side comments carry the new behavior.
+
+**Commands / verification:**
+
+    bash tests/agents-opt-in.test.sh     # 26 passed, 0 failed
+    bash tests/token-delivery.test.sh    # 15 passed
+    full suite: 37/38 suites green; tests/agent-auth-seed.test.sh fails on
+    pristine HEAD too (pre-existing, unrelated bootstrap fixture bug)
+
+---
+
+## 2026-10-03 — release 2.3.0 cut (version line + changelog section)
+
+**Summary:** `lib/aidc/common.sh` bumped to `AIDC_VERSION="${AIDC_VERSION:-2.3.0}"`;
+the accumulated `[Unreleased]` CHANGELOG entries (agent install prompt +
+first-build bake, container user rename, minimal OS base) cut into
+`## [2.3.0] - 2026-10-03` with a fresh empty `[Unreleased]` above, per
+`docs/releasing.md` steps 1–2. Minor bump: additive behavior change, no CLI
+breaks. Commit/tag/push (steps 3) left to the maintainer. Consequence per
+design: projects stamped 2.2.0 now report scaffold-stale and are offered
+`aidc upgrade`.
+
+While re-running the suite after the bump, a test-harness bug introduced by
+the same day's knob fix surfaced (hidden earlier by a `tail` that masked a
+missing summary line): `tests/agents-opt-in.test.sh` case 14 ran `run_tool`
+directly in the current shell with `INTERACTIVE=1` leaked from case 13b, took
+the prompt path, and `aidc::die`'s `exit 1` — which escapes `|| true` in the
+current shell — killed the suite before its summary. Fixed by resetting
+`INTERACTIVE` explicitly in cases 14/15 and subshelling case 14; suite is now
+25/25 → 26/26 after the follow-up fixes. Full suite: only the pre-existing
+`agent-auth-seed` failure remains
+(fails on pristine HEAD; flagged 2026-09-26).
+
+---
+
 ## 2026-09-26 — container user renamed vscode → aidc (uid/gid 1000 unchanged)
 
 **Summary:** With the base image self-owned (previous entry), the container

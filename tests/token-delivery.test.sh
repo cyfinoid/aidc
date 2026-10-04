@@ -30,7 +30,11 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; failed=$((failed + 1)); }
 
 # ── stubs: replace the container-facing layer, record everything ────────────
 aidc::default_workspace() { printf '%s\n' "$TMP_ROOT/ws"; }
+aidc::ensure_workspace_ready() { :; }
 aidc::ensure_container_running() { :; }
+# Existing-workspace posture: run_tool goes straight to the probe path (the
+# compose stub below reports the agent present), never the first-build bake.
+aidc::workspace_materialized() { return 0; }
 aidc::auto_sync_sessions() { :; }
 aidc::resolve_claude_oauth_token() { :; }  # token preset by each case
 aidc::compose() {
