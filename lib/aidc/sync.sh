@@ -183,7 +183,8 @@ aidc::sync_session_tool() {
 #     host's, and when either db carries opencode's `migration` journal both
 #     must and the container's applied ids must not run ahead of the host's
 #     (epoch policy: docs/opencode-schema-epochs.md). Anything else → skip
-#     rather than risk a partial/failed insert.
+#     rather than risk a partial/failed insert; the gate reports WHICH
+#     (epoch-ahead vs column drift) so the skip log names cause + remedy.
 # The actual insert runs in one transaction with a busy_timeout, so against the
 # host-native filesystem it is atomic even if the host's opencode is running.
 #
@@ -245,10 +246,38 @@ aidc::opencode_merge_to_base() {
 
   # A container db from a newer schema epoch (or outright column/type drift)
   # makes a row merge unsafe — skip rather than risk a partial/failed insert.
-  if ! aidc::opencode_db_schema_match "$mdb" "$bdb"; then
-    aidc::log "opencode.db schema not merge-compatible (container db newer than host, or column/type drift); skipping merge (sessions kept at $quarantine)"
+  # The gate names the cause so the log carries the matching remedy: an
+  # epoch-ahead skip is the expected transient while the container's opencode
+  # build runs ahead of the host's (v2 container vs v1 host, or a newer v2
+  # minor — e.g. 2.0.29 container vs 2.0.25 host) and self-heals once the
+  # host's opencode catches up; column/type drift is a genuine mismatch.
+  # One exception: a gap made only of source-verified ADDITIVE migrations
+  # (docs/opencode-schema-epochs.md) merges now, in restricted-columns mode.
+  local mismatch="" restrict=""
+  if ! mismatch="$(aidc::opencode_db_schema_match "$mdb" "$bdb")"; then
+    case "$mismatch" in
+      epoch-ahead*)
+        aidc::log "container opencode.db is from a newer schema epoch than the host's (migration journal ${mismatch#epoch-ahead } id(s) ahead — the container runs a newer opencode build); skipping merge (sessions kept at $quarantine; upgrade the host's opencode to at least the container's version and launch it once: the host db migrates in place and the next sync merges)"
+        ;;
+      journal-one-sided*)
+        aidc::log "opencode migration journal present on only one side of the merge; cannot compare schema epochs; skipping merge (sessions kept at $quarantine)"
+        ;;
+      column-drift*)
+        aidc::log "opencode.db column/type drift between container and host (first on table '${mismatch#column-drift }'); skipping merge (sessions kept at $quarantine)"
+        ;;
+      # Unreachable with the current gate (every refusal prints a known
+      # token) — kept as a fail-safe so a future token can never silence
+      # the skip line entirely.
+      *)
+        aidc::log "opencode.db schema not merge-compatible (${mismatch:-unknown cause}); skipping merge (sessions kept at $quarantine)"
+        ;;
+    esac
     rm -f "$mdb"
     return 0
+  fi
+  if [[ "$mismatch" == additive-ahead* ]]; then
+    restrict="restrict"
+    aidc::log "host opencode.db is ${mismatch#additive-ahead } migration(s) behind the container (gap verified additive-only); merging shared columns (gap columns land empty until the host's opencode catches up)"
   fi
 
   # Snapshot the host db first (VACUUM INTO = a consistent copy + an implicit
@@ -262,7 +291,7 @@ aidc::opencode_merge_to_base() {
     return 0
   fi
 
-  if aidc::opencode_db_merge "$mdb" "$bdb"; then
+  if aidc::opencode_db_merge "$mdb" "$bdb" ${restrict:+"$restrict"}; then
     aidc::log "merged opencode sessions into $bdb"
     rm -f "$bak"
   else
@@ -322,35 +351,131 @@ aidc::opencode_db_migration_ids() {
   "$sqlite" "$db" "SELECT id FROM migration ORDER BY id;" 2>/dev/null
 }
 
+# Migration ids verified ADDITIVE from upstream source (receipts in
+# docs/opencode-schema-epochs.md): a container-journal-ahead gap made up ONLY
+# of these ids may merge in restricted-columns mode (host column list) as
+# long as the runtime column check confirms a purely-additive shape. Override
+# or extend with AIDC_OPENCODE_ADDITIVE_MIGRATIONS (whitespace-separated;
+# explicitly empty disables additive-gap merging).
+AIDC_OPENCODE_ADDITIVE_MIGRATIONS_DEFAULT="20261010180456_project_time_archived"
+
+# True when every id in $1 (one per line) is on the verified-additive
+# allowlist. No output — pure boolean, callable inside the gate.
+aidc::opencode_gap_all_additive() {
+  local ids="$1"
+  # `${var-default}` (not `:-`): an explicitly-empty override disables
+  # additive-gap merging; unset falls back to the verified default list.
+  local allow="${AIDC_OPENCODE_ADDITIVE_MIGRATIONS-$AIDC_OPENCODE_ADDITIVE_MIGRATIONS_DEFAULT}"
+  local id a found
+  local -a allow_arr=()
+  # read -a word-splits without pathname expansion (a bare `for x in $allow`
+  # would glob-expand an override containing *?[ and silently mis-match).
+  read -r -a allow_arr <<<"$allow"
+  while IFS= read -r id; do
+    # A blank journal id is degenerate, not additive — refuse the gap.
+    [[ -n "$id" ]] || return 1
+    found=0
+    for a in ${allow_arr[@]+"${allow_arr[@]}"}; do
+      [[ -z "$a" ]] && continue
+      if [[ "$a" == "$id" ]]; then found=1; break; fi
+    done
+    if [[ "$found" -ne 1 ]]; then return 1; fi
+  done < <(printf '%s\n' "$ids")
+  return 0
+}
+
 # True when merging src into dst is schema-safe:
+#   - when either db carries a `migration` journal, both must, and the
+#     container's applied ids must be a subset of the host's — a container
+#     running ahead straddles data migrations whose row shapes SQL cannot
+#     reconcile (epoch boundaries: docs/opencode-schema-epochs.md).
+#     EXCEPTION (verified-additive gap): when every gap id is on the
+#     source-verified additive allowlist AND, on every shared table, the
+#     host's columns are a subset of the container's (purely-additive
+#     shape), the merge is allowed in restricted-columns mode — the caller
+#     is told via the `additive-ahead <n>` success token.
 #   - for every table the dbs share, src's columns (name:type, order
 #     independent) must be a subset of dst's. Equal is the normal same-epoch
 #     case; dst holding extra columns (host build newer, additive growth) is
 #     fine because the merge inserts by column name. src holding anything dst
 #     lacks means the container db is from a newer schema epoch → refuse.
-#   - when either db carries a `migration` journal, both must, and the
-#     container's applied ids must be a subset of the host's — a container
-#     running ahead straddles data migrations whose row shapes SQL cannot
-#     reconcile (epoch boundaries: docs/opencode-schema-epochs.md).
 # Tables present in only one db are ignored — the merge simply skips those.
+#
+# On refusal, prints a reason token (stdout) so callers can log the actual
+# cause with its remedy instead of one conflated message:
+#   "epoch-ahead <n>"       container journal holds n ids the host lacks and
+#                           the gap is not verified-additive — expected
+#                           transient while the container's opencode build
+#                           runs ahead (v2 vs v1, or a newer minor); self-
+#                           heals once the host's opencode catches up
+#   "journal-one-sided"     only one db carries a migration journal
+#   "column-drift <table>"  a shared table where src has a column dst lacks
+#                           (aligned journals: a genuine mismatch), or the
+#                           host holds a column the container lacks while the
+#                           gap looked additive (not a purely-additive shape)
+# On success, prints nothing (full merge) or:
+#   "additive-ahead <n>"    verified-additive gap of n ids — merge allowed in
+#                           restricted-columns mode (host column list; the
+#                           gap columns' values are dropped for this merge)
+# Epoch reasons are checked BEFORE per-table drift, and the first match wins:
+# a newer opencode build typically ALTERs shared tables too (that is how the
+# schema grows — docs/opencode-schema-epochs.md), so such a pair is both
+# journal-ahead and column-drifted under the aligned-journals rule; the
+# journal gap is the root cause (with its upgrade remedy) and the column
+# difference only a symptom, so that case must report epoch-ahead unless the
+# gap is verified additive. Drift with aligned journals really is an anomaly.
 aidc::opencode_db_schema_match() {
   local src="$1"
   local dst="$2"
-  local t sa sb src_ids dst_ids
+  local t sa sb extra dextra n src_ids dst_ids
+  src_ids="$(aidc::opencode_db_migration_ids "$src")"
+  dst_ids="$(aidc::opencode_db_migration_ids "$dst")"
+  if [[ -n "$src_ids" || -n "$dst_ids" ]]; then
+    if [[ -z "$src_ids" || -z "$dst_ids" ]]; then
+      printf 'journal-one-sided\n'
+      return 1
+    fi
+    # LC_ALL=C: comm requires sorted input, and the ids come out of SQLite's
+    # BINARY collation — a UTF-8 locale could order them differently and
+    # misreport the gap.
+    extra="$(LC_ALL=C comm -23 <(printf '%s\n' "$src_ids") <(printf '%s\n' "$dst_ids"))"
+    if [[ -n "$extra" ]]; then
+      n="$(printf '%s\n' "$extra" | wc -l | tr -d ' ')"
+      if aidc::opencode_gap_all_additive "$extra"; then
+        # Purely-additive shape must hold at runtime too: on every shared
+        # table the host's columns must be a subset of the container's.
+        # Anything else (host-only column, type change) is real drift.
+        while IFS= read -r t; do
+          [[ -n "$t" ]] || continue
+          sa="$(aidc::opencode_db_columns "$src" "$t")"
+          sb="$(aidc::opencode_db_columns "$dst" "$t")"
+          [[ -n "$sa" && -n "$sb" ]] || continue  # not a shared table
+          dextra="$(LC_ALL=C comm -23 <(printf '%s\n' "$sb") <(printf '%s\n' "$sa"))"
+          if [[ -n "$dextra" ]]; then
+            printf 'column-drift %s\n' "$t"
+            return 1
+          fi
+        done < <(aidc::opencode_db_tables "$dst")
+        printf 'additive-ahead %s\n' "$n"
+        return 0
+      fi
+      printf 'epoch-ahead %s\n' "$n"
+      return 1
+    fi
+  fi
   while IFS= read -r t; do
     [[ -n "$t" ]] || continue
     sa="$(aidc::opencode_db_columns "$src" "$t")"
     [[ -n "$sa" ]] || continue  # table absent in src → nothing to merge for it
     sb="$(aidc::opencode_db_columns "$dst" "$t")"
     # Subset test: nothing in src's column set may be missing from dst's.
-    [[ -z "$(comm -23 <(printf '%s\n' "$sa") <(printf '%s\n' "$sb"))" ]] || return 1
+    # LC_ALL=C — see the journal-gap comm above.
+    extra="$(LC_ALL=C comm -23 <(printf '%s\n' "$sa") <(printf '%s\n' "$sb"))"
+    if [[ -n "$extra" ]]; then
+      printf 'column-drift %s\n' "$t"
+      return 1
+    fi
   done < <(aidc::opencode_db_tables "$dst")
-  src_ids="$(aidc::opencode_db_migration_ids "$src")"
-  dst_ids="$(aidc::opencode_db_migration_ids "$dst")"
-  if [[ -n "$src_ids" || -n "$dst_ids" ]]; then
-    [[ -n "$src_ids" && -n "$dst_ids" ]] || return 1
-    [[ -z "$(comm -23 <(printf '%s\n' "$src_ids") <(printf '%s\n' "$dst_ids"))" ]] || return 1
-  fi
   return 0
 }
 
@@ -361,12 +486,20 @@ aidc::opencode_db_schema_match() {
 # positional SELECT * — the two dbs may lay the same columns out in a different
 # physical order, and a positional insert would silently shift values between
 # columns. Returns non-zero on any SQLite error.
+#
+# Optional third arg (any non-empty value) = restricted-columns mode, used
+# after an `additive-ahead` gate pass: the column list comes from the DST
+# (host) db instead of the source — the gate's additive check guarantees the
+# host's columns are a subset of the source's, so dst's list is the shared
+# intersection and the gap columns' values are dropped for this merge (they
+# are NULL/default in the host until its opencode upgrades past the gap).
 aidc::opencode_db_merge() {
   local src="$1"
   local dst="$2"
+  local restrict="${3:-}"
   local sqlite="${AIDC_SQLITE3:-sqlite3}"
   local src_sql="${src//\'/\'\'}"
-  local sql t collist
+  local sql t collist collist_db
   # busy_timeout as SQL (not the .timeout dot-command, which is silently
   # ignored — and aborts the rest — when passed as a command-line argument).
   sql="PRAGMA busy_timeout=5000;
@@ -376,11 +509,22 @@ BEGIN IMMEDIATE;
 "
   while IFS= read -r t; do
     [[ -n "$t" ]] || continue
+    # The migration journal is schema bookkeeping, never data to sync —
+    # merging container journal rows into the host's would falsify its
+    # epoch fingerprint (in restricted mode it would insert gap ids the
+    # host has NOT run; the host's own upgrade would then skip replaying
+    # them). Full mode was only ever safe here by the gate's invariant.
+    # Lowercased compare: SQL addresses tables case-insensitively, so a
+    # `Migration`-cased journal must not slip past a bash exact match.
+    [[ "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" == "migration" ]] && continue
     # Only merge tables the source db also has.
     [[ -n "$("$sqlite" "$src" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
-    # The schema gate guarantees every source column exists in the destination,
-    # so the source's column list is exactly the shared intersection.
-    collist="$("$sqlite" "$src" "SELECT group_concat('\"' || name || '\"', ',') FROM (SELECT name FROM pragma_table_info('${t//\'/\'\'}') ORDER BY cid);" 2>/dev/null)"
+    # Full merge: the gate guarantees every source column exists in the
+    # destination, so the source's column list is exactly the shared
+    # intersection. Restricted mode: the destination's list is (see above).
+    collist_db="$src"
+    [[ -n "$restrict" ]] && collist_db="$dst"
+    collist="$("$sqlite" "$collist_db" "SELECT group_concat('\"' || name || '\"', ',') FROM (SELECT name FROM pragma_table_info('${t//\'/\'\'}') ORDER BY cid);" 2>/dev/null)"
     [[ -n "$collist" ]] || continue
     sql+="INSERT OR IGNORE INTO \"$t\" ($collist) SELECT $collist FROM aidc_src.\"$t\";
 "
@@ -479,9 +623,28 @@ aidc::rtk_merge_to_base() {
   # A container db from an rtk build with extra per-table columns makes a row
   # merge unsafe — skip rather than risk a partial insert. The schema check is
   # generic SQLite (name:type subsets); rtk carries no migration journal, so
-  # the opencode epoch clause inside it is inert here.
-  if ! aidc::opencode_db_schema_match "$mdb" "$bdb"; then
-    aidc::log "rtk history.db schema not merge-compatible (container rtk newer than host, or column/type drift); skipping merge (savings kept at $quarantine)"
+  # the opencode epoch clauses inside it are inert here — for rtk only the
+  # column-drift arm can fire, and the skip message names the table.
+  local mismatch=""
+  if ! mismatch="$(aidc::opencode_db_schema_match "$mdb" "$bdb")"; then
+    case "$mismatch" in
+      column-drift*)
+        aidc::log "rtk history.db schema not merge-compatible (container rtk newer than host — column/type drift on table '${mismatch#column-drift }'); skipping merge (savings kept at $quarantine)"
+        ;;
+      # Fail-safe only (unreachable for real rtk dbs: no migration journal →
+      # only the drift arm can fire; epoch tokens render as this generic line).
+      *)
+        aidc::log "rtk history.db schema not merge-compatible (container rtk newer than host, or column/type drift); skipping merge (savings kept at $quarantine)"
+        ;;
+    esac
+    rm -f "$mdb"
+    return 0
+  elif [[ "$mismatch" == additive-ahead* ]]; then
+    # Real rtk dbs carry no opencode-style migration journal, so this needs a
+    # mispointed AIDC_RTK_DB — but if it ever happens, say so instead of
+    # silently running a full-mode merge whose source collists would error
+    # on the gap columns (fail-closed rollback with a cryptic message).
+    aidc::log "rtk history.db carries an opencode-style migration journal with an additive gap; skipping merge (savings kept at $quarantine)"
     rm -f "$mdb"
     return 0
   fi
@@ -549,6 +712,9 @@ BEGIN IMMEDIATE;
 "
   while IFS= read -r t; do
     [[ -n "$t" ]] || continue
+    # Journal/bookkeeping tables are never merged (see opencode_db_merge;
+    # lowercased for the same case-insensitivity reason).
+    [[ "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" == "migration" ]] && continue
     # Only merge tables the source db also has, with a known natural key.
     [[ -n "$(aidc::rtk_db_natural_key "$t")" ]] || continue
     [[ -n "$("$sqlite" "$src" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
@@ -603,4 +769,49 @@ aidc::auto_sync_sessions() {
       aidc::sync_session_tool "$workspace" rtk || true
       ;;
   esac
+}
+
+# Post-exit session sync that re-reads the sync module from disk. Agent
+# wrappers (`aidc claude`, `aidc opencode`/`opencode-web`, …) are long-lived:
+# bin/aidc sources lib/aidc/*.sh once at startup and the wrapper then blocks
+# on the agent for the session's lifetime, so an in-process post-exit sync
+# executes function definitions captured before any mid-session edit or
+# update to the aidc checkout landed (observed 2026-10-14: a session started
+# before a merge-gate fix exited logging the removed conflation message).
+# This helper re-sources lib/aidc/sync.sh inside a subshell and runs the
+# same single common method (`auto_sync_sessions` → `sync_session_tool` →
+# the per-tool merges) with current code. Freshness is module-scoped: all
+# session-sync and merge logic lives in sync.sh, but helpers it calls from
+# other modules (aidc::compose*, aidc::log, …) remain the wrapper's
+# in-memory versions. Short-lived triggers (up/rebuild/down/destroy/
+# exec-start) are fresh processes already and keep calling
+# `aidc::auto_sync_sessions` directly. Without AIDC_ROOT (tests source the
+# lib without bin/aidc) the in-process sync runs, so test stubs stay
+# authoritative. A broken tree — module missing, or unparseable (checked
+# with `bash -n`, which parses without executing) — SKIPS the sync: never
+# fall through to the parent's stale definitions (a subshell that is the
+# left operand of `||` has set -e suppressed inside, so a failed `.` does
+# not abort it by itself — the failure is caught explicitly instead).
+aidc::auto_sync_sessions_fresh() {
+  local workspace="$1"
+  local tool="${2:-all}"
+  [[ "${AIDC_AUTO_SYNC_SESSIONS:-1}" == "0" ]] && return 0
+  if [[ -n "${AIDC_ROOT:-}" ]]; then
+    local module="$AIDC_ROOT/lib/aidc/sync.sh"
+    if [[ ! -f "$module" ]] || ! bash -n "$module" 2>/dev/null; then
+      aidc::log "aidc sync module missing or unparseable; skipping exit sync (sessions stay in the container volume)"
+      return 0
+    fi
+    # shellcheck disable=SC1090,SC1091
+    (
+      set -uo pipefail
+      # Explicit failure catch: set -e is inert inside a `||`-guarded
+      # subshell (see above), so the source's status is handled by hand
+      # and a failed reload must exit without calling anything stale.
+      if ! . "$module"; then exit 0; fi
+      aidc::auto_sync_sessions "$workspace" "$tool"
+    ) || true
+    return 0
+  fi
+  aidc::auto_sync_sessions "$workspace" "$tool" || true
 }

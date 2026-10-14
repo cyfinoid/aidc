@@ -333,7 +333,11 @@ fi
 
 # ── 13-19: host-side sync + merge (lib/aidc/sync.sh) ─────────────────────────
 . "$REPO_ROOT/lib/aidc.sh"
-aidc::log() { :; }
+# Log capture (see sync-sessions.test.sh): the schema-skip line must name the
+# drift table, so record messages instead of discarding them.
+RTK_LOGS="$TMP_ROOT/rtk-messages.log"
+: >"$RTK_LOGS"
+aidc::log() { printf '%s\n' "$*" >>"$RTK_LOGS"; }
 aidc::warn() { :; }
 
 # The sync paths resolve host destinations under $HOME (and the host-db
@@ -420,15 +424,23 @@ else
 fi
 
 # 16. Schema drift (container rtk newer): merge refused, quarantine kept, no
-#     snapshot (the gate runs before any host-db write).
+#     snapshot (the gate runs before any host-db write), skip message names
+#     the drifted table.
 sqlite3 "$Q/history.db" "ALTER TABLE commands ADD COLUMN extra_col TEXT;"
 before="$(sqlite3 "$HOST_DB" 'SELECT COUNT(*) FROM commands')"
+: >"$RTK_LOGS"
 aidc::rtk_merge_to_base "$WS" "$Q"
 if [[ "$(sqlite3 "$HOST_DB" 'SELECT COUNT(*) FROM commands')" == "$before" ]] \
    && [[ -f "$Q/history.db" ]] && [[ ! -e "$HOST_DB.aidc-bak" ]]; then
   ok "schema drift refuses the merge, quarantine kept, no leftover snapshot"
 else
   fail "schema-drift case"
+fi
+if grep -Fq "column/type drift on table 'commands'" "$RTK_LOGS" \
+   && ! grep -Fq "schema epoch" "$RTK_LOGS"; then
+  ok "schema-drift skip message names the drifted table"
+else
+  fail "rtk schema-drift message wrong: $(cat "$RTK_LOGS")"
 fi
 
 # 17. No host db at the override: wholesale create (paths already rewritten).

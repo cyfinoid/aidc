@@ -474,7 +474,9 @@ aidc::cmd_opencode_web() {
 
   local rc=0
   aidc::compose_exec "$workspace" "${command[@]}" || rc=$?
-  aidc::auto_sync_sessions "$workspace" opencode
+  # On-disk sync code (serve sessions are long-lived; see
+  # aidc::auto_sync_sessions_fresh).
+  aidc::auto_sync_sessions_fresh "$workspace" opencode
   return "$rc"
 }
 
@@ -863,11 +865,13 @@ fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=openco
   fi
 
   # Run the agent in the foreground; once it exits, pull its session transcripts
-  # back to the host. Preserve the agent's exit code as our own.
+  # back to the host. Preserve the agent's exit code as our own. The sync runs
+  # the on-disk sync module (this wrapper may have sourced its libraries long
+  # before the agent exited — see aidc::auto_sync_sessions_fresh).
   local rc=0
   aidc::compose_exec "$workspace" "${command[@]}" || rc=$?
   aidc::scrub_profile_env
-  aidc::auto_sync_sessions "$workspace" "$tool"
+  aidc::auto_sync_sessions_fresh "$workspace" "$tool"
   return "$rc"
 }
 

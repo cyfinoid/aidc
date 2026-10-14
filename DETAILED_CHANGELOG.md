@@ -8,6 +8,258 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-14 — schema-skip log split: name the mismatch (epoch-ahead vs column drift) and its remedy
+
+**Summary:** When the opencode session merge refuses on schema grounds, the
+log line now says *which* mismatch it hit — container migration journal ahead
+(expected transient; upgrade the host's opencode), journal on one side only,
+or column/type drift on a named table (genuine mismatch) — instead of the old
+conflated "container db newer than host, or column/type drift" that left the
+two causes with different remedies indistinguishable.
+
+**Why:** A user pasted the skip line right after the container pin moved to
+opencode 2.0.29 — with the host on opencode **v2.0.25** (not v1, as first
+assumed). Diagnosis from live data: the container db's `migration` journal
+holds 50 ids, the newest dated `20260923013825`, `20261007190000`,
+`20261010180456` — i.e. the v2 line keeps appending journal ids across
+*minors*, so a 2.0.25 host holds a strict subset and the epoch arm of the
+gate refuses exactly as designed (same refusal as v2-container→v1-host,
+same remedy: upgrade the host; its db migrates in place on next launch and
+the next `aidc sync-sessions` merges, including everything parked in the
+quarantine). The old conflated message could not say which arm had tripped —
+the user had no way to tell "expected, upgrade the host" from "genuine drift,
+investigate". The rtk history.db merge shared the same conflated wording.
+(Evidence note, recorded honestly: the container journal and the host's
+*version* were verified; the host's journal contents were not inspected —
+under the new precedence the message reads epoch-ahead either way, since
+epoch reasons are checked before drift.)
+
+**How:**
+
+- `aidc::opencode_db_schema_match` (`lib/aidc/sync.sh`) keeps its return
+  status semantics but now prints a reason token on refusal (stdout was
+  previously unused by the function): `epoch-ahead <n>` (container journal
+  holds n ids the host lacks; n distinguishes a minor gap of 1–2 from a
+  v1→v2 gap of 12), `journal-one-sided`, or `column-drift <table>`. Silent
+  on success. **Epoch reasons are checked before per-table drift, first
+  match wins** (a fresh-eyes review catch): a newer opencode build typically
+  `ALTER`s shared tables too — the normal way the schema grows — so the pair
+  is both journal-ahead and column-drifted, and the journal gap is the root
+  cause with the remedy; checking drift first would have reported the
+  "genuine mismatch" line with no remedy in exactly the motivating scenario.
+  The refusal *set* is unchanged — only which reason is reported.
+- `aidc::opencode_merge_to_base` captures the token and logs per cause: the
+  epoch-ahead line states the gap ("migration journal 1 id(s) ahead — the
+  container runs a newer opencode build") and the remedy (upgrade the host's
+  opencode to at least the container's version and launch it once; the host
+  db migrates in place and the next sync merges); column drift names the
+  first drifted table; one-sided says the epochs can't be compared; a
+  defensive `*` arm keeps a generic line for any unforeseen token.
+- `aidc::rtk_merge_to_base` (same gate, shared for the rtk history.db) also
+  captures — required, not cosmetic: with the gate now writing stdout, an
+  uncaptured `if ! gate` call would leak the raw token to the terminal. Its
+  drift arm names the table; rtk carries no migration journal, so the epoch
+  arms are inert there (kept in the `*` fallback).
+- `docs/opencode-schema-epochs.md`: the v2-epoch section records the
+  confirmed live case (2.0.25 host vs 2.0.29 container) and the
+  implementation notes describe the reason tokens.
+- Tests: both suites' `aidc::log` stubs now append to a capture file instead
+  of discarding (matching the real function's `"$*"` signature), and the
+  message contract is asserted — epoch-ahead names cause + gap + remedy and
+  not drift; drift names the table and not an epoch; one-sided names its
+  cause; host-ahead merge logs no skip; rtk drift names `commands`; a
+  journal-ahead **plus** drifted-table pair reports epoch-ahead (precedence).
+
+**Commands:**
+
+    bash tests/sync-sessions.test.sh   # 27 passed (6 new: 4 message-contract + 2 precedence)
+    bash tests/rtk-gain.test.sh        # 38 passed (1 new message assertion)
+    shellcheck --severity=warning lib/aidc/sync.sh tests/sync-sessions.test.sh tests/rtk-gain.test.sh
+    aidc-scan
+
+**Verification:** Both suites green (27/27 and 38/38); shellcheck clean at
+CI's severity; live diagnosis cross-checked against the container db
+(`SELECT id FROM migration ORDER BY id` — 50 ids) and the user-reported host
+version (`opencode v2.0.25`). Fresh-eyes subagent review over the diff
+(checklist per AGENTS.md) — findings and dispositions below.
+
+**Notes:**
+
+- The user's skipped sessions are safe at
+  `~/.local/share/aidc/sessions/opencode/aidc-e4b116dc`; once the host's
+  opencode reaches ≥ 2.0.29 and has been launched once, the next sync merges
+  them (each sync refreshes the quarantine from the full container db).
+- The gate's stdout is now part of its contract; any future caller must
+  capture it or accept the token printing.
+
+**Pre-completion review (fresh-eyes subagent, findings → dispositions):**
+
+- **P2 — drift checked before journal** → fixed: gate reordered to check
+  epoch reasons first (root cause + remedy beats symptom); refusal set
+  unchanged; new case 14b pins the precedence (journal-ahead + drifted
+  shared table → epoch-ahead message).
+- **P3 — "confirmed live" overstated** (host journal never inspected; only
+  the version was user-reported) → fixed here, in the epoch doc, and in the
+  session log: the skip and the container journal are verified facts; the
+  arm attribution is now a design guarantee under the new precedence, not
+  an observation.
+- **P3 — assertion-count claim wrong** (5 was the pair's total, misfiled
+  under sync-sessions) → fixed: 27 (6 new) / 38 (1 new).
+- **P3 — session log referenced a "recorded outcome" that didn't exist yet**
+  → fixed: this entry is written after the record step; see the session log.
+- **P3 — `case '*'` fallbacks dead-by-construction** → kept deliberately,
+  comments now say so: a future gate token must never silence the skip line
+  entirely (fail-safe, not dead code by accident).
+- **P3 — stub captured `$1`, real `aidc::log` prints `$*`** → fixed in both
+  stubs.
+
+Re-ran after the fixes: 27/27 + 38/38 green, shellcheck clean, `aidc-scan`
+clean; outcome recorded via `aidc-review-record`.
+
+**Extended later the same session: verified-additive gap merging.**
+
+User challenge after seeing the diagnosis: *".29 is point release in .25
+range so they should merge seamlessly."* Verified rather than assumed (and
+the point matters — the 2026-09-09 session recorded the same lesson):
+
+- Fresh 2.0.25 db (scratch HOME, `opencode serve` boot): **49 journal ids**
+  vs the container's 50. The gap is exactly one id,
+  `20261010180456_project_time_archived`.
+- Upstream migration file (fetched from the v2.0.29 tag): a single
+  `ALTER TABLE project ADD time_archived integer` — purely additive.
+- Bidirectional schema diff over every shared table of both dbs: no delta
+  other than `project.time_archived`.
+
+So the pair IS mergeable — not because point releases never change schema
+(this range did), but because the change is additive. Journal-ahead is still
+refused by default because a journal id can also be a data-reshaping
+migration (`reset_v2_session_state` class) invisible to pragma dumps.
+
+**How:**
+
+- `AIDC_OPENCODE_ADDITIVE_MIGRATIONS_DEFAULT` in `lib/aidc/sync.sh` — the
+  allowlist (currently the one id above, with its receipt in
+  `docs/opencode-schema-epochs.md`). `AIDC_OPENCODE_ADDITIVE_MIGRATIONS`
+  overrides/extends; `${var-default}` (not `:-`) so explicitly-empty
+  disables, unsetting restores the default.
+- Gate: on a journal gap, `aidc::opencode_gap_all_additive` (every gap id on
+  the allowlist) AND a runtime purely-additive shape check (host columns ⊆
+  container columns on every shared table, same comm machinery reversed)
+  → prints `additive-ahead <n>` and returns 0; anything else refuses with
+  `epoch-ahead <n>` / `column-drift <table>` as before.
+- Merge: `aidc::opencode_db_merge` takes a third arg for restricted-columns
+  mode — collists come from the destination instead of the source (the shape
+  check guarantees dst ⊆ src, so dst's list is the shared intersection).
+- **Bug surfaced and fixed while implementing:** the merge loop used to
+  include the `migration` journal table itself (safe in full mode only
+  because the gate's invariant made every journal insert a no-op collision).
+  A restricted merge would have INSERTed the container's gap id into the
+  HOST's journal — falsifying the host's epoch fingerprint so its own
+  upgrade would skip replaying a migration it never ran (permanent schema
+  divergence). `migration` is now excluded from both modes (rtk's merge too,
+  defensively; lowercased compare, since SQL table names are case-insensitive
+  while bash matches are not); the additive-merge test asserts the host
+  journal is untouched, and a case-variant-journal test pins the exclusion.
+- Caller logs the degraded mode visibly: "host opencode.db is 1 migration(s)
+  behind the container (gap verified additive-only); merging shared columns
+  (gap columns land empty until the host's opencode catches up)".
+
+**Commands (extension):**
+
+    # live verification (scratch HOME under /tmp/opencode, cleaned after):
+    VERSION=2.0.25 bash install.sh --no-modify-path   # then `opencode serve` boot
+    sqlite3 .../opencode.db "SELECT id FROM migration ORDER BY id;"   # 49 ids
+    curl raw.githubusercontent.com/sst/opencode/v2.0.29/.../20261010180456_project_time_archived.ts
+    bash tests/sync-sessions.test.sh   # 33 passed (6 new: 14c-14g)
+    bash tests/rtk-gain.test.sh        # 38 passed
+    shellcheck --severity=warning lib/aidc/sync.sh tests/sync-sessions.test.sh
+    aidc-scan
+
+**Verification (extension):** 33/33 + 38/38 green; shellcheck clean;
+`aidc-scan` clean. Fresh-eyes subagent re-review of the extended diff
+(checklist per AGENTS.md): no P1/P2; five P3 findings, all fixed —
+
+- journal-table exclusion was an exact case-sensitive bash match while SQL
+  addresses tables case-insensitively (a `Migration`-cased db could slip
+  past and get its journal falsified) → lowercased compare in both merge
+  functions + case-variant regression test (14g);
+- the rtk caller silently dropped the new `additive-ahead` success token
+  (mispointed `AIDC_RTK_DB` would then fail a full-mode merge with a cryptic
+  rollback message) → loud skip with its own log line;
+- the allowlist loop's `for a in $allow` glob-expanded overrides containing
+  `*?[`, and blank journal ids were skipped rather than refused →
+  `read -a` word-splitting + blank-id-refuses-the-gap;
+- `comm` needs BINARY-collation input ordering but ran under the ambient
+  locale (pre-existing exposure, two new call sites widened it) →
+  `LC_ALL=C` on every gate `comm`;
+- the reviewer independently re-verified the upstream receipts (50 vs 49
+  journal ids at v2.0.29/v2.0.25, the sole delta being the allowlisted
+  migration) and the claimed invariants (a)–(e).
+
+Re-recorded via `aidc-review-record` after the fixes. Side-quest debt paid:
+the experiment's 2.0.25 install had downdated the container's own binary via
+the shared `~/.opencode/bin` — reinstalled 2.0.29 and verified
+`opencode --version` before proceeding.
+
+**Extended once more the same session: post-exit sync freshness.**
+
+User, after confirming the fix worked on a manual sync: *"earlier message
+came at /exit so it was the exit codeblock there is also a start and other
+sections where sync is kicked in. check and ensure we use common methods for
+all of these."*
+
+**Audit (every trigger, verified in context):** up/down→up recovery,
+rebuild, down, destroy, opencode-web bring-up, agent exit, serve exit —
+all call `aidc::auto_sync_sessions`; manual `aidc sync-sessions` calls
+`cmd_sync_sessions`; both funnel into the same `aidc::sync_session_tool` →
+gated per-tool merges covered by the test suite. No divergent path exists;
+container-side hooks (`rtk-session-end.sh`, review-gate plugins) are
+display-only and never run the host merge. **The `/exit` stale message was
+therefore not a second method** — it was the same method executed from the
+agent wrapper's in-memory definitions: `bin/aidc` sources `lib/aidc/*.sh`
+once at startup, the wrapper blocks on the agent for the session's
+lifetime, and the post-exit sync runs functions captured before any
+mid-session edit.
+
+**How:**
+
+- `lib/aidc/sync.sh`: new `aidc::auto_sync_sessions_fresh` — with
+  `AIDC_ROOT` set (bin/aidc exports it), re-sources `lib/aidc/sync.sh` from
+  disk inside a subshell and runs the ordinary `auto_sync_sessions` there,
+  so the parent's possibly-stale definitions cannot be the ones that sync;
+  without `AIDC_ROOT` (tests source the lib directly) it falls back to the
+  in-process call, keeping test stubs authoritative. `AIDC_AUTO_SYNC_SESSIONS=0`
+  gates both paths identically. Broken tree → skip, never stale fallback:
+  a `bash -n` pre-gate (parses without executing) plus an explicit
+  in-subshell `if ! . "$module"; then exit 0; fi` catch — the latter because
+  a subshell that is the left operand of `||` has `set -e` suppressed
+  inside, so a failed source would otherwise continue into the parent's
+  inherited (stale) definitions, the exact bug being fixed (fresh-eyes
+  review catch, reproduced empirically). Freshness is module-scoped by
+  design: all sync/merge logic lives in sync.sh; cross-module helpers
+  (compose, log) remain the wrapper's in-memory versions.
+- `lib/aidc/runtime.sh`: exactly the two post-exit sites (agent-runner exit,
+  `opencode serve` exit) call the fresh variant. The short-lived triggers
+  are fresh processes by construction and stay on the direct call.
+  (`aidc shell` is a third long-lived wrapper with no post-exit sync at all
+  — pre-existing, flagged by review, left as-is: interactive-shell exits
+  relying on the next trigger is the current contract.)
+- `README.md`: the auto-sync paragraph notes the module-scoped freshness.
+- Tests (`tests/sync-sessions.test.sh`, case 17): a shadowed
+  `sync_session_tool` (simulating stale in-memory code) is ignored when
+  `AIDC_ROOT` is set — the on-disk reload performs the real merge; the
+  no-`AIDC_ROOT` fallback uses the parent's (shadowed) definitions; the
+  opt-out knob gates the fresh path itself (AIDC_ROOT re-set for that
+  sub-case); an unparseable or missing module skips without a stale
+  fallback. Definitions and the compose_capture stub are restored after
+  the section so nothing leaks.
+
+**Commands:** `bash tests/sync-sessions.test.sh` (37 passed),
+`shellcheck --severity=warning` on sync.sh/runtime.sh/the test (clean),
+full 40-suite run, `aidc-scan` clean, fresh-eyes re-review, re-recorded.
+
+---
+
 ## 2026-10-14 — opencode to v2 (2.0.29), the external-directory permission seed, and a full pin refresh
 
 **Summary:** Three related changes. (1) The container's opencode pin moves

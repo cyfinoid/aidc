@@ -130,7 +130,7 @@ aidc version
 
 `aidc rescan` re-detects the project's languages and rebuilds, so a repo that started empty (or single-language) picks up the matching toolchains and security scanners once code lands. `shellcheck` installs automatically when shell scripts are present.
 
-Session transcripts auto-sync from the container to the host on container start, agent exit, `aidc down`, and `aidc destroy` (before its volumes are removed), so `/insights` on the host stays current without a manual `aidc sync-sessions`. The start sync is the safety net for ungraceful exits (crash / `docker kill`) that the on-exit hooks miss — it catches up anything left in the volume.
+Session transcripts auto-sync from the container to the host on container start, agent exit, `aidc down`, and `aidc destroy` (before its volumes are removed), so `/insights` on the host stays current without a manual `aidc sync-sessions`. The start sync is the safety net for ungraceful exits (crash / `docker kill`) that the on-exit hooks miss — it catches up anything left in the volume. All trigger points share one code path, and the agent-exit sync re-reads its session-sync module (where the sync and merge logic lives) from disk, so a fix there applies even to a session that started before it landed.
 
 Toggle it with `AIDC_AUTO_SYNC_SESSIONS`: set it host-wide in `~/.config/aidc/config.env` (universal default for every project) or per project in `.ai-container/project.env` (overrides the global default). `0` disables auto-sync; manual `aidc sync-sessions` always works regardless.
 
