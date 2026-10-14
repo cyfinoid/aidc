@@ -43,6 +43,12 @@ copy_dir_from_seed()  { CALLS+="DIR|$1|$2"$'\n'; }
 strip_host_hooks() { :; }
 ensure_agent_guardrail_settings() { :; }
 ensure_rtk_session_end_settings() { :; }
+ensure_opencode_permissions() { :; }
+# wire_aidc_review_cursor writes ~/.cursor/hooks.json through python with a
+# mkdir done by ensure_dir — stubbed here — so the real helper would die on a
+# missing parent directory. The review-gate wiring has its own coverage in
+# tests/review-hook.test.sh.
+wire_aidc_review_cursor() { :; }
 
 seeds() { printf '%s' "$CALLS" | grep -Fq "$1"; }
 run()   { CALLS=""; "$1"; }

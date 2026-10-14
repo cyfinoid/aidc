@@ -167,12 +167,14 @@ hook — one shared check (`aidc-review-hook.sh`), three front ends:
   non-documentation code changed without a matching record; honors
   `stop_hook_active` as its loop guard.
 - **opencode** — a plugin (`aidc-review-gate.ts`, installed into
-  `~/.config/opencode/plugins/` by the bootstrap): on `session.idle` it runs
-  the same check and injects the checklist as a user prompt, so the agent
-  continues into the review instead of returning control. Loop protection:
-  a session is only nudged for tree states it has not already been nudged
-  for, capped at 3 nudges per session (opencode has no native stop-hook loop
-  guard).
+  `~/.config/opencode/plugins/` by the bootstrap): on turn-end events
+  (`session.execution.succeeded|failed|interrupted`, plus `session.idle` for
+  TUI-lifecycle coverage) it runs the same check and injects the checklist as
+  a user prompt, so the agent continues into the review instead of returning
+  control. Loop protection: a session is only nudged for tree states it has
+  not already been nudged for, capped at 3 nudges per session, and
+  overlapping turn-end events are serialized per session (opencode has no
+  native stop-hook loop guard).
 - **cursor-agent** — a `stop` entry in `~/.cursor/hooks.json`
   (`aidc-review-gate-cursor.sh`): on clean completions it returns
   `followup_message` with the checklist, which Cursor auto-continues;
@@ -257,9 +259,10 @@ yet validated end-to-end — see `docs/apple-container.md`.
 
 ## Exposing the opencode web UI (`aidc opencode-web`)
 
-`aidc opencode-web` runs opencode's browser UI (`opencode web`) inside the
-container. This is the **only** aidc feature that publishes a container port to
-the host, so its posture is deliberately conservative:
+`aidc opencode-web` runs opencode's server + web UI (`opencode serve` in v2 —
+v1's `opencode web` subcommand was renamed) inside the container. This is the
+**only** aidc feature that publishes a container port to the host, so its
+posture is deliberately conservative:
 
 - **Loopback-only host publish.** The `compose.opencode-web.yaml` override (added
   only when `AIDC_OPENCODE_WEB=1`, which `aidc opencode-web` sets) publishes
@@ -267,13 +270,15 @@ the host, so its posture is deliberately conservative:
   cannot. opencode itself binds `0.0.0.0` *inside* the container, which is
   required for the forwarded port to reach it; keeping the **host** publish on
   `127.0.0.1` is what keeps the agent off the network.
-- **Auth on by default.** A random `OPENCODE_SERVER_PASSWORD` is generated,
-  delivered to the container by env-key reference (never on any argv), and
-  printed once for you to use. Export your own `OPENCODE_SERVER_PASSWORD`
-  beforehand to pin it; `--username` overrides the default `opencode` user.
-- **`--no-auth`** removes the password. It is safe *only* because the publish is
-  loopback-only; do not pair it with any host-side reverse proxy or port
-  re-forward that would widen the exposure.
+- **Auth: v2 always enforces a server password.** A random `OPENCODE_PASSWORD`
+  is generated, delivered to the container by env-key reference (never on any
+  argv), and printed once for you to use. Export your own `OPENCODE_PASSWORD`
+  beforehand to pin it (a v1-era `OPENCODE_SERVER_PASSWORD` is honored and
+  reused for compatibility). There is no username: v2's scheme is
+  password-only, so `--username` is accepted but ignored.
+- **`--no-auth`** no longer disables authentication (v2 has no authless mode):
+  it means aidc ships no password and opencode mints and prints its own on
+  startup. The loopback-only publish still applies.
 - **Port default 4096** (`--port N` or `AIDC_OPENCODE_WEB_PORT`; validated to
   1024–65535). Opting in (re)creates the container to attach the port, and a
   later plain `aidc <tool>` recreates it back without the port — the same
@@ -295,7 +300,10 @@ floating branch or unpinned `latest`:
   is fetched to a file and executed (never piped): `claude` (positional
   version; the installer verifies the binary against its manifest SHA256),
   `codex` (`--release`, artifacts from the vendor's GitHub releases),
-  `opencode` (`VERSION` env, GitHub releases), `grok` (positional version),
+  `opencode` (`VERSION` env; v2 ships through the vendor's npm-backed install
+  channel `https://opencode.ai/v2/install`, latest resolved from the vendor's
+  update API — the v1-era GitHub-releases channel only serves the v1 line),
+  `grok` (positional version),
   `omp` (`--binary --ref v<X.Y.Z>` → pinned `github.com/can1357/oh-my-pi`
   release binary, installed to `~/.local/bin/omp`).
 

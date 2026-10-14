@@ -28,15 +28,16 @@ ARG WITH_GROK=0
 ARG WITH_OMP=0
 # Agent version pins — global-scope for the same reason; refreshed by
 # scripts/update-pins.sh, asserted by .github/scripts/check-image-pins.sh.
-ARG CLAUDE_VERSION=2.1.266
-ARG CODEX_VERSION=0.153.4
-# v1 line: 1.18.29+ loads object-form plugins, and the review-gate plugin is
-# validated against this series. v2 (2.0.x) is a plugin-API rewrite with its
-# own install channel (https://opencode.ai/v2/install) and no stop/idle hook
-# either - reassess after rtk ships a v2-compatible plugin (see CHANGELOG 2.2.0).
-ARG OPENCODE_VERSION=1.18.32
-ARG GROK_VERSION=1.0.24
-ARG OMP_VERSION=18.1.15
+ARG CLAUDE_VERSION=2.1.300
+ARG CODEX_VERSION=0.162.1
+# v2 line: Plugin.define/setup() API; the review-gate plugin and rtk's plugin
+# (rtk >= 0.52.0) are written against it. Installed from the v2 channel
+# (https://opencode.ai/v2/install), which resolves/downloads from npm
+# (@opencode/cli-<os>-<arch>); latest v2 comes from
+# https://opencode.ai/update/api/latest/cli/npm (update-pins.sh).
+ARG OPENCODE_VERSION=2.0.29
+ARG GROK_VERSION=1.0.52
+ARG OMP_VERSION=18.10.4
 
 FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec AS uv
 # Minimal self-owned OS base (replaces mcr.microsoft.com/devcontainers/base,
@@ -51,7 +52,7 @@ FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923b
 # always-on grype to triage.
 FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS base
 
-ARG GIT_DELTA_VERSION=0.19.2
+ARG GIT_DELTA_VERSION=0.20.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -144,8 +145,8 @@ echo "$sha  $dest" | sha256sum -c - >/dev/null || {
 EOF
 RUN chmod 0755 /usr/local/bin/aidc-fetch-verified
 
-ARG GIT_DELTA_SHA256_AMD64=ea4f0222950ee750a3d38dd80d03bce4cee07a3f63928fc47548383bcaf23093
-ARG GIT_DELTA_SHA256_ARM64=0edc36cf514f1bd84becac3e94ee8ae9f8818c6a1f99f7b2ee67b362afa253d3
+ARG GIT_DELTA_SHA256_AMD64=0683067a4cbbcc19b9fd2841253131d1b37ccfa724725098d811d4d0d9fcc25b
+ARG GIT_DELTA_SHA256_ARM64=6e08b734d611037eb9eb5db883cab7ac0a089216a9efdc1d2caac44319029c28
 RUN ARCH=$(dpkg --print-architecture) \
     && case "$ARCH" in \
          amd64) DELTA_SHA="$GIT_DELTA_SHA256_AMD64" ;; \
@@ -195,9 +196,9 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
 # before installs. Binaries installed system-wide; shell/shim wiring done
 # per-user below. Pinned release artifact, checksum-verified (previously a
 # floating `main`-branch curl|sh installer).
-ARG PMG_VERSION=v0.28.1
-ARG PMG_SHA256_AMD64=6eedee215faa4ea42b4cb8c1e18961c31803df1bb2acd7b5aaee6484352b5303
-ARG PMG_SHA256_ARM64=8acba49e44d2fed67f9a1931c8b277c6d25fc087a44976939e13bcff80ce8624
+ARG PMG_VERSION=v0.31.0
+ARG PMG_SHA256_AMD64=0e56d235585d9feec3612b481c7faa05b346c93ac52611e2f8e79f57c8200ab8
+ARG PMG_SHA256_ARM64=0025a18811ac89f69df975dafcfc1c76c226a74126698f76ed0574b07a8917c9
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) PMG_ASSET="pmg_Linux_x86_64.tar.gz"; PMG_SHA="$PMG_SHA256_AMD64" ;; \
@@ -218,9 +219,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # newest tag, update VET_VERSION, rebuild, and commit. "latest" is honoured
 # for ad-hoc overrides but resolves at build time, which defeats the pin —
 # avoid in committed configs.
-ARG VET_VERSION=v1.19.0
-ARG VET_SHA256_AMD64=4e39ea7fb7c11e1edcdcf41a3c71766f62fb7f4533930b850afbd1bb441bb221
-ARG VET_SHA256_ARM64=0cf95eca4d79e9252e11f2a0d87e928a36efa3b417b853724eafa0b3748cf923
+ARG VET_VERSION=v1.20.0
+ARG VET_SHA256_AMD64=cb875389498d7a4cb6f0edda19ae18e976739a8f88187f994ccb8396e925569c
+ARG VET_SHA256_ARM64=764deb67ed4642f156e1384125e3709b098e5b8ef3330f83ba31b4836e890c4e
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) VET_ARCH="x86_64"; VET_SHA="$VET_SHA256_AMD64" ;; \
@@ -241,9 +242,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # SCA is handled by vet/pmg above; this layer covers code-pattern and secret
 # scans. trufflehog is a pinned, checksum-verified release artifact
 # (previously a floating `main`-branch curl|sh installer).
-ARG TRUFFLEHOG_VERSION=v3.97.4
-ARG TRUFFLEHOG_SHA256_AMD64=dc24007c2f233bd61c05beabeb44aa27ea9b43288166279209abe0458c5ce76b
-ARG TRUFFLEHOG_SHA256_ARM64=7e65e771d2a247964056aa5edba0f8ae3945895e5dce867fe0ffbc7b0128239a
+ARG TRUFFLEHOG_VERSION=v3.99.2
+ARG TRUFFLEHOG_SHA256_AMD64=3c7b0d1dc4278294269bfdd7594bca8bb28c78da0a4a06ad202ded37b48deca4
+ARG TRUFFLEHOG_SHA256_ARM64=929b81efffca752eafd58bf6f17bf725d354f338636a7bbbee65c086d2f9ddf3
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv tool install semgrep \
     && ARCH_RAW="$(dpkg --print-architecture)" \
@@ -303,12 +304,12 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # https://github.com/anchore/grype/releases, update the ARG, rebuild, commit.
 # Direct release artifacts, checksum-verified (previously vendor installer
 # scripts fetched from `main`, which could bypass the version pin).
-ARG SYFT_VERSION=v1.51.1
-ARG SYFT_SHA256_AMD64=8fcb33017a0dc1058298c923c436d19dfa68ae93968e0b423248542e3afb9fc3
-ARG SYFT_SHA256_ARM64=a7fd2b784e6664acd44719270574f6cd8c6864fc2b1700bf9099bd1cccda7d7f
-ARG GRYPE_VERSION=v0.118.0
-ARG GRYPE_SHA256_AMD64=1d444c5e7360471815f7158f71935fcecc68a3c417d85c7344f770854300bba2
-ARG GRYPE_SHA256_ARM64=32aceeb8ee837244775fcb522372c8b3a47914986385f3148f4ee2c930482a84
+ARG SYFT_VERSION=v1.54.1
+ARG SYFT_SHA256_AMD64=c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+ARG SYFT_SHA256_ARM64=dfdf0537610113edbefe1f1fc6548bc957b2d77439636ec824fcf0e10d46d054
+ARG GRYPE_VERSION=v0.120.1
+ARG GRYPE_SHA256_AMD64=0a9ee97ef5ae2ee953b0a80098105052e846cdbe319a57d808b519c33cd1343d
+ARG GRYPE_SHA256_ARM64=29f47391dc283aa79fcc38e65224cd61f64dec0ecfd0db7074128ebf8ff23514
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) A_ARCH="amd64"; SYFT_SHA="$SYFT_SHA256_AMD64"; GRYPE_SHA="$GRYPE_SHA256_AMD64" ;; \
@@ -329,9 +330,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # Pinned release artifact, checksum-verified (previously a floating
 # `master`-branch curl|sh installer). Note the vendor's per-arch targets:
 # musl for x86_64, gnu for aarch64 — that is what rtk publishes.
-ARG RTK_VERSION=v0.48.0
-ARG RTK_SHA256_AMD64=e4e650fa1677c0de2f6839a6040d7b17f312d32f163c402b75af70e9e5af1a91
-ARG RTK_SHA256_ARM64=5ed65486a96077bd6bba7c87fdc9d0e4a1918d19619be3c87380888389a30c7c
+ARG RTK_VERSION=v1.0.1
+ARG RTK_SHA256_AMD64=5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436
+ARG RTK_SHA256_ARM64=cd627c4091ad90b5e5aca83ca5af66ee4b8aa8537a736533fa90544f461f1c2b
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) RTK_TARGET="x86_64-unknown-linux-musl"; RTK_SHA="$RTK_SHA256_AMD64" ;; \
@@ -449,7 +450,7 @@ ARG OPENCODE_VERSION
 # creates it), and installers only create their own dirs — every agent stage
 # pre-creates the dirs it writes to (structural guard: tests/base-image-stages.test.sh).
 RUN mkdir -p /home/aidc/.local/bin /home/aidc/.opencode \
-    && curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh \
+    && curl -fsSL https://opencode.ai/v2/install -o /tmp/install-opencode.sh \
     && VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path \
     && ln -sf /home/aidc/.opencode/bin/opencode /home/aidc/.local/bin/opencode \
     && rm -f /tmp/install-opencode.sh

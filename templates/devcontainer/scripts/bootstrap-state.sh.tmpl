@@ -248,6 +248,9 @@ sync_opencode() {
   # opencode_data_home volume) so a host `opencode auth login` is inherited.
   ensure_dir "$home_dir/.local/share/opencode"
   copy_file_from_seed "/host-seed/opencode-data/auth.json" "$home_dir/.local/share/opencode/auth.json" "0600"
+  # Seed the permission allows AFTER the config copy: copy_file_from_seed
+  # overwrites opencode.json in sync mode, which would drop them again.
+  ensure_opencode_permissions
   # rtk ships an opencode plugin (~/.config/opencode/plugins/rtk.ts). Install
   # AFTER the plugins seeding: copy_dir_from_seed rsync --deletes in sync mode,
   # which would wipe a plugin installed before it. Idempotent, so this repairs
@@ -256,6 +259,104 @@ sync_opencode() {
   # Same wipe-repair logic for aidc's own review-gate plugin: it must be
   # (re-)copied after the rsync on every init/sync.
   wire_aidc_opencode_gate
+}
+
+# Seed opencode's `permission.external_directory` allow rules for the paths
+# every aidc session legitimately touches OUTSIDE the workspace — without
+# them opencode asks (per session: an "always" approval only lasts the
+# current session) on every single one:
+#   /opt/CORE_LOGICS/**       the shared guidance repo AGENTS.md tells the
+#                             agent to read AND write (aidc mounts it at
+#                             /opt/CORE_LOGICS; AIDC_CORE_LOGICS_DIR).
+#   ~/.local/share/rtk/**     rtk's history db + tee logs — read/written by
+#                             the rtk wiring every command goes through.
+#   /tmp/**                   the container's designated scratch space (the
+#                             agents' own standing instruction says to use
+#                             /tmp/opencode for temporary work).
+# Merge-only, never clobber: a key the user (or an explicit host config)
+# already set — allow, ask, or deny — is left exactly as it is. Removing the
+# knob (AIDC_OPENCODE_SEED_PERMISSIONS=0) deletes only the defaults listed
+# above that are still set to "allow", never anything else. Override the
+# default list with AIDC_OPENCODE_EXTERNAL_ALLOW (colon-separated glob list;
+# empty disables). Idempotent; safe on every init/sync. Same python3-merges
+# pattern as ensure_rtk_session_end_settings — fails open without python3.
+ensure_opencode_permissions() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local cfg="$home_dir/.config/opencode/opencode.json"
+  local enforce="${AIDC_OPENCODE_SEED_PERMISSIONS:-1}"
+  local defaults="/opt/CORE_LOGICS/**:~/.local/share/rtk/**:/tmp/**"
+  # '-' not ':-' so an explicitly-empty override disables seeding entirely.
+  local paths="${AIDC_OPENCODE_EXTERNAL_ALLOW-$defaults}"
+  AIDC_OC_PERM_ENFORCE="$enforce" AIDC_OC_PERM_PATHS="$paths" \
+    AIDC_OC_PERM_DEFAULTS="$defaults" python3 - "$cfg" <<'PY'
+import json, os, sys
+
+p = sys.argv[1]
+enforce = os.environ.get("AIDC_OC_PERM_ENFORCE", "1") == "1"
+defaults = [s for s in os.environ.get("AIDC_OC_PERM_DEFAULTS", "").split(":") if s]
+paths = [s for s in os.environ.get("AIDC_OC_PERM_PATHS", "").split(":") if s]
+
+try:
+    cfg = json.load(open(p))
+except FileNotFoundError:
+    cfg = {}
+except (ValueError, OSError):
+    # Unparseable/unreadable config: leave it exactly as it is (same
+    # fail-open contract as strip_host_hooks / ensure_rtk_session_end_settings)
+    # — opencode itself will surface the problem to its owner.
+    sys.exit(0)
+if not isinstance(cfg, dict):
+    sys.exit(0)
+
+perm = cfg.get("permission")
+if perm is not None and not isinstance(perm, dict):
+    # e.g. the documented whole-config shorthand `"permission": "ask"` —
+    # a user-set shape we must not replace.
+    sys.exit(0)
+ext = perm.get("external_directory") if isinstance(perm, dict) else None
+if ext is not None and not isinstance(ext, dict):
+    # e.g. `"external_directory": "ask"` — likewise a valid user value.
+    sys.exit(0)
+if not isinstance(ext, dict):
+    ext = {}
+
+changed = False
+if enforce:
+    for path in paths:
+        if path not in ext:
+            ext[path] = "allow"
+            changed = True
+else:
+    # Off: retract only our defaults, and only where they still say "allow"
+    # (a different value means a human put it there).
+    for path in defaults:
+        if ext.get(path) == "allow":
+            del ext[path]
+            changed = True
+
+if ext:
+    if perm is None:
+        perm = {}
+    perm["external_directory"] = ext
+elif isinstance(perm, dict) and "external_directory" in perm:
+    del perm["external_directory"]
+if isinstance(perm, dict) and perm:
+    cfg["permission"] = perm
+
+# Write only when something changed, or when seeding into a config that does
+# not exist yet (never on the retract-only path — nothing to retract, and a
+# knob-off invocation must not create files).
+if changed or (enforce and paths and not os.path.exists(p)):
+    try:
+        with open(p, "w") as fh:
+            json.dump(cfg, fh, indent=2)
+            fh.write("\n")
+        # Match the seed contract (copy_file_from_seed 0600): opencode.json can
+        # carry provider API keys in custom headers.
+        os.chmod(p, 0o600)
+    except OSError:
+        pass  # fail open: a read-only config dir is not bootstrap's problem
+PY
 }
 
 sync_grok() {

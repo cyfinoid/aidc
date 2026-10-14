@@ -360,17 +360,21 @@ aidc::cmd_opencode() {
 }
 
 # 'aidc opencode-web' — the opencode "desktop feeling" (issue #5). Runs
-# `opencode web` (headless server + browser UI) inside the container and
-# publishes its port on the HOST LOOPBACK (127.0.0.1) via the
-# compose.opencode-web.yaml override, so the host browser reaches the agent
-# while the LAN cannot. opencode binds 0.0.0.0 *inside* the container (needed
-# for the forwarded port to reach it). Auth is on by default: a random
-# OPENCODE_SERVER_PASSWORD is generated (unless one is already set or --no-auth
-# is passed) and delivered by env-key reference (never on any argv).
+# `opencode serve` (v2 API + web UI; v1's `opencode web` was renamed in v2)
+# inside the container and publishes its port on the HOST LOOPBACK
+# (127.0.0.1) via the compose.opencode-web.yaml override, so the host
+# browser reaches the agent while the LAN cannot. opencode binds 0.0.0.0
+# *inside* the container (needed for the forwarded port to reach it).
+# Auth: v2 ALWAYS enforces a server password — a random OPENCODE_PASSWORD is
+# generated (unless one is already set) and delivered by env-key reference
+# (never on any argv). --no-auth can no longer disable auth outright (v2 has
+# no authless mode): it now just lets opencode mint and print its own
+# password on startup.
 #   --port N        listen/publish port (default 4096; 1024-65535)
-#   --no-auth       start without a server password (LAN-safe only via loopback)
-#   --username NAME HTTP basic-auth username (default: opencode)
-#   -- <args...>    extra flags passed through to `opencode web`
+#   --no-auth       let opencode generate + print its own password (v2 always
+#                   authenticates; loopback-only publishing still applies)
+#   --username NAME accepted for compatibility, ignored (v2 is password-only)
+#   -- <args...>    extra flags passed through to `opencode serve`
 aidc::cmd_opencode_web() {
   local port="${AIDC_OPENCODE_WEB_PORT:-4096}"
   local auth=1
@@ -404,6 +408,7 @@ aidc::cmd_opencode_web() {
         ;;
     esac
   done
+  [[ -z "$username" ]] || aidc::warn "--username is ignored: opencode v2 'serve' is password-only (no basic-auth username)"
 
   # Validate the port before it reaches compose interpolation / the exec argv.
   case "$port" in
@@ -440,27 +445,29 @@ aidc::cmd_opencode_web() {
     # Generate a password only if the caller hasn't supplied one. Kept out of
     # any xtrace; delivered to the exec by env-key reference, never on argv.
     aidc::secret_begin
-    if [[ -z "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
-      OPENCODE_SERVER_PASSWORD="$(aidc::gen_web_password)"
-      export OPENCODE_SERVER_PASSWORD
+    # v1's OPENCODE_SERVER_PASSWORD is honored when set (compat).
+    if [[ -n "${OPENCODE_PASSWORD:-}" ]]; then
+      :
+    elif [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+      OPENCODE_PASSWORD="$OPENCODE_SERVER_PASSWORD"
+      export OPENCODE_PASSWORD
+      aidc::warn "using OPENCODE_SERVER_PASSWORD's value as v2's OPENCODE_PASSWORD (v1 name kept working)"
+    else
+      OPENCODE_PASSWORD="$(aidc::gen_web_password)"
+      export OPENCODE_PASSWORD
     fi
     aidc::secret_end
-    AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_SERVER_PASSWORD")
-    if [[ -n "$username" ]]; then
-      export OPENCODE_SERVER_USERNAME="$username"
-      AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_SERVER_USERNAME")
-    fi
+    AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_PASSWORD")
     aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only)"
-    aidc::log "  username: ${username:-opencode}"
     aidc::secret_begin
-    aidc::log "  password: $OPENCODE_SERVER_PASSWORD"
+    aidc::log "  password: $OPENCODE_PASSWORD"
     aidc::secret_end
   else
-    aidc::warn "opencode web starting WITHOUT auth (--no-auth): anyone who can reach 127.0.0.1:$port on this host can drive the agent"
-    aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only, no auth)"
+    aidc::warn "opencode v2 always enforces a server password; --no-auth now means opencode mints and prints its own on startup"
+    aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only; opencode-generated password printed on startup)"
   fi
 
-  local -a command=("opencode" "web" "--port" "$port" "--hostname" "0.0.0.0")
+  local -a command=("opencode" "serve" "--port" "$port" "--hostname" "0.0.0.0")
   if [[ ${#args[@]} -gt 0 ]]; then
     command+=("${args[@]}")
   fi
@@ -471,7 +478,7 @@ aidc::cmd_opencode_web() {
   return "$rc"
 }
 
-# Random 32-hex-char secret for OPENCODE_SERVER_PASSWORD. Prefers openssl; falls
+# Random 32-hex-char secret for opencode's OPENCODE_PASSWORD. Prefers openssl; falls
 # back to /dev/urandom so it works on hosts without openssl. The fallback reads a
 # fixed 16 bytes with head as the *consumer* (head -c 16 /dev/urandom | …) so it
 # can't trip the SIGPIPE that `tr </dev/urandom | head` raises under

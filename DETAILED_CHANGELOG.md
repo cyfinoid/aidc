@@ -8,6 +8,128 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-14 — opencode to v2 (2.0.29), the external-directory permission seed, and a full pin refresh
+
+**Summary:** Three related changes. (1) The container's opencode pin moves
+from the v1 line (1.18.32) to v2 (2.0.29): new install channel, a rewritten
+review-gate plugin on the v2 plugin API, `opencode-web` following the
+`web`→`serve` rename, and docs for the new db epoch. (2) The recurring
+permission prompts for `/opt/CORE_LOGICS` and rtk's data dir — opencode
+asking *every session* because `external_directory` defaults to ask and
+"always" approvals are session-scoped — are fixed by a merge-only config
+seed. (3) Every other image pin is refreshed (rtk 0.48.0→1.0.1 major).
+
+**Why:** The 2.2.0 changelog deferred the v2 move with two explicit revisit
+conditions: rtk shipping a v2-compatible plugin, and the sync/insights
+storage format being verified. Both are now true — rtk 0.52.0 added
+"support OpenCode V2, Desktop, and Windows" (current rtk is 1.0.1), and we
+verified the storage story by running the actual binaries rather than
+trusting docs. The permission prompts were a user report from daily use:
+"opencode inside aidc container doesn't get the /opt permissions; it asks for
+those and rtk folder permissions invariably every time."
+
+**How (v2 research, all verified empirically against 2.0.29):**
+
+- *Install channel.* v2 ships via npm (`@opencode/cli-<os>-<arch>`), installed
+  by `https://opencode.ai/v2/install` — the same installer shape (fetch to
+  file, `VERSION` env pin, `--no-modify-path`, installs to
+  `~/.opencode/bin`). The anomalyco/opencode GitHub releases (which
+  `update-pins.sh` used) only serve the v1 line — v1.19.0 was latest there —
+  so the pin script now reads
+  `https://opencode.ai/update/api/latest/cli/npm` (`"version":"2.0.29"`).
+- *Storage.* Same `~/.local/share/opencode/` + `opencode.db`; same Drizzle
+  `migration` journal. A fresh v2 db carries 50 migration ids; opening a copy
+  of a real v1 db (38 ids) migrates it in place to 50, keeping the v1 tables
+  (`session`, `message`, `part`, `todo`) and adding v2 ones (`session_v2`,
+  `session_inbox`, `session_pending`, `instruction_*`, `kv`, `worktree`). New
+  sessions are written to `session_v2`. The existing epoch gate + generic
+  shared-table merge in `aidc::opencode_merge_to_base` therefore needs no
+  code change: v2-container→v1-host skips to quarantine by design (container
+  journal ahead), v2→v2 merges, and the epoch table in
+  `docs/opencode-schema-epochs.md` gained a v2 section recording all of this.
+- *Plugin API.* v2 does not run v1 plugins. The new API is
+  `{ id, setup(ctx) }` (what `Plugin.define` returns — we deliberately use a
+  plain object with top-level `node:` imports, mirroring rtk's own plugin,
+  so nothing depends on host module mapping under OpenCode Desktop/Electron).
+  Decisive detail found by live-testing a serve instance: **`session.idle`
+  does not fire in v2 serve/run** — the turn-end signal is
+  `session.execution.succeeded|failed|interrupted`. The plugin matches those
+  plus `session.idle` (TUI coverage) with per-session serialization so the
+  overlapping events cannot double-prompt. A second v2 behavior matters:
+  one plugin instance loads per location and events fan out across
+  locations, so the plugin acts only when the session's own directory
+  (`ctx.session.get(...).location.directory`) matches `ctx.location.directory`
+  — exactly one instance nudges per session. The check-script lookup walks up
+  ≤5 parent dirs from the session directory (the v1 worktree fallback without
+  git plumbing). Validated end-to-end against a live 2.0.29 serve with a
+  fake always-tripping gate: exactly one injected checklist prompt
+  ("FAKE-CHECKLIST … nudge 1/3 for this tree state"), loop guards deduping
+  subsequent turns.
+- *`opencode-web`.* v2 renamed `web` to `serve` (same `--port/--hostname`),
+  and `serve` **always** enforces a password: unset → it mints and prints
+  one; clients authenticate with `OPENCODE_PASSWORD` (not v1's
+  `OPENCODE_SERVER_PASSWORD`). `aidc opencode-web` now execs `opencode serve`,
+  generates/delivers `OPENCODE_PASSWORD` by env-key reference (honoring a
+  pre-set v1 `OPENCODE_SERVER_PASSWORD`), warns that `--no-auth` can no
+  longer disable auth (v2 mints its own), and accepts-but-ignores
+  `--username` (v2 is password-only). `docs/security.md` and the README
+  reflect the new posture.
+- *rtk.* 1.0.1's breaking changes (`rtk proxy`→`rtk bypass`, licence split)
+  don't touch aidc's surface (`rtk init --global --auto-patch --hook-only
+  --opencode`, `rtk gain -f json`, `--agent cursor` — all verified against
+  the 1.0.1 binary). Its generated plugin is dual-shape (v2 `setup()` + v1
+  `server()`), so the bootstrap wiring is unchanged.
+
+**How (permission fix):** opencode's permission docs + live db inspection
+showed the `permission` table empty while the user approved prompts every
+session — "always" is documented as session-scoped. The ask comes from
+`external_directory` (default "ask") for any path outside the workspace.
+`ensure_opencode_permissions` in `bootstrap-state.sh.tmpl` merges
+`permission.external_directory` allow rules for `/opt/CORE_LOGICS/**`,
+`~/.local/share/rtk/**`, and `/tmp/**` into `~/.config/opencode/opencode.json`
+after the config seed copy (sync mode overwrites the file, so the seed must
+run after it): keys are only added when absent (a user rule of any value is
+never touched), the file is chmod 0600 (provider API keys can live in
+headers), an unparseable config is left untouched (fail open, like the
+sibling python helpers), no-python3 fails open, and
+`AIDC_OPENCODE_SEED_PERMISSIONS=0` / `AIDC_OPENCODE_EXTERNAL_ALLOW` (empty
+disables) are the knobs. Note the OS-level ownership was never the problem
+(`/opt/CORE_LOGICS` and `~/.local/share/rtk` are `aidc:aidc`) — this is
+purely opencode's in-tool permission layer.
+
+**Commands and verification:**
+
+- Live v2 experiments in `/tmp/opencode` (scratch HOME): install 2.0.29 via
+  the v2 channel, `opencode run` + `opencode serve` + `opencode api` drives,
+  event-stream logging plugin, v1-db migration test, fake-gate repo.
+- `bash tests/*.test.sh` — all 40 suites green (601 cases), including the
+  new `tests/opencode-permissions.test.sh` (16) and the updated
+  `tests/opencode-web.test.sh` (17) and `tests/update-pins.test.sh` (26).
+- `shellcheck --severity=warning` on every changed shell file: clean (CI's
+  exact gate).
+- `aidc-scan`: clean (semgrep, gitleaks, shellcheck; rest out of scope).
+
+**Notes / gotchas:**
+
+- The running aidc-for-aidc container keeps opencode 1.18.32 until the next
+  `aidc rebuild` (the `.devcontainer/` scaffold mount is read-only from
+  inside; templates are the source of truth, refreshed on `aidc init`).
+- A host still running opencode v1 will see container-session syncs skip the
+  host-db merge (journal-ahead epoch gate) until the host's own opencode
+  upgrades — sessions remain in the aidc quarantine; that is the designed
+  degradation, not a regression.
+- `aidc sync-config opencode` from a v1 host still rsyncs the host's
+  *plugins* into the container; v1-shaped host plugins will not run under
+  container v2 (upstream stance: "V1 plugin implementations do not run in
+  V2"). aidc-managed plugins (rtk's, the review gate) are v2-native and
+  re-installed after the rsync. Host plugin porting is the host owner's move.
+- The sbom scaffold template (`templates/ci/github-sbom.yml.tmpl`) drifted
+  from the Dockerfile pins because `update-pins.sh` only writes the
+  Dockerfile; re-synced manually this time. A future change could teach
+  update-pins.sh to rewrite it too.
+
+---
+
 ## 2026-10-04 — visible watchdog for the Keychain OAuth token lookup
 
 **Summary:** `aidc::resolve_claude_oauth_token` (the 2.3.0 feature that reads

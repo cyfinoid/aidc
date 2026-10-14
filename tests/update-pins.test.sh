@@ -47,7 +47,6 @@ if [[ "\$want_redirect" -eq 1 ]]; then
     */anchore/grype/*)             printf 'https://github.com/anchore/grype/releases/tag/v1.0.0' ;;
     */rtk-ai/rtk/*)                printf 'https://github.com/rtk-ai/rtk/releases/tag/v0.50.0' ;;
     */openai/codex/*)              printf 'https://github.com/openai/codex/releases/tag/rust-v1.0.0' ;;
-    */anomalyco/opencode/*)        printf 'https://github.com/anomalyco/opencode/releases/tag/v2.0.0' ;;
     */can1357/oh-my-pi/*)          printf 'https://github.com/can1357/oh-my-pi/releases/tag/v18.0.0' ;;
     *) exit 22 ;;
   esac
@@ -79,6 +78,7 @@ $FAKE_B  rtk-aarch64-unknown-linux-gnu.tar.gz
 " ;;
   *downloads.claude.ai*latest) emit "3.0.0" ;;
   *x.ai/cli/stable) emit "1.2.3" ;;
+  *opencode.ai/update/api/latest/cli/npm) emit '{"channel":"latest","name":"cli","distribution":"npm","version":"2.0.0","metadata":{"package":"@opencode/cli"}}' ;;
   *) exit 22 ;;
 esac
 STUB
@@ -153,6 +153,33 @@ expect "ARG CODEX_VERSION=1.0.0"
 expect "ARG OPENCODE_VERSION=2.0.0"
 expect "ARG GROK_VERSION=1.2.3"
 expect "ARG OMP_VERSION=18.0.0"
+
+# 1b. opencode pin resolves from the v2 update API, not GitHub releases: when
+# the API is unreachable the script warns and skips opencode instead of dying
+# (a curl wrapper stacked in front 22s just that URL).
+mkdir -p "$TMP_ROOT/bin-api-down"
+cat >"$TMP_ROOT/bin-api-down/curl" <<WRAP
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *opencode.ai/update/api/latest/cli/npm) exit 22 ;;
+  esac
+done
+exec "$STUB_DIR/curl" "\$@"
+WRAP
+chmod +x "$TMP_ROOT/bin-api-down/curl"
+api_down_out="$(AIDC_PINS_DOCKERFILE="$FIXTURE_DF" PATH="$TMP_ROOT/bin-api-down:$PATH" bash "$UPDATE_PINS" 2>&1 >/dev/null || true)"
+if printf '%s' "$api_down_out" | grep -qi 'could not resolve latest opencode v2'; then
+  ok "unreachable v2 API warns and skips opencode"
+else
+  fail "unreachable v2 API handling: '$api_down_out'"
+fi
+api_down_pins="$(AIDC_PINS_DOCKERFILE="$FIXTURE_DF" PATH="$TMP_ROOT/bin-api-down:$PATH" bash "$UPDATE_PINS" 2>/dev/null || true)"
+if printf '%s' "$api_down_pins" | grep -q 'ARG OPENCODE_VERSION'; then
+  fail "unreachable v2 API still emitted an opencode pin"
+else
+  ok "unreachable v2 API emits no opencode pin"
+fi
 
 # 2. Print mode does not modify the Dockerfile.
 if grep -q '^ARG PMG_VERSION=v0.21.3$' "$FIXTURE_DF"; then

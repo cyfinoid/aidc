@@ -32,7 +32,8 @@ Verified via `raw.githubusercontent.com/sst/opencode/<tag>/…/migration.gen.ts`
 | v1.17.0 – v1.17.3       | 32         | |
 | v1.17.4                 | 33         | |
 | v1.17.5 – v1.17.9       | 35         | |
-| **v1.17.10 – v1.18.30** | **38**     | **frozen — byte-identical `migration.gen.ts` and `schema.gen.ts`** |
+| **v1.17.10 – v1.18.x**  | **38**     | **frozen — byte-identical `migration.gen.ts` and `schema.gen.ts`** |
+| **v2 line (2.0.x)**     | **50+**    | **new epoch: v2 extends the same journal and migrates v1 dbs in place** |
 
 Migrations added on the way to the frozen set:
 
@@ -45,16 +46,43 @@ Migrations added on the way to the frozen set:
   "simplify" rewrites), i.e. genuine breaking boundaries — crossing them is the
   case where a blind row-merge would be unsafe.
 
-**Key result:** the schema has not changed for the entire current 1.17.10 → 1.18.x
+**Key result:** the schema did not change for the entire 1.17.10 → 1.18.x
 line — 40+ consecutive releases. In particular the last 20 versions
 (v1.18.11 … v1.18.30) contain **zero** schema changes.
+
+### The v2 epoch (verified empirically against 2.0.29, 2026-10-14)
+
+aidc moved its container pin to the v2 line; these facts were established by
+running the actual binaries, not from docs:
+
+- **Same storage location and journal mechanics.** v2 keeps
+  `~/.local/share/opencode/opencode.db` and the same Drizzle `migration`
+  journal table; a *fresh* v2 db (2.0.29) carries 50 migration ids.
+- **v2 migrates a v1 db in place.** Opening a copy of a real v1 db (38 ids)
+  with v2 replays the 12 additional migrations onto it: the journal grows to
+  50, the v1 tables (`session`, `message`, `part`, `todo`, …) survive, and new
+  v2 tables (`session_v2`, `session_inbox`, `session_pending`,
+  `instruction_*`, `kv`, `worktree`, …) appear alongside.
+- **v2 writes new sessions to `session_v2`**, not `session`. The old `session`
+  rows from v1 remain readable in the same db.
+- **Consequences for the merge, all handled by the existing gates:** a v2
+  container db synced into a v1 host db is refused by the epoch gate (journal
+  ahead → skip to quarantine — the correct outcome until the host's own
+  opencode upgrades); a v2 container into a v2 host merges over the shared
+  tables (`session`, `session_v2`, `message`, …) exactly as before; a v2
+  container into a *migrated* host db (v1 grown to v2 in place) also merges —
+  the host simply holds the superset schema. No code change was needed for
+  sync; only this documentation of the new epoch.
 
 ## Support policy
 
 > **We support merging between any two opencode builds that carry the same set of
-> migration ids in their `migration` table.** In practice that is the single
-> frozen epoch **v1.17.10 → current (v1.18.30)** — which covers every realistic
-> container-pin vs host-version combination today.
+> migration ids in their `migration` table.** In practice that is the frozen v1
+> epoch **v1.17.10 → v1.18.x** (container and host both on v1) plus the **v2
+> epoch** (both on v2, or a host db that v2 migrated forward in place) — which
+> covers every realistic container-pin vs host-version combination today. The
+> v1-container → v2-host direction also merges (host journal is a superset);
+> only v2-container → v1-host skips, by design.
 
 Consequences for the merge code:
 
