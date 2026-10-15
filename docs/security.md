@@ -400,6 +400,21 @@ exception** — its interactive-login token is stored in the macOS Keychain (not
 copyable file), so it can't be seeded; authenticate cursor-agent in containers
 with `CURSOR_API_KEY` (forwarded above).
 
+**opencode v2 caveat — auth moved into the db.** Since opencode v2, new
+`opencode auth login`s update `opencode.db` (`credential`/`account` tables),
+not `auth.json`, so they do **not** seed container-ward; log in from inside
+the container instead (device-code flow: `opencode auth login` → open the
+printed URL on the host — the credential persists in that repo's volume).
+The direction is one-way by contract: session syncing scrubs credential
+tables from the synced db copy (secure-deleting DELETEs) and never merges
+them host-ward, so container auth state never reaches the host either.
+Known residual: on v1-era builds the legacy `storage/` session JSON is
+folder-copied as-is — v1 kept credentials only in `auth.json` (tar-excluded);
+if a future opencode writes auth elsewhere than the db, the sync excludes
+need revisiting. Seeding host db credentials into containers is planned (see
+`docs/opencode-schema-epochs.md` for the db versioning machinery it will
+ride).
+
 Only env vars actually set in `aidc`'s own process are forwarded — the value is
 read at exec time and lives only for the duration of that `docker compose exec`,
 never written into the container image or compose file.

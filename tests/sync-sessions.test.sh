@@ -726,6 +726,145 @@ if command -v sqlite3 >/dev/null 2>&1; then
     "${STUB_ARGV[@]}"
   }
 
+  # ── 18. auth/credential tables NEVER merge container → host ────────────────
+  # Since opencode v2, provider logins land in the db (credential/account
+  # tables), not auth.json. The merge must never carry them host-ward: the
+  # host is the source of truth for credentials. Covers both guards — the
+  # known-tables list and the schema-driven token-column catch — while
+  # proving session tables still merge.
+  setup_case oc-merge-auth-excluded
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     CREATE TABLE account (id TEXT PRIMARY KEY, access_token TEXT, refresh_token TEXT);
+     CREATE TABLE future_auth (id TEXT PRIMARY KEY, access_token TEXT);
+     INSERT INTO session VALUES ('contB', '{}');
+     INSERT INTO credential VALUES ('ctr-1', 'OpenAI', 'CONTAINER-SECRET');
+     INSERT INTO account VALUES ('acct-1', 'CONTAINER-TOKEN', 'CONTAINER-REFRESH');
+     INSERT INTO future_auth VALUES ('fa-1', 'CONTAINER-TOKEN');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     CREATE TABLE account (id TEXT PRIMARY KEY, access_token TEXT, refresh_token TEXT);
+     CREATE TABLE future_auth (id TEXT PRIMARY KEY, access_token TEXT);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO credential VALUES ('host-1', 'Z.AI', 'HOST-SECRET');"
+  aidc::opencode_db_merge "$oc_data/opencode.db" "$HOME/.local/share/opencode/opencode.db"
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session;")" == "2" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")" == "{}" ]]; then
+    ok "auth-table guard: session rows still merge normally"
+  else
+    fail "auth-table guard over-blocked session merge"
+  fi
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")" == "1" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT value FROM credential WHERE id='host-1';")" == "HOST-SECRET" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM account;")" == "0" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM future_auth;")" == "0" ]]; then
+    ok "auth-table guard: credential/account/token-column tables never merge host-ward"
+  else
+    fail "auth tables leaked into the host db: credential=$(sqlite3 "$bdb" "SELECT count(*) FROM credential;") account=$(sqlite3 "$bdb" "SELECT count(*) FROM account;") future_auth=$(sqlite3 "$bdb" "SELECT count(*) FROM future_auth;")"
+  fi
+
+  # ── 19. the synced quarantine copy is scrubbed of credential rows ──────────
+  # "Credentials never leave the container" must hold for the at-rest
+  # quarantine on host disk too, not just the host db. End-to-end through the
+  # real sync path (the scrub runs right after the tar extract). The host
+  # fixture carries its own credential row so the host-db assertion is
+  # falsifiable (a schema-less host table would make it pass vacuously).
+  setup_case oc-sync-scrubs-quarantine
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('contB', '{\"cwd\":\"/workspace/proj\"}');
+     INSERT INTO credential VALUES ('ctr-1', 'OpenAI', 'CONTAINER-SECRET');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO credential VALUES ('host-1', 'Z.AI', 'HOST-SECRET');"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  qdb="$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db"
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  if [[ "$(sqlite3 "$qdb" "SELECT count(*) FROM credential;" 2>/dev/null)" == "0" ]] \
+     && [[ "$(sqlite3 "$qdb" "SELECT count(*) FROM session;" 2>/dev/null)" == "1" ]]; then
+    ok "quarantine opencode.db is scrubbed of credential rows (sessions kept)"
+  else
+    fail "quarantine still holds credential rows (count=$(sqlite3 "$qdb" "SELECT count(*) FROM credential;" 2>/dev/null))"
+  fi
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session;")" == "2" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT value FROM credential WHERE id='host-1';")" == "HOST-SECRET" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")" == "1" ]]; then
+    ok "host db still receives sessions and never container credentials"
+  else
+    fail "host db wrong after scrubbed sync: session=$(sqlite3 "$bdb" "SELECT count(*) FROM session;") credential=$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")"
+  fi
+
+  # ── 20. scrub helper: token-column tables are scrubbed under any name ──────
+  setup_case oc-scrub-token-columns
+  sdb="$TMP_ROOT/scrub-fixture.db"
+  sqlite3 "$sdb" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, value TEXT);
+     CREATE TABLE some_future_store (id TEXT PRIMARY KEY, access_token TEXT);
+     INSERT INTO session VALUES ('s1', '{}');
+     INSERT INTO credential VALUES ('c1', 'SECRET');
+     INSERT INTO some_future_store VALUES ('f1', 'TOKEN');"
+  aidc::opencode_scrub_auth "$sdb"
+  if [[ "$(sqlite3 "$sdb" "SELECT count(*) FROM credential;")" == "0" ]] \
+     && [[ "$(sqlite3 "$sdb" "SELECT count(*) FROM some_future_store;")" == "0" ]] \
+     && [[ "$(sqlite3 "$sdb" "SELECT count(*) FROM session;")" == "1" ]]; then
+    ok "scrub drops credential + token-column tables, leaves sessions"
+  else
+    fail "scrub wrong: credential=$(sqlite3 "$sdb" "SELECT count(*) FROM credential;") future=$(sqlite3 "$sdb" "SELECT count(*) FROM some_future_store;") session=$(sqlite3 "$sdb" "SELECT count(*) FROM session;")"
+  fi
+
+  # ── 21. the auth guard holds in restricted-additive mode too, and logs ─────
+  # The skip sits before the mode branch; this pins that placement. The src
+  # session table carries a src-only `extra` column — the actual restricted
+  # -mode discriminator: full mode would build the column list from src and
+  # the INSERT would error against dst lacking the column, while restricted
+  # mode derives the list from dst and silently drops the value. Asserting
+  # the merge SUCCEEDED with rows landed proves restricted mode ran, and the
+  # credential exclusion proves the guard sits before all of it.
+  setup_case oc-merge-auth-restricted
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT, extra TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('contB', '{}', 'SRC-ONLY');
+     INSERT INTO credential VALUES ('ctr-1', 'OpenAI', 'CONTAINER-SECRET');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO credential VALUES ('host-1', 'Z.AI', 'HOST-SECRET');"
+  : >"$LOGS"
+  aidc::opencode_db_merge "$oc_data/opencode.db" \
+    "$HOME/.local/share/opencode/opencode.db" restrict
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session;")" == "2" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")" == "{}" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")" == "1" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT value FROM credential;")" == "HOST-SECRET" ]]; then
+    ok "restricted mode: gap-column row merges (src-only column dropped), credential rows never do"
+  else
+    fail "restricted-mode auth guard wrong: session=$(sqlite3 "$bdb" "SELECT count(*) FROM session;") credential=$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")"
+  fi
+  if grep -Fq "excluded auth tables from the host merge (host owns credentials): credential" "$LOGS"; then
+    ok "excluded auth tables are named in the sync log"
+  else
+    fail "auth-exclusion log line missing: $(cat "$LOGS")"
+  fi
+
 else
   printf 'skip: opencode.db SQLite merge cases (sqlite3 not installed)\n'
 fi

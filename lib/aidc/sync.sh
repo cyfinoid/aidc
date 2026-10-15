@@ -153,6 +153,11 @@ aidc::sync_session_tool() {
   # viewers reading that default location see container sessions too. The
   # merge is additive and never overwrites host data — see the function.
   if [[ "$tool" == "opencode" ]]; then
+    # v2 opencode keeps provider credentials in the db itself — scrub them
+    # from the at-rest quarantine copy BEFORE anything reads it: container
+    # auth state never travels host-ward, and the host is the source of
+    # truth for credentials (the merge re-guards this independently).
+    aidc::opencode_scrub_auth "$host_dst/opencode.db"
     aidc::opencode_merge_to_base "$workspace" "$host_dst"
   fi
 
@@ -310,6 +315,76 @@ aidc::opencode_db_tables() {
     "SELECT name FROM sqlite_master WHERE type='table' \
        AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' \
        AND name NOT LIKE '\\_\\_%' ESCAPE '\\';" 2>/dev/null
+}
+
+# Is this opencode.db table auth/credential state? Since opencode v2, provider
+# logins (`opencode auth login`) no longer update the legacy auth.json — they
+# land in the db: `credential` rows (one per provider; `value` is the secret),
+# plus `account`/`account_state`/`control_account` for ChatGPT/Codex-style
+# OAuth accounts. aidc's contract is one-directional by design: the HOST is
+# the source of truth for credentials, and container auth state never travels
+# host-ward (the documented "credentials never leave the container"
+# guarantee). Anything this returns true for is excluded from the container →
+# host db merge and scrubbed from the at-rest quarantine copy.
+aidc::opencode_table_is_auth() {
+  local db="$1"
+  local t="$2"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  # Known auth tables by name. Case-folded: SQL resolves table names
+  # case-insensitively, so a `Credential`-cased db must not slip past a bash
+  # exact match (same reasoning as the migration-journal exclusion).
+  case "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" in
+    credential|account|account_state|control_account) return 0 ;;
+  esac
+  # Schema-driven guard for auth tables upstream may add under any name: a
+  # table carrying OAuth token columns is auth state, whatever it is called.
+  # (Deliberately specific — `value`, `key` or `secret` alone would false-
+  # positive ordinary session tables and silently drop session data.)
+  [[ -n "$("$sqlite" "$db" \
+    "SELECT 1 FROM pragma_table_info('${t//\'/\'\'}') \
+       WHERE lower(name) IN ('access_token','refresh_token') LIMIT 1;" 2>/dev/null)" ]]
+}
+
+# Drop auth/credential rows from a quarantined opencode.db copy — the at-rest
+# container-data-dir staging on host disk that the merge later reads. With v2
+# keeping provider credentials IN the db (see aidc::opencode_table_is_auth),
+# the raw extract would otherwise park container auth state on the host, the
+# exact inverse of the documented "credentials never leave the container"
+# guarantee. DELETE with secure_delete so freed page content is zeroed (the
+# WAL is checkpointed too), leaving no recoverable secret in the at-rest
+# copy. Best-effort, and only the presence of host sqlite3 makes the later
+# merge possible anyway; a failure warns so the directory can be removed by
+# hand. The sqlite3-absent path warns too: without it the raw copy keeps
+# credential rows, and silence here would strand them unflagged.
+aidc::opencode_scrub_auth() {
+  local db="$1"
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  [[ -f "$db" ]] || return 0
+  if ! command -v "$sqlite" >/dev/null 2>&1; then
+    aidc::warn "sqlite3 not on host — cannot scrub credential tables from $db (opencode v2 keeps auth in the db; remove the directory if you do not want container auth state on host disk)"
+    return 0
+  fi
+  local t sql="" scrubbed=""
+  while IFS= read -r t; do
+    [[ -n "$t" ]] || continue
+    if aidc::opencode_table_is_auth "$db" "$t"; then
+      sql+="DELETE FROM \"${t//\"/\"\"}\";"$'\n'
+      scrubbed+="${scrubbed:+, }$t"
+    fi
+  done < <(aidc::opencode_db_tables "$db")
+  [[ -n "$sql" ]] || return 0
+  # wal_checkpoint cannot run inside a transaction — it goes after COMMIT,
+  # best-effort (a failed checkpoint only means the WAL keeps old page
+  # images; the rows are already gone). secure_delete is a connection pragma:
+  # set it before BEGIN so the DELETEs zero freed content.
+  if "$sqlite" "$db" "PRAGMA busy_timeout=3000; PRAGMA secure_delete=ON; BEGIN;
+${sql}
+COMMIT;" >/dev/null 2>&1; then
+    "$sqlite" "$db" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null 2>&1 || true
+    aidc::log "scrubbed credential tables from the synced opencode.db copy ($scrubbed)"
+  else
+    aidc::warn "could not scrub credential tables from $db — remove the directory if you do not want container auth state on host disk"
+  fi
 }
 
 # Rewrite the in-container mount root (/workspace) to the host workspace inside
@@ -499,7 +574,7 @@ aidc::opencode_db_merge() {
   local restrict="${3:-}"
   local sqlite="${AIDC_SQLITE3:-sqlite3}"
   local src_sql="${src//\'/\'\'}"
-  local sql t collist collist_db
+  local sql t collist collist_db auth_excluded=""
   # busy_timeout as SQL (not the .timeout dot-command, which is silently
   # ignored — and aborts the rest — when passed as a command-line argument).
   sql="PRAGMA busy_timeout=5000;
@@ -517,6 +592,15 @@ BEGIN IMMEDIATE;
     # Lowercased compare: SQL addresses tables case-insensitively, so a
     # `Migration`-cased journal must not slip past a bash exact match.
     [[ "$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')" == "migration" ]] && continue
+    # Auth/credential tables NEVER flow container → host: the host is the
+    # source of truth for credentials (aidc seeds auth into the container,
+    # never the reverse). Without this, every session sync would merge the
+    # container db's credential/account rows into the host's own db — the
+    # exact inverse of "credentials never leave the container".
+    if aidc::opencode_table_is_auth "$src" "$t"; then
+      auth_excluded+="${auth_excluded:+, }$t"
+      continue
+    fi
     # Only merge tables the source db also has.
     [[ -n "$("$sqlite" "$src" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
     # Full merge: the gate guarantees every source column exists in the
@@ -532,6 +616,9 @@ BEGIN IMMEDIATE;
   sql+="COMMIT;
 DETACH DATABASE aidc_src;
 "
+  # One line per sync, names only — enough to audit that auth state stayed put.
+  [[ -n "$auth_excluded" ]] \
+    && aidc::log "excluded auth tables from the host merge (host owns credentials): $auth_excluded"
   "$sqlite" "$dst" "$sql" >/dev/null 2>&1
 }
 

@@ -8,6 +8,85 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-15 — auth direction: container credential rows never flow to the host (opencode v2 keeps auth in the db)
+
+**Summary:** The user's constraint — "only creds from host to container, never
+the reverse" — turned out to be violated by the *existing* session sync, not
+just by the planned host→container auth-seeding feature. Auditing the merge
+against that constraint found that since opencode v2, provider logins live in
+`opencode.db` (`credential` + `account` tables), and `aidc::opencode_db_merge`
+iterated every shared table — so every sync could `INSERT OR IGNORE`
+container-side credential rows into the host's own db. Fixed with two guards:
+the merge now skips auth tables (known names + a token-column schema catch),
+and the quarantined db copy is scrubbed of credential rows right after
+extract. Session merging is unchanged.
+
+**Why (the diagnosis chain that found it):** A report that a fresh OpenAI
+login on the host never reached container sessions. Evidence gathered across
+host and container: the host's `auth.json` has not been written by a login
+since Sep 21 (v1 era) — a device-code login today touched only
+`opencode.db-wal` — while `opencode auth list` on the host shows *four*
+OpenAI entries where `auth.json` holds one; the container's v2.0.29 db has a
+`credential` table with exactly the 8 providers of the seeded `auth.json`
+(v2 imports the legacy file on first run) and empty `account` tables. Net:
+v2 auth is db-resident; aidc seeds only `auth.json`; and the sync's
+table-agnostic merge meant container db auth rows were eligible to flow the
+wrong way on every auto-sync trigger.
+
+**How:**
+
+- `aidc::opencode_table_is_auth` (`lib/aidc/sync.sh`): true for the known
+  auth tables (`credential`, `account`, `account_state`, `control_account`;
+  case-folded — SQL resolves table names case-insensitively, same reasoning
+  as the journal exclusion) **or** any table with `access_token`/
+  `refresh_token` columns (schema-driven catch for future upstream auth
+  tables; deliberately specific — generic names like `value`/`key` would
+  false-positive session tables and silently drop session data).
+- `aidc::opencode_db_merge`: skips such tables in both full and
+  restricted-additive modes; logs the excluded names once per sync (names
+  only, never values).
+- `aidc::opencode_scrub_auth` + wiring in `aidc::sync_session_tool`: the
+  quarantined `opencode.db` is scrubbed right after the tar extract, before
+  the merge stages its private copy — DELETE in one transaction, then
+  `PRAGMA wal_checkpoint(TRUNCATE)` (a checkpoint cannot run inside a
+  transaction — first attempt failed with exactly that). Best-effort with a
+  warn-and-name-the-directory on failure. This makes the at-rest quarantine
+  honest again: the docs' "credentials never leave the container" was already
+  untrue for v2 dbs.
+- Direction contract for the planned host→container auth seeding (2.6.0):
+  read host rows, insert into the container volume's db with
+  `INSERT OR IGNORE`/time-updated-wins, epoch-gated like the session merge,
+  `AIDC_OPENCODE_SYNC_AUTH=0` opt-out. Never the reverse.
+
+**Commands:** `bash tests/sync-sessions.test.sh` (44 passed) · full suite 39
+/39 green · `shellcheck --severity=warning` clean · `aidc-scan` clean.
+
+**Verification:** Three new cases: direct `aidc::opencode_db_merge` with
+populated `credential`/`account`/`future_auth` tables — session rows merge,
+auth rows never do, and the token-column guard catches an auth table under an
+unknown name; end-to-end `aidc::sync_session_tool` — the at-rest quarantine
+db is scrubbed while the host db still receives the session row (the host
+fixture carries its own credential row so the host-side assertion is
+falsifiable); scrub-helper unit case. First implementation failed its own
+test (checkpoint inside the transaction) — exactly what the case exists to
+catch. Fresh-eyes review (diff-only handoff) found no P1s; adopted fixes:
+warn on the sqlite3-absent scrub path (was a silent return — unflagged
+credential rows in the at-rest copy), `PRAGMA secure_delete=ON` so freed
+page content is zeroed (closing the freelist residual the reviewer probed),
+the falsifiable host-fixture assertion, a restricted-additive-mode guard
+case with the audit-log assertion, and honest changelog wording.
+
+**Notes:** Existing host dbs are NOT retro-cleaned — with `INSERT OR IGNORE`
+and no provenance column, container-originated rows (suspects: duplicate
+"OpenAI"/"OpenAI 2" entries in `opencode auth list`) are indistinguishable
+from host-created ones; audit manually. The interim user workaround for
+in-container auth stays: device-code `opencode auth login` inside the
+container (the credential lands in that repo's volume db and persists).
+Host on opencode v2.0.25 vs container 2.0.29 — the epoch-ahead gap 2.5.0
+already documents; upgrading the host closes it.
+
+---
+
 ## 2026-10-14 — opencode host-credential re-seed: `opencode.json` + `auth.json` now re-seed on every bootstrap
 
 **Summary:** New sessions in a container could not see credentials the user
