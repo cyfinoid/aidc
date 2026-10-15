@@ -31,7 +31,10 @@ mkdir -p "$AIDC_CONTAINER_HOME"
 . "$TMPL"
 
 # Behavioral checks for the real sync_file_from_seed, run BEFORE the copy
-# primitives below are replaced with recorders.
+# primitives below are replaced with recorders. The function is defined by
+# the sourced template above — the later in-file definition is the recorder
+# stub, so SC2218 (definition later in file) is expected and suppressed at
+# each call site.
 SEED="$TMP_ROOT/seed"
 VOL="$TMP_ROOT/vol"
 mkdir -p "$SEED" "$VOL"
@@ -41,6 +44,7 @@ printf '%s' '{"apiKey":"stale"}'   >"$VOL/cred.json"
 # 0a. A host seed overwrites an existing (stale) volume copy — the every-start
 #     re-seed contract; also confirms the exact 0600 mode (bits-set is not
 #     enough: find -perm 0600 also matches 0644/0666).
+# shellcheck disable=SC2218
 sync_file_from_seed "$SEED/cred.json" "$VOL/cred.json" "0600"
 cred_mode="$(stat -c '%a' "$VOL/cred.json" 2>/dev/null || stat -f '%Lp' "$VOL/cred.json")"
 if [[ "$(cat "$VOL/cred.json")" == '{"apiKey":"rotated"}' ]] \
@@ -53,6 +57,7 @@ fi
 # 0b. A missing host seed is a no-op — in-container-only state (a login made
 #     inside the container with no host counterpart) survives.
 rm "$SEED/cred.json"
+# shellcheck disable=SC2218
 sync_file_from_seed "$SEED/cred.json" "$VOL/cred.json" "0600"
 if [[ "$(cat "$VOL/cred.json")" == '{"apiKey":"rotated"}' ]]; then
   ok "sync_file_from_seed: missing host seed is a no-op (volume copy kept)"
@@ -66,6 +71,7 @@ fi
 #     failing function (call-time resolution beats the binary), restored after.
 printf '%s' '{"apiKey":"rotated-v2"}' >"$SEED/cred.json"
 cp() { return 1; }
+# shellcheck disable=SC2218
 seed_fail_out="$(sync_file_from_seed "$SEED/cred.json" "$VOL/cred.json" "0600" 2>&1)"
 unset -f cp
 if [[ "$(cat "$VOL/cred.json")" == '{"apiKey":"rotated"}' ]] \
