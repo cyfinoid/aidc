@@ -7,7 +7,7 @@
 # lints each module file in isolation and cannot see those uses.
 # shellcheck disable=SC2034
 
-AIDC_VERSION="${AIDC_VERSION:-2.7.0}"
+AIDC_VERSION="${AIDC_VERSION:-3.0.0}"
 
 AIDC_CONTAINER_USER="${AIDC_CONTAINER_USER:-aidc}"
 

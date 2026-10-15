@@ -1302,7 +1302,10 @@ aidc::opencode_auth_snapshot() {
       aidc::warn "generated opencode auth snapshot is not valid JSON ($out); container auth seed not refreshed"
     elif cmp -s "$tmp" "$out" 2>/dev/null; then
       rm -f "$tmp"
-      aidc::log "opencode host auth snapshot current (host db: $counts)"
+      # Routine pass — silent by default (export_compose_env runs several
+      # times per command; logging here would sprawl over every launch).
+      # Counts remain visible on refresh, and under --debug.
+      aidc::debug "opencode host auth snapshot current (host db: $counts)"
     elif chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$out" 2>/dev/null; then
       aidc::log "refreshed the opencode auth seed for containers (host db: $counts)"
     else

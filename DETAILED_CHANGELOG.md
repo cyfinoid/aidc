@@ -52,13 +52,14 @@ surfaced as explicit decision points, not folded silently into a release.
   `bootstrap-state.sh seed-auth` (new mode) the moment it appears — also
   gives RUNNING containers new host logins without a restart.
 - Knob: `AIDC_OPENCODE_SYNC_AUTH=0` gates both halves.
-- Observability (user request): the host snapshot line carries the auth-table
-  counts (`opencode host auth snapshot current (host db: credential=8,
-  account=0)`), logged on refresh and on the cmp-quiet path; the container
-  apply line logs what was pushed AND post-apply totals (`container db now
-  has credential=N, account=M`); the synthesis line logs how many provider
-  entries it wrote. Bootstrap output goes to `docker logs` (it is the
-  container start command); host output to the terminal.
+- Observability (user request), tuned after the first cut sprawled the
+  routine line over every launch (export_compose_env runs several times per
+  command): the host logs auth-table counts ONLY on refresh (`refreshed the
+  opencode auth seed for containers (host db: credential=18, …)`); the
+  cmp-quiet pass is `aidc::debug`-only; the container apply line logs what
+  was pushed AND post-apply totals (`container db now has credential=N,
+  account=M`); bootstrap output goes to `docker logs` (it is the container
+  start command); host output to the terminal.
 - Timestamps: `aidc::log`/`warn`/`die` → `[aidc YYYY-MM-DD HH:MM:SS] …`;
   the template's 11 `[bootstrap]` echoes → a timestamped `bootstrap_warn`
   helper. Suite message contracts grep substrings, so prefixes break
@@ -93,10 +94,30 @@ opencode dir at 0600, the same trust domain as the `auth.json` beside it.
 
 ---
 
-## 2026-10-15 — v2.7.0 release prep: version bump, README refresh, tests CI
+## 2026-10-15 — v3.0.0: final renumber of the first tagged release + retro-tagging plan
+
+**Summary:** At the user's instruction, the first tagged release lands as
+**v3.0.0** (the in-flight 2.7.0 label was never tagged). `AIDC_VERSION` →
+3.0.0; the changelog section retitled `## [3.0.0] - 2026-10-15`; README
+highlights retitled. No other version references existed (grepped).
+
+**Retro-tagging:** the user wants older versions populated as tags so they
+can be checked out. Versions 2.2.0–2.5.0 exist as real states of the tree
+(each `bumping X` commit sets `AIDC_VERSION` and cuts its changelog section);
+2.6.0/2.7.0 never existed as code states. The provided command loop finds
+each bump commit via `git log -S` on the version line, tags it annotated,
+and self-verifies by reading the version back out of the tagged tree. Each
+pushed tag triggers `release.yml`, which validates tag↔`AIDC_VERSION` at
+that commit and publishes a GitHub Release from that commit's changelog
+section — so retro-tags populate Releases too. Push order: oldest first,
+`v3.0.0` last so GitHub's "Latest" lands on it.
+
+---
+
+## 2026-10-15 — release prep: README refresh, tests CI (version landed on v3.0.0)
 
 **Summary:** Pre-tag work for the first tagged release: `AIDC_VERSION`
-2.5.0 → 2.6.0 → 2.7.0 across this session, landing on a single `## [2.7.0]` changelog section (first-tag framing; the
+2.5.0 → 2.6.0 → 2.7.0 across this session, landing on a single versioned changelog section (first-tag framing; later renumbered to [3.0.0] — see the v3.0.0 entry below; the
 auth-direction fix moved there from the 2.5.0 cut), a README refresh
 (release/tests/shellcheck/Scorecard badges, "What's new in v2.7.0",
 credential-direction accuracy), and a new `tests` GitHub Actions workflow
