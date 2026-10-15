@@ -114,14 +114,19 @@ assertions so future installer drift fails the BUILD, not the pin check.
   goes through shell rc files a build never sources. The installer exits 0
   regardless — hence a green build with missing agents.
 
-**How:** both agent stages now set `HOME=/home/aidc`, install explicitly
-into `/home/aidc/.local/bin` (codex dereferences the symlink with
-`install $(readlink -f …)` since `.codex/` is not a copied path), and end
-with `test -x` on the binary — as do all six agent stages now (drift
-detector: upstream installer changes fail the image build, where they're
-diagnosable, instead of the pin check). New suite cases in
+**How:** the grok stage sets `HOME=/home/aidc`, lets the installer run
+best-effort, then installs the downloaded binary from
+`~/.grok/downloads/` explicitly and asserts. The codex stage — whose
+dereference approach failed in the real CI build for a reason the truncated
+log didn't expose — no longer uses the installer at all: it downloads
+`codex-package-<target>.tar.gz` from `releases.openai.com/codex/releases/`
+(GitHub fallback), verifies against the published `SHA256SUMS`, extracts,
+installs `bin/codex` into `.local/bin`, and asserts `--version` executes.
+All six agent stages end with `test -x` on their binary (drift detector:
+upstream changes fail the image build, where they're diagnosable, instead
+of the pin check). New suite cases in
 `tests/base-image-stages.test.sh` (32 → 38) assert every agent-1 stage
-carries its `test -x` guard.
+carries its `test -x` guard and mkdirs `~/.local/bin` first.
 
 **Verification:** sandbox-ran both installers before and after the fix
 (codex-cli 0.162.1 and grok 1.0.52 binaries produced at the expected paths

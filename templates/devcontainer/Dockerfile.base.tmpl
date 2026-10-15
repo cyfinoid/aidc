@@ -474,17 +474,31 @@ FROM agent-claude-${WITH_CLAUDE} AS sel-claude
 
 FROM base AS agent-codex-1
 ARG CODEX_VERSION
-# Upstream installer behavior (verified 2026-10-15): it symlinks
-# $CODEX_INSTALL_DIR/codex -> $HOME/.codex/packages/standalone/current/bin/codex
-# and defaults HOME to /root in a build stage — both leave the binary outside
-# the paths the main stage copies. Pin HOME + install dir, then replace the
-# symlink with the real binary (its target under .codex/ is NOT copied).
-RUN mkdir -p /home/aidc/.local/bin \
-    && curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
-    && HOME=/home/aidc CODEX_INSTALL_DIR=/home/aidc/.local/bin sh /tmp/install-codex.sh --release "$CODEX_VERSION" \
-    && install -m 755 "$(readlink -f /home/aidc/.local/bin/codex)" /home/aidc/.local/bin/codex \
+# Direct-install from upstream's release package. The interactive installer
+# drifted twice (HOME=/root default landing everything under /root/.codex, and
+# a symlink into a directory the main stage doesn't copy), so this stage does
+# what the installer does, deterministically: download the versioned package
+# (releases.openai.com with a GitHub fallback), verify against the published
+# SHA256SUMS, extract, install the codex binary into .local/bin, assert —
+# including a --version execution, so an arch mismatch fails the build too.
+RUN mkdir -p /home/aidc/.local/bin /tmp/codex-pkg \
+    && arch="$(uname -m)" && target="" \
+    && case "$arch" in \
+         x86_64) target="x86_64-unknown-linux-musl" ;; \
+         aarch64 | arm64) target="aarch64-unknown-linux-musl" ;; \
+       esac \
+    && [ -n "$target" ] || { echo "codex: unsupported architecture $arch" >&2; exit 1; } \
+    && pkg="codex-package-$target.tar.gz" \
+    && curl -fsSL "https://releases.openai.com/codex/releases/$CODEX_VERSION/$pkg" -o "/tmp/codex-pkg/$pkg" \
+      || curl -fsSL "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$pkg" -o "/tmp/codex-pkg/$pkg" \
+    && curl -fsSL "https://releases.openai.com/codex/releases/$CODEX_VERSION/codex-package_SHA256SUMS" -o /tmp/codex-pkg/SHA256SUMS \
+    && (cd /tmp/codex-pkg && grep " $pkg\$" SHA256SUMS | sha256sum -c -) \
+    && tar -xzf "/tmp/codex-pkg/$pkg" -C /tmp/codex-pkg \
+    && bin="$(find /tmp/codex-pkg -type f -name codex | head -1)" \
+    && test -n "$bin" \
+    && install -m 755 "$bin" /home/aidc/.local/bin/codex \
     && test -x /home/aidc/.local/bin/codex \
-    && rm -f /tmp/install-codex.sh
+    && /home/aidc/.local/bin/codex --version
 FROM base AS agent-codex-0
 RUN mkdir -p /home/aidc/.local/bin
 FROM agent-codex-${WITH_CODEX} AS sel-codex
