@@ -351,10 +351,17 @@ read-only at `/host-seed/<tool>`) into the agent's per-repo volume:
 | Cursor | `~/.cursor` | `~/.cursor` | `cli-config.json` **(settings only)** — the login token is in the macOS Keychain and can't be seeded; use `CURSOR_API_KEY` |
 
 Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|omp|cursor|all>`.
-Because the seed is read-only and only specific files are copied, the agents
+**OpenCode is the exception — its `opencode.json` and `auth.json` re-seed from
+the host on *every* startup**, not just the first, so a host-side
+`opencode auth login` or an apiKey rotated in `opencode.json` reaches new
+container sessions without a manual re-sync (a missing host file is skipped, so
+state that exists only inside the container still survives). Because the seed
+is read-only and only specific files are copied, the agents
 reuse your existing logins without the container being able to write back to the
 host. After interactive login *inside* the container, credentials persist in the
-named volume across restarts (and are wiped by `aidc destroy`).
+named volume across restarts (and are wiped by `aidc destroy`) — for opencode,
+until the host grows its own credential file, which then wins on the next
+start.
 
 A couple of agents keep state *outside* the single dir you'd naively persist, so
 the volume mounts are placed deliberately:
@@ -385,7 +392,9 @@ reassigning `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc/common.sh`) in
 **Which agents inherit a host login automatically?** With a host login present,
 Claude (Keychain → tmpfs token), Codex (`~/.codex/auth.json`), Grok
 (`~/.grok/auth.json`), omp (`~/.omp/agent/agent.db`), and OpenCode
-(`~/.local/share/opencode/auth.json`) are all seeded on first `aidc up`, and any
+(`~/.local/share/opencode/auth.json`) are all seeded on `aidc up` — OpenCode's
+on **every** start, so a host re-login or key rotation propagates to new
+sessions without a manual `aidc sync-config opencode` — and any
 in-container login persists in the agent's named volume. **Cursor is the
 exception** — its interactive-login token is stored in the macOS Keychain (not a
 copyable file), so it can't be seeded; authenticate cursor-agent in containers

@@ -64,7 +64,7 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 - mounts project code only at `/workspace`; overlays `/workspace/.devcontainer` read-only inside the container
 - installs the coding agents as native prebuilt binaries — `opencode` by default (slim base); the first agent you invoke on a fresh project is baked into the initial build, and on an existing project invoking a new agent asks y/n before extending the selection and rebuilding only that agent's cached layer (`AIDC_AGENTS=opencode,codex,...`, `all`, or `none` in `.ai-container/project.env`; non-interactive runs extend silently, `AIDC_AUTO_EXTEND_AGENTS=0` disables) — no npm-global, no Node runtime dependency for the agents themselves
 - persists tool state in per-repo Docker volumes instead of mounting whole host homes
-- seeds selected config from host read-only mounts on first startup
+- seeds selected config from host read-only mounts on first startup (opencode's `opencode.json` + `auth.json` re-seed on **every** start — host logins and key rotations reach new sessions without `aidc sync-config`)
 - creates one `CORE_LOGICS` git worktree per repo and mounts it at `/opt/CORE_LOGICS` for shared cross-repo notes
 - detects the project's toolchains (Go, Rust, Ruby, Java, PHP, Node, Python — plus shell scripts) and installs them automatically; `aidc rescan` re-detects later for a repo that started empty
 - shares one `aidc-base` image (OS, Python, scanners, agents) across all projects — each project's image is a thin toolchain delta on top — and keeps Go/Rust/JDK in one read-only `aidc_toolchains` volume (`aidc tools install`) instead of a full copy per project

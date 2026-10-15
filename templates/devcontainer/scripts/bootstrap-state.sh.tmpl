@@ -31,6 +31,37 @@ copy_file_from_seed() {
   chmod "$perms" "$target"
 }
 
+# Re-seed a credential-bearing file from the host on EVERY bootstrap, not just
+# the first. copy_file_from_seed is init-once — in init mode an existing
+# volume copy wins forever — which is right for state the container may have
+# customized, but wrong for credentials: a host-side `opencode auth login` or
+# an apiKey rotated in opencode.json after the first seed never reached new
+# sessions, because the stale volume copy shadowed it (they live in persistent
+# named volumes that container recreation doesn't touch). The host seed wins
+# whenever the host file exists; a missing host file is a no-op, so state that
+# exists only inside the container (an in-container-only login) still
+# survives. Mode-independent: identical on init and sync.
+sync_file_from_seed() {
+  local source="$1"
+  local target="$2"
+  local perms="${3:-0600}"
+
+  [[ -f "$source" ]] || return 0
+  ensure_dir "$(dirname "$target")"
+  # Warn-and-continue, not die: bootstrap-state.sh is the container start
+  # command, and an unwritable volume target (e.g. a root-owned dir
+  # materialized by an older image — the failure class ensure_rtk_data_dir
+  # repairs below) must degrade to the stale copy rather than kill the
+  # session. Same fail-open convention as the python merges in this script.
+  # chmod is inside the guarded chain too: fresh content with stale perms is
+  # the same unwarned-degrade class.
+  if cp "$source" "$target" 2>/dev/null && chmod "$perms" "$target" 2>/dev/null; then
+    :
+  else
+    echo "[bootstrap] could not re-seed $target from $source (unwritable target?) — keeping the existing copy" >&2
+  fi
+}
+
 copy_dir_from_seed() {
   local source="$1"
   local target="$2"
@@ -241,15 +272,24 @@ sync_codex() {
 
 sync_opencode() {
   ensure_dir "$home_dir/.config/opencode"
-  copy_file_from_seed "/host-seed/opencode/opencode.json" "$home_dir/.config/opencode/opencode.json" "0600"
+  # opencode.json carries provider credentials (apiKey/baseURL blocks) and
+  # auth.json IS the credential store — both re-seed from the host on every
+  # start (sync_file_from_seed), so a host-side login or key rotation reaches
+  # new sessions without a manual `aidc sync-config opencode`. Anything the
+  # host copy drops is re-wired right below (permission allows, rtk + review
+  # -gate plugins), so the every-start overwrite is self-healing.
+  sync_file_from_seed "/host-seed/opencode/opencode.json" "$home_dir/.config/opencode/opencode.json" "0600"
   copy_dir_from_seed "/host-seed/opencode/plugins" "$home_dir/.config/opencode/plugins"
   # opencode stores provider credentials in the XDG *data* dir, not the config
   # dir: ~/.local/share/opencode/auth.json. Seed it (and it persists via the
-  # opencode_data_home volume) so a host `opencode auth login` is inherited.
+  # opencode_data_home volume) so a host `opencode auth login` is inherited —
+  # re-applied on every start; a login made only inside the container (no host
+  # auth.json) still survives, since a missing host seed is a no-op.
   ensure_dir "$home_dir/.local/share/opencode"
-  copy_file_from_seed "/host-seed/opencode-data/auth.json" "$home_dir/.local/share/opencode/auth.json" "0600"
-  # Seed the permission allows AFTER the config copy: copy_file_from_seed
-  # overwrites opencode.json in sync mode, which would drop them again.
+  sync_file_from_seed "/host-seed/opencode-data/auth.json" "$home_dir/.local/share/opencode/auth.json" "0600"
+  # Seed the permission allows AFTER the config copy: the host seed overwrite
+  # above drops them on every start, so this re-adds them (merge-only — a
+  # user-set rule, whatever its value, is never clobbered).
   ensure_opencode_permissions
   # rtk ships an opencode plugin (~/.config/opencode/plugins/rtk.ts). Install
   # AFTER the plugins seeding: copy_dir_from_seed rsync --deletes in sync mode,

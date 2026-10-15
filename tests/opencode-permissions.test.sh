@@ -15,7 +15,7 @@
 #   - idempotent: no rewrite when nothing changes
 #   - invalid JSON recovers with defaults; no python3 -> fail open untouched
 #   - sync_opencode wires the seed after the config copy (order matters:
-#     copy_file_from_seed overwrites opencode.json in sync mode)
+#     the every-start host-seed overwrite of opencode.json drops the block)
 #   - the v2 review-gate plugin keeps the event/API surface validated against
 #     opencode 2.0.29 (structural smoke: turn-end triggers, per-session
 #     serialization, v2 prompt shape, no v1-only call shapes)
@@ -172,13 +172,14 @@ else
   fail "no python3: config was modified"
 fi
 
-# 10. sync_opencode wires the seed AFTER the config seed copy (the sync-mode
-#     copy would otherwise wipe the permission block on every sync).
+# 10. sync_opencode wires the seed AFTER the config seed copy (the every-start
+#     host-seed overwrite would otherwise wipe the permission block on every
+#     bootstrap, not just in sync mode).
 if awk '/^sync_opencode\(\)/,/^}/' "$BOOTSTRAP" \
-   | grep -q 'copy_file_from_seed "/host-seed/opencode/opencode.json"' \
+   | grep -q 'sync_file_from_seed "/host-seed/opencode/opencode.json"' \
    && awk '/^sync_opencode\(\)/,/^}/' "$BOOTSTRAP" \
    | grep -q 'ensure_opencode_permissions' \
-   && [[ "$(awk '/^sync_opencode\(\)/,/^}/' "$BOOTSTRAP" | grep -n 'copy_file_from_seed "/host-seed/opencode/opencode.json"\|ensure_opencode_permissions' | head -1 | cut -d: -f1)" \
+   && [[ "$(awk '/^sync_opencode\(\)/,/^}/' "$BOOTSTRAP" | grep -n 'sync_file_from_seed "/host-seed/opencode/opencode.json"\|ensure_opencode_permissions' | head -1 | cut -d: -f1)" \
         -lt "$(awk '/^sync_opencode\(\)/,/^}/' "$BOOTSTRAP" | grep -n 'ensure_opencode_permissions' | cut -d: -f1)" ]]; then
   ok "sync_opencode seeds permissions after the config copy"
 else

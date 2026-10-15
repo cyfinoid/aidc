@@ -8,6 +8,80 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-14 — opencode host-credential re-seed: `opencode.json` + `auth.json` now re-seed on every bootstrap
+
+**Summary:** New sessions in a container could not see credentials the user
+configured at host level (`~/.config/opencode/opencode.json` provider blocks,
+`~/.local/share/opencode/auth.json`) unless they manually ran `aidc sync-config
+opencode`. Root cause: the seed contract was init-once — `copy_file_from_seed`
+returns early in `init` mode when the target exists, and the opencode targets
+live in persistent named volumes — so the first-ever seed shadowed every later
+host change. `sync_opencode` now seeds both credential-bearing files through a
+new mode-independent `sync_file_from_seed`: host wins whenever the host file
+exists; a missing host file is a no-op (in-container-only logins survive).
+
+**Why:** The opencode volumes (`opencode_home`, `opencode_data_home`) exist to
+persist state across container recreation — which is exactly what made the
+staleness permanent: recreation re-runs `bootstrap-state.sh init`, but init-once
+skips anything the volume already has, so a host `opencode auth login` or an
+apiKey rotated in `opencode.json` *after* the first seed never propagated. The
+bind mount itself was never the problem — `/host-seed/opencode` is live and
+showed the new host content all along; only the copy policy was stale. The
+init-once contract remains right for everything the container may legitimately
+customize (settings, plugin dirs — and the post-copy rewiring
+(`ensure_opencode_permissions`, `wire_rtk_opencode`, `wire_aidc_opencode_gate`)
+already re-adds aidc's own additions after any overwrite), but credentials are
+the one file class where the host is unambiguously the source of truth: a stale
+key looks identical to a broken setup, and "run `aidc sync-config` after
+rotating" is exactly the kind of undocumented step that surfaces as "the
+container can't authenticate" weeks later.
+
+**How:**
+
+- New `sync_file_from_seed` in
+  `templates/devcontainer/scripts/bootstrap-state.sh.tmpl`:
+  `copy_file_from_seed` minus the init-once early return, plus a default 0600
+  third argument, plus warn-and-continue on a failed copy — a failed
+  `cp`/`chmod` (unwritable volume target) logs `[bootstrap] could not re-seed
+  …` and keeps the existing copy instead of killing the container start under
+  `set -e` (same fail-open convention as the script's python merges, and the
+  same failure class `ensure_rtk_data_dir` repairs).
+- `sync_opencode` uses it for `/host-seed/opencode/opencode.json` and
+  `/host-seed/opencode-data/auth.json`. Everything else in the function is
+  unchanged (plugins dir stays init-once; permission seeding stays *after* the
+  config overwrite; rtk + review-gate plugins re-wire after the rsync).
+- Other agents untouched: codex/grok/omp/cursor/claude keep init-once + manual
+  `aidc sync-config <tool>`. `aidc sync-config opencode` still works — sync
+  mode already force-overwrote, so it is now merely redundant for these two
+  files.
+
+**Commands:** `bash tests/agent-auth-seed.test.sh` (11 passed) ·
+`bash tests/opencode-permissions.test.sh` (20 passed) · full suite
+`for t in tests/*.test.sh; do bash "$t"; done` — 39/39 suites, 0 failures.
+
+**Verification:** Behavioral cases added to `tests/agent-auth-seed.test.sh`
+before the recorder stubs take over: a host seed overwrites a stale volume copy
+(content + *exact* 0600 mode checked — `find -perm 0600` is bits-set and would
+also match 0644), a missing host seed leaves the volume copy untouched, a
+failing `cp` (shadowed function) degrades to a `[bootstrap] could not re-seed`
+warning with the stale copy kept instead of killing the start, and a structural
+guard asserts `sync_file_from_seed` contains no `$mode` reference (the
+init-once skip must not reappear). The recorder assertions moved from `FILE|`
+to `SYNC|` records; `tests/opencode-permissions.test.sh` case 10 (permission
+seeding must follow the config overwrite) updated to the new call name.
+
+**Notes:** Design choice — host-wins rather than newest-mtime-wins: aidc's own
+permission seeding and opencode's token refresh both rewrite the volume copies,
+so mtime comparison would permanently favor the volume and the bug would
+reappear for any host edit after the first start. Deliberately scoped to
+opencode (the reported case): extending host-wins to codex/grok auth.json is a
+one-line change per tool if it surprises someone the same way, but each tool
+has its own in-container-login tradeoff worth a separate decision. Docs
+updated: `docs/security.md` (seed table prose + the inherit-a-login summary)
+and the README bullet; CHANGELOG entry folded into `[2.5.0]` (pre-tag).
+
+---
+
 ## 2026-10-14 — schema-skip log split: name the mismatch (epoch-ahead vs column drift) and its remedy
 
 **Summary:** When the opencode session merge refuses on schema grounds, the
