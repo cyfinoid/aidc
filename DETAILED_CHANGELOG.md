@@ -109,10 +109,13 @@ assertions so future installer drift fails the BUILD, not the pin check.
   symlinks `$CODEX_INSTALL_DIR/codex` (default `$HOME/.local/bin`). In the
   build stage `HOME=/root`, so everything landed under `/root/…` — outside
   every path the main stage copies.
-- grok (x.ai/cli/install.sh): `GROK_BIN_DIR` is ignored; the versioned
-  binary downloads to `$HOME/.grok/downloads/grok-<platform>` and PATH setup
-  goes through shell rc files a build never sources. The installer exits 0
-  regardless — hence a green build with missing agents.
+- grok (x.ai/cli/install.sh): the installer downloads the versioned binary
+  to `$HOME/.grok/downloads/grok-<platform>` and creates
+  `$GROK_BIN_DIR/{grok,agent}` as SYMLINKS to it. The build-stage `test -x`
+  passed because the target existed inside the stage — but the final image
+  copies only `.local/`, so the copied symlink dangled and the runtime exec
+  failed with "executable file not found in $PATH". (Installer exits 0
+  regardless — green build, missing agent.)
 
 **How:** the grok stage sets `HOME=/home/aidc`, lets the installer run
 best-effort, then installs the downloaded binary from

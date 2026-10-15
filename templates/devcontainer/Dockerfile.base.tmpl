@@ -516,17 +516,25 @@ FROM agent-cursor-agent-${WITH_CURSOR_AGENT} AS sel-cursor-agent
 
 FROM base AS agent-grok-1
 ARG GROK_VERSION
-# Upstream installer behavior (verified 2026-10-15): GROK_BIN_DIR is ignored —
-# the versioned binary downloads to $HOME/.grok/downloads/grok-<platform> and
-# PATH setup goes through shell rc files (absent in a build). Install the
-# downloaded binary into .local/bin ourselves and assert it — a silent skip
-# here is how the CI pin check ended up reporting "executable file not found".
+# Upstream installer behavior (verified 2026-10-15): it downloads the
+# versioned binary to $HOME/.grok/downloads/grok-<platform> and creates
+# $GROK_BIN_DIR/{grok,agent} as SYMLINKS to it. The build-stage test -x
+# passes (the target exists inside the stage), but the main stage copies
+# only .local/ — the copied symlink dangles, and the runtime exec fails
+# with "executable file not found in $PATH". So: run the installer, resolve
+# the symlink, REMOVE it, and install the real binary in its place; the
+# trailing --version assert catches any future installer change.
 RUN mkdir -p /home/aidc/.local/bin /home/aidc/.grok \
     && curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
     && HOME=/home/aidc GROK_BIN_DIR=/home/aidc/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" || true; \
-    src="$(find /home/aidc/.grok/downloads -type f -name 'grok-*' 2>/dev/null | head -1)"; \
-    if [ -n "$src" ]; then install -m 755 "$src" /home/aidc/.local/bin/grok; fi; \
-    test -x /home/aidc/.local/bin/grok
+    src=""; \
+    [ -L /home/aidc/.local/bin/grok ] && src="$(readlink -f /home/aidc/.local/bin/grok)"; \
+    [ -n "$src" ] || src="$(find /home/aidc/.grok/downloads -type f -name 'grok-*' 2>/dev/null | head -1)"; \
+    [ -n "$src" ] && [ -x "$src" ] || { echo "grok: could not locate the installed binary" >&2; exit 1; }; \
+    rm -f /home/aidc/.local/bin/grok; \
+    install -m 755 "$src" /home/aidc/.local/bin/grok; \
+    test -x /home/aidc/.local/bin/grok; \
+    /home/aidc/.local/bin/grok --version
 FROM base AS agent-grok-0
 RUN mkdir -p /home/aidc/.local/bin
 FROM agent-grok-${WITH_GROK} AS sel-grok
