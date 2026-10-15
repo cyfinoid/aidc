@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 
-if [[ -n "${AIDC_LIB_LOADED:-}" ]]; then
+# Double-load guard for THIS process only. Deliberately NOT exported: an
+# exported flag leaks to child processes (e.g. `aidc update` → install.sh →
+# a fresh `bin/aidc sync-claude-aliases`), which must load the lib fresh —
+# the guard made every `aidc update` abort install.sh with
+# "aidc::main: command not found". Keyed on $$ (portable to macOS bash 3.2;
+# BASHPID is 4.0+): same process re-sourcing is a no-op, a child process has
+# a different $$ and loads normally. Do not export this variable.
+if [[ "${AIDC_LIB_LOADED:-}" == "$$" ]]; then
   return 0
 fi
-export AIDC_LIB_LOADED=1
+AIDC_LIB_LOADED=$$
+# shellcheck disable=SC2034  # guard value is the interface, see above
 
 # aidc entry point: loads the modules and dispatches commands.
 # Layering: common first (constants + helpers used everywhere), then the
@@ -24,6 +32,8 @@ AIDC_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$AIDC_LIB_DIR/aidc/runtime.sh"
 # shellcheck source=aidc/sync.sh
 . "$AIDC_LIB_DIR/aidc/sync.sh"
+# shellcheck source=aidc/clean.sh
+. "$AIDC_LIB_DIR/aidc/clean.sh"
 # shellcheck source=aidc/status.sh
 . "$AIDC_LIB_DIR/aidc/status.sh"
 
@@ -41,7 +51,7 @@ aidc::main() {
     # file:line prefix so the trace pinpoints where a run stalls; secrets are
     # suppressed at their source via aidc::secret_begin/secret_end.
     export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
-    printf '[aidc] debug: tracing enabled (file:line prefixed; secret values suppressed)\n' >&2
+    printf '[aidc %s] debug: tracing enabled (file:line prefixed; secret values suppressed)\n' "$(date '+%Y-%m-%d %H:%M:%S')" >&2
     set -x
   fi
 
@@ -74,6 +84,9 @@ aidc::main() {
       ;;
     destroy)
       aidc::cmd_destroy "$@"
+      ;;
+    clean)
+      aidc::cmd_clean "$@"
       ;;
     shell)
       aidc::cmd_shell
@@ -154,7 +167,7 @@ aidc::main() {
 # first letter) before pointing at help and doctor.
 aidc::suggest_command() {
   local cmd="$1"
-  local known="init up down rebuild rescan tools status destroy shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan ci doctor insights update upgrade version help"
+  local known="init up down rebuild rescan tools status destroy clean shell exec claude codex opencode opencode-web grok omp cursor-agent cursor sync-claude-aliases sync-config sync-sessions sbom licenses scan ci doctor insights update upgrade version help"
   local suggestions="" k
   for k in $known; do
     case "$k" in
@@ -184,6 +197,7 @@ Usage:
   aidc tools <install [go|rust|java|all]|status>
   aidc status [--global]
   aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
+  aidc clean [--apply] [--cache] [-f]
   aidc shell
   aidc exec -- <command>...
   aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
@@ -223,7 +237,11 @@ Notes:
     Keychain token read, or the first container build). Secret values (OAuth
     token, profile API keys) are suppressed from the trace.
   - Run commands from the repo root you want to isolate.
-  - Tool commands auto-bootstrap the repo and container if needed.
+  - Tool commands auto-bootstrap the repo and container if needed. The agent
+    you invoke is baked into the image: on a first-ever run it joins the
+    initial build; on an existing project aidc asks y/n before extending
+    AIDC_AGENTS and rebuilding just that agent's layer (non-interactive runs
+    extend silently; AIDC_AUTO_EXTEND_AGENTS=0 requires manual edits).
   - aidc init refuses to run if the repo already has a file at an aidc-managed
     path (e.g. its own scripts/ci/*.sh). Pass -f/--force to adopt the directory
     anyway, overwriting those managed files with the current templates.
@@ -237,6 +255,11 @@ Notes:
   - aidc cursor opens the host Cursor app; reopen the repo in the devcontainer.
   - aidc destroy removes the container, named volumes, and image by default.
     Worktree and scaffold removal are opt-in via the listed flags.
+  - aidc clean reclaims disk from stale aidc images (dry-run by default): old
+    content-hashed aidc-base / aidc-toolchain-store tags left behind by pin
+    bumps and AIDC_AGENTS changes, plus dangling compose-rebuild leftovers.
+    --apply removes (prompt unless -f); --cache also prunes the docker build
+    cache (off by default — the cache keeps rebuilds fast).
   - aidc rescan re-detects project languages (handy once a repo that started
     empty gains code) and rebuilds so the matching toolchains/scanners install.
   - aidc tools install [go|rust|java|all] populates the shared, read-only

@@ -27,7 +27,7 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 # HOME is redirected into TMP_ROOT below, but CLAUDE_CONFIG_DIR is a *sibling*
 # escape hatch: real rtk (and the stub, which mirrors it) honors it over HOME,
-# and compose exports CLAUDE_CONFIG_DIR=/home/vscode/.claude container-wide. Any
+# and compose exports CLAUDE_CONFIG_DIR=/home/aidc/.claude container-wide. Any
 # `rtk init` the wiring tests drive would therefore write through to the real
 # ~/.claude — running this suite in the container used to overwrite the
 # developer's own RTK.md with the stub's placeholder. Redirect it for the whole
@@ -333,7 +333,11 @@ fi
 
 # ── 13-19: host-side sync + merge (lib/aidc/sync.sh) ─────────────────────────
 . "$REPO_ROOT/lib/aidc.sh"
-aidc::log() { :; }
+# Log capture (see sync-sessions.test.sh): the schema-skip line must name the
+# drift table, so record messages instead of discarding them.
+RTK_LOGS="$TMP_ROOT/rtk-messages.log"
+: >"$RTK_LOGS"
+aidc::log() { printf '%s\n' "$*" >>"$RTK_LOGS"; }
 aidc::warn() { :; }
 
 # The sync paths resolve host destinations under $HOME (and the host-db
@@ -353,7 +357,7 @@ stub_translate_argv() {
   local a
   for a in "$@"; do
     case "$a" in
-      /home/vscode|/home/vscode/*) a="$CONTAINER_ROOT${a#/home/vscode}" ;;
+      /home/aidc|/home/aidc/*) a="$CONTAINER_ROOT${a#/home/aidc}" ;;
     esac
     STUB_ARGV+=("$a")
   done
@@ -420,15 +424,23 @@ else
 fi
 
 # 16. Schema drift (container rtk newer): merge refused, quarantine kept, no
-#     snapshot (the gate runs before any host-db write).
+#     snapshot (the gate runs before any host-db write), skip message names
+#     the drifted table.
 sqlite3 "$Q/history.db" "ALTER TABLE commands ADD COLUMN extra_col TEXT;"
 before="$(sqlite3 "$HOST_DB" 'SELECT COUNT(*) FROM commands')"
+: >"$RTK_LOGS"
 aidc::rtk_merge_to_base "$WS" "$Q"
 if [[ "$(sqlite3 "$HOST_DB" 'SELECT COUNT(*) FROM commands')" == "$before" ]] \
    && [[ -f "$Q/history.db" ]] && [[ ! -e "$HOST_DB.aidc-bak" ]]; then
   ok "schema drift refuses the merge, quarantine kept, no leftover snapshot"
 else
   fail "schema-drift case"
+fi
+if grep -Fq "column/type drift on table 'commands'" "$RTK_LOGS" \
+   && ! grep -Fq "schema epoch" "$RTK_LOGS"; then
+  ok "schema-drift skip message names the drifted table"
+else
+  fail "rtk schema-drift message wrong: $(cat "$RTK_LOGS")"
 fi
 
 # 17. No host db at the override: wholesale create (paths already rewritten).
@@ -489,10 +501,10 @@ else
   fail "compose volume"
 fi
 
-# 21b. ...and the image pre-creates its mount point as vscode, which is what
+# 21b. ...and the image pre-creates its mount point as aidc, which is what
 #      makes a fresh volume inherit non-root ownership. Every other volume
 #      target in that mkdir already did; rtk's omission is what broke tracking.
-if grep -q '/home/vscode/.local/share/rtk' "$REPO_ROOT/templates/devcontainer/Dockerfile.base.tmpl"; then
+if grep -q '/home/aidc/.local/share/rtk' "$REPO_ROOT/templates/devcontainer/Dockerfile.base.tmpl"; then
   ok "base image pre-creates the rtk data dir"
 else
   fail "rtk data dir not pre-created in image"

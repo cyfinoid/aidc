@@ -1,0 +1,10 @@
+# Keep the GitHub Actions pinned SHAs current: weekly update PRs bump the
+# pinned commit SHAs (and their version comments) for every action in
+# .github/workflows/. Human review still required — Dependabot cannot run
+# the workflows, so the first CI run on the bump PR is the validation.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

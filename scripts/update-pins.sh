@@ -101,8 +101,21 @@ pin_agents() {
   fi
   v="$(latest_tag openai/codex)"; v="${v#rust-v}"
   [[ -n "$v" ]] && { add_pin "CODEX_VERSION" "$v"; note "codex -> $v"; }
-  v="$(latest_tag anomalyco/opencode)"; v="${v#v}"
-  [[ -n "$v" ]] && { add_pin "OPENCODE_VERSION" "$v"; note "opencode -> $v"; }
+  # opencode v2 is NOT released via the anomalyco/opencode GitHub releases
+  # (that channel serves the v1 line, still active); the v2 line ships through
+  # npm (@opencode/cli-*) and its latest version comes from the vendor's
+  # update API. The Dockerfile installs from https://opencode.ai/v2/install,
+  # which accepts the same VERSION env pin.
+  v="$(curl -fsSL https://opencode.ai/update/api/latest/cli/npm 2>/dev/null || true)"
+  v="$(printf '%s' "$v" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p')"
+  # Anchored both ends: a stable x.y.z only — a pre-release served by the
+  # channel (e.g. 2.0.30-rc.1) or spaced/garbage JSON degrades to warn+skip
+  # rather than pinning something the Dockerfile pin comment doesn't promise.
+  if [[ "$v" =~ ^2\.[0-9]+\.[0-9]+$ ]]; then
+    add_pin "OPENCODE_VERSION" "$v"; note "opencode (v2) -> $v"
+  else
+    echo "warn: could not resolve latest opencode v2 (skipped)" >&2
+  fi
   v="$(latest_tag can1357/oh-my-pi)"; v="${v#v}"
   [[ -n "$v" ]] && { add_pin "OMP_VERSION" "$v"; note "omp -> $v"; }
   v="$(curl -fsSL https://x.ai/cli/stable 2>/dev/null || true)"

@@ -12,9 +12,11 @@
 # aidc::ensure_toolchain_image; the volume is populated by
 # aidc::ensure_toolchain_volume.
 #
-# Pinned by digest (same base as Dockerfile.base). To repin: `docker pull
-# <ref>:<tag>` then read the "Digest:" line.
-ARG AIDC_TOOLCHAIN_BASE=mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
+# Pinned by digest (same base as Dockerfile.base — stock ubuntu:26.04; the
+# curl/ca-certificates install below replaces what the retired devcontainers
+# base provided). To repin: `docker pull <ref>:<tag>` then read the "Digest:"
+# line.
+ARG AIDC_TOOLCHAIN_BASE=ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78
 FROM ${AIDC_TOOLCHAIN_BASE}
 
 ARG AIDC_TOOLCHAIN
@@ -23,6 +25,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 USER root
 
 RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl; \
+    rm -rf /var/lib/apt/lists/*; \
     ARCH="$(dpkg --print-architecture)"; \
     case "$ARCH" in \
       amd64) GOARCH="amd64"; JDKARCH="x64" ;; \

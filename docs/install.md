@@ -64,6 +64,8 @@ aidc up            # build + start container
 | `aidc tools install [go\|rust\|java\|all]` | populate the shared read-only toolchain volume |
 | `aidc tools status` | show which shared toolchains are installed |
 | `aidc destroy` | remove container + volumes + image (prompts; `-f` to skip) |
+| `aidc clean` | reclaim disk from stale `aidc-base`/toolchain-store images + dangling leftovers (dry-run by default; `--apply` to remove, `--cache` to also prune the build cache) |
+| `scripts/image-size-report.sh` | per-layer + per-component disk breakdown of the shared base image (measure slimming experiments) |
 
 ## What lives where (inside the container)
 
@@ -71,20 +73,22 @@ aidc up            # build + start container
 /workspace                       your repo (rw bind)
 /workspace/.devcontainer         scaffold (ro bind)
 /opt/CORE_LOGICS                 shared cross-repo notes (rw, git worktree)
-/home/vscode/.claude             Claude state (named volume; CLAUDE_CONFIG_DIR keeps .claude.json here too)
-/home/vscode/.codex              Codex state (named volume)
-/home/vscode/.config/opencode    OpenCode config (named volume)
-/home/vscode/.local/share/opencode  OpenCode auth + sessions — XDG data dir (named volume)
-/home/vscode/.grok               Grok state (named volume)
-/home/vscode/.omp                omp (oh-my-pi) state (named volume)
-/home/vscode/.cursor             Cursor CLI (cursor-agent) config/login (named volume)
+/home/aidc/.claude             Claude state (named volume; CLAUDE_CONFIG_DIR keeps .claude.json here too)
+/home/aidc/.codex              Codex state (named volume)
+/home/aidc/.config/opencode    OpenCode config (named volume)
+/home/aidc/.local/share/opencode  OpenCode auth + sessions — XDG data dir (named volume)
+/home/aidc/.grok               Grok state (named volume)
+/home/aidc/.omp                omp (oh-my-pi) state (named volume)
+/home/aidc/.cursor             Cursor CLI (cursor-agent) config/login (named volume)
 /commandhistory                  bash + zsh history (named volume)
 /host-seed/{claude,codex,opencode,grok,omp,cursor,gitconfig}   read-only host seeds
 ```
 
-`GIT_CONFIG_GLOBAL=/home/vscode/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).
+`GIT_CONFIG_GLOBAL=/home/aidc/.gitconfig.local` — host gitconfig is seed-only, in-container `git config --global` writes land in the overlay (ephemeral across rebuilds).
 
-Session transcripts sync **back to the host** (`aidc sync-sessions`, plus auto-sync on container start / agent exit / `down` / `destroy`): claude → `~/.claude/projects/`, codex → `~/.codex/sessions/`, grok → `~/.grok/sessions/`, omp → `~/.omp/agent/sessions/`, and opencode → `~/.local/share/aidc/sessions/opencode/<repo-slug>/`. The opencode copy is per-project, excludes `auth.json` (credentials never leave the container), and keeps `opencode.db` (or `storage/` on older builds).
+Session transcripts sync **back to the host** (`aidc sync-sessions`, plus auto-sync on container start / agent exit / `down` / `destroy`): claude → `~/.claude/projects/`, codex → `~/.codex/sessions/`, grok → `~/.grok/sessions/`, omp → `~/.omp/agent/sessions/`, and opencode → `~/.local/share/aidc/sessions/opencode/<repo-slug>/`. The opencode copy is per-project and **credential-free by direction**: `auth.json` is excluded from the tar, and — because opencode v2 keeps provider logins inside `opencode.db` (`credential`/`account` tables) — auth tables are scrubbed from the synced db copy (secure-deleting DELETEs; requires host `sqlite3`; the sync warns if absent) and excluded from the host-ward db merge. Only sessions travel; container auth state never reaches the host (host credentials are the source of truth, seeded container-ward).
+
+**Auth seeding, host → container (one-way).** opencode v2 keeps provider logins in `opencode.db`, not `auth.json`, so on every start the host writes a small auth snapshot (`.aidc-auth-seed.json` — auth tables only, 0600, next to your own `auth.json`) and the container's bootstrap applies it into the repo's volume db: fresher-wins upsert on `time_updated` (a host re-login propagates; a fresher container-side token refresh is never downgraded), counts logged, values never. `AIDC_OPENCODE_SYNC_AUTH=0` disables both halves. Fallback for a pre-v2 container volume: `opencode auth login` inside the container (device-code flow — open the printed URL on the host); the credential persists in the repo's volume.
 
 opencode sessions are **additionally merged into the host's own data dir** (`~/.local/share/opencode/`) so session viewers reading the default location (e.g. agent-sessions) see container sessions without being pointed elsewhere. The merge is **additive and non-destructive**: legacy `storage/` JSON is folder-copied per session file, and `opencode.db` rows are inserted with `INSERT OR IGNORE` (existing host rows always win on a session-id collision). Before touching the host db, aidc snapshots it (a `.aidc-bak` sidecar, also a busy/lock probe) and verifies the container's and host's opencode schemas match — on any mismatch, lock, or missing `sqlite3` it logs and skips, leaving only the per-project quarantine copy. Requires `sqlite3` on the **host**. Opt out (keep only the per-project copy) with `AIDC_OPENCODE_MERGE_TO_BASE=0`.
 
@@ -126,15 +130,31 @@ aidc's image is split so N projects don't each carry a full ~3 GB copy:
   what's present). Because it's read-only and shared, revoke a bad toolchain once
   with `docker volume rm aidc_toolchains` and repopulate.
 
+> **Don't panic at the images tab (OrbStack/Docker Desktop).** Every thin image
+> is listed at ~the base's size (e.g. one `aidc_<project>-…:latest` per project,
+> each "3.4 GB") because per-image size is the sum of its layers and the shared
+> base layers are counted once *per image*. On disk they are stored once —
+> `docker system df` shows the deduplicated truth (look at the Images row's
+> `SIZE` vs the sum of the tab, and `SHARED SIZE`). Real extra copies are only
+> the orphaned `aidc-base:<oldhash>` tags left by pin bumps and selection
+> changes — `aidc clean` lists and reclaims those.
+
 **Override** in `.ai-container/project.env`:
 
 ```bash
 AIDC_TOOLCHAINS=go,ruby      # force-install this list, ignore detection
 AIDC_TOOLCHAINS=             # disable installs entirely (empty value, still set)
-AIDC_AGENTS=claude,codex     # slim the shared base to only these agents (builds
-                             #   a base variant). Default 'all' bakes in every
-                             #   agent once in the shared base (issue #7), so the
-                             #   per-project cost of all agents is already zero.
+AIDC_AGENTS=opencode,codex   # agents baked into the shared base. Default is
+                             #   'opencode' only — each extra agent costs
+                             #   ~100-200MB. Agents build in per-agent layers,
+                             #   so adding one later is a one-layer rebuild:
+                             #   the first agent you invoke on a fresh project
+                             #   is baked into the initial build; afterwards
+                             #   'aidc <tool>' asks y/n before extending this
+                             #   file (silent in non-interactive runs; or set
+                             #   AIDC_AGENTS=all / =none).
+                             #   AIDC_AUTO_EXTEND_AGENTS=0 requires manual
+                             #   AIDC_AGENTS edits instead.
 AIDC_NO_BUILD=1              # never build implicitly — 'aidc up' fails fast if
                              #   the image is missing (build it with 'aidc rebuild')
 AIDC_BASE_IMAGE=my-base:tag  # pin a custom shared base instead of the built
@@ -155,7 +175,7 @@ sudo apt-get install -y --no-install-recommends golang-go
 go install golang.org/x/tools/gopls@latest
 ```
 
-Runs as `vscode` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/rtk) stay cached.
+Runs as `aidc` at image build time, with passwordless `sudo` available for system packages. The `COPY` is the last layer in the Dockerfile, so edits invalidate **only** the project-setup layer — the heavy base layers (apt, uv/Python, native agent binaries, pmg/vet/rtk) stay cached.
 
 After editing, run `aidc rebuild` to pick up the change — `aidc up` and the agent commands build only when the image is **missing** (fast path), so they won't rebuild an existing image on their own.
 
@@ -169,4 +189,7 @@ aidc destroy                                 # wipe container + volumes + image
 aidc destroy --purge-worktree                # also drop ~/.local/share/aidc/core-worktrees/<slug> and its branch
 aidc destroy --purge-scaffold                # also remove .devcontainer/, .ai-container/, CLAUDE.md, AGENTS.md, cursor rule
 aidc destroy -f --purge-worktree --purge-scaffold   # full uninstall for this repo, no prompt
+aidc clean                                   # host-wide: list stale aidc-base / toolchain-store images (dry run)
+aidc clean --apply                           # remove them (prompt; -f skips)
+aidc clean --apply --cache                   # also prune the docker build cache (rebuilds get slower)
 ```

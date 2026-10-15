@@ -22,7 +22,7 @@ jobs:
       # the license gate is clean here — fail mode doubles as a regression guard.
       AIDC_LICENSE_MODE: fail
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install syft + grype (same pins as the image)
         run: |
@@ -46,7 +46,7 @@ jobs:
 
       - name: Upload SBOM artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom
           path: sbom/
@@ -59,12 +59,12 @@ jobs:
   image-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Restore buildx layer cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/.buildx-cache
           key: aidc-image-buildx-${{ hashFiles('templates/devcontainer/Dockerfile.tmpl', 'templates/devcontainer/Dockerfile.base.tmpl') }}
@@ -96,9 +96,18 @@ jobs:
           # Image split (issue #7): build the shared base first, then the thin
           # per-project layer FROM it.
           docker buildx build \
+            --build-arg AIDC_AGENTS=all \
+            --build-arg WITH_CLAUDE=1 --build-arg WITH_CODEX=1 --build-arg WITH_OPENCODE=1 \
+            --build-arg WITH_CURSOR_AGENT=1 --build-arg WITH_GROK=1 --build-arg WITH_OMP=1 \
             --cache-from type=local,src=/tmp/.buildx-cache \
             --cache-to type=local,dest=/tmp/.buildx-cache-new,mode=max \
             --load -t aidc-base:ci -f work/Dockerfile.base work
+          # All six WITH_* flags on purpose: the remaster base builds agents in
+          # per-agent conditional stages (default: opencode only), but this CI
+          # build must bake EVERY pinned agent so check-image-pins.sh can
+          # verify all of them (codex, grok, omp would otherwise be absent
+          # and "fail" their probes). The WITH_* mapping mirrors
+          # aidc::agents_build_flags (lib/aidc/runtime.sh).
           # The thin layer is `FROM ${AIDC_BASE_IMAGE}` = aidc-base:ci, which
           # only exists in the *daemon's* image store (that is what --load
           # above puts it in). setup-buildx-action selects a docker-container
@@ -139,7 +148,7 @@ jobs:
 
       - name: Upload scan report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: grype-image-report
           path: grype-report.txt

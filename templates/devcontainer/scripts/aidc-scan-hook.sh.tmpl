@@ -46,12 +46,24 @@ log() {
     >>"$WS/.ai-container/scan-hook.log" 2>/dev/null || true
 }
 
-# Debounce: if the tree is byte-identical to the last CLEAN pass, skip.
+# Debounce: if the tree is byte-identical to the last CLEAN pass, skip. The
+# signature must be content-sensitive for untracked files too: they show up
+# in `git status` as a bare `?? path` line, so each untracked file's content
+# is mixed into the hash (sorted, for order stability) — otherwise a file
+# edited after a clean pass would ride the old debounce past the scanner.
 cache_dir="${HOME:-/tmp}/.cache/aidc"
 mkdir -p "$cache_dir" 2>/dev/null || true
 state_file="$cache_dir/scan-hook-clean.hash"
-tree_hash="$({ git diff HEAD 2>/dev/null; printf '%s' "$changes"; } | sha256sum | cut -d' ' -f1)"
-if [[ -f "$state_file" && "$(cat "$state_file" 2>/dev/null)" == "$tree_hash" ]]; then
+tree_hash="$(
+  {
+    git diff HEAD 2>/dev/null
+    printf '%s' "$changes"
+    while IFS= read -r -d '' f; do
+      sha256sum -- "$f" 2>/dev/null || true
+    done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
+  } | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+)"
+if [[ -n "$tree_hash" && -f "$state_file" && "$(cat "$state_file" 2>/dev/null)" == "$tree_hash" ]]; then
   exit 0
 fi
 

@@ -1,5 +1,9 @@
 # aidc
 
+[![Release](https://img.shields.io/github/v/release/cyfinoid/aidc)](https://github.com/cyfinoid/aidc/releases/latest)
+[![tests](https://github.com/cyfinoid/aidc/actions/workflows/tests.yml/badge.svg)](https://github.com/cyfinoid/aidc/actions/workflows/tests.yml)
+[![shellcheck](https://github.com/cyfinoid/aidc/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/cyfinoid/aidc/actions/workflows/shellcheck.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cyfinoid/aidc/badge)](https://api.scorecard.dev/projects/github.com/cyfinoid/aidc)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status)
 [![macOS only](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#prereqs)
@@ -7,6 +11,15 @@
 **aidc** — short for **AI Dev Container** — is a one-command devcontainer wrapper for AI coding agents (`claude`, `codex`, `opencode`, `grok`, `omp`, `cursor-agent`). It scaffolds a hardened Linux container per repo, mounts your code at `/workspace`, persists agent state in named Docker volumes (so agents don't read your `~/.ssh` or your shell history), and bakes in always-on security scanners and supply-chain guardrails.
 
 If you're already running these agents directly on your Mac and have been quietly nervous about it, this is for you.
+
+## What's new in v3.0.0
+
+First tagged release — highlights (full notes in [`CHANGELOG.md`](CHANGELOG.md); the in-flight 2.6.0/2.7.0 labels from development were never released — everything ships here):
+
+- **Host logins now seed container-ward — the missing half of the credential contract.** opencode v2 keeps logins in its database, so the file seed couldn't carry them: the host now writes a small auth snapshot on every start and the container applies it into its volume db (fresher-wins upsert, values never logged) — **and fresh folders get it on the very first run** (bootstrap initializes the db with a one-shot headless opencode run, then applies the snapshot before the session starts). `AIDC_OPENCODE_SYNC_AUTH=0` opts out.
+- **Credentials flow one way: host → container, never back.** The session sync's db merge previously could carry container credential rows into the host's own db; it now skips auth tables entirely and the synced db copy is scrubbed before it rests on host disk — with secure-delete, so the secret isn't recoverable.
+- **Host config re-seeds on every container start** (opencode `opencode.json` + `auth.json`): a host-side key rotation reaches new sessions without `aidc sync-config`.
+- **The unit suites run in CI** — 40 hermetic test suites on every push/PR — and all aidc/bootstrap messages are timestamped for triage.
 
 ## Status
 
@@ -62,16 +75,17 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 
 - creates local-only `.devcontainer/`, `.ai-container/`, `CLAUDE.md`, `AGENTS.md`, and `.cursor/rules/00-core-logics.mdc`
 - mounts project code only at `/workspace`; overlays `/workspace/.devcontainer` read-only inside the container
-- installs the coding agents (`claude`, `codex`, `opencode`, `grok`, `omp`) as native prebuilt binaries — no npm-global, no Node runtime dependency for the agents themselves
+- installs the coding agents as native prebuilt binaries — `opencode` by default (slim base); the first agent you invoke on a fresh project is baked into the initial build, and on an existing project invoking a new agent asks y/n before extending the selection and rebuilding only that agent's cached layer (`AIDC_AGENTS=opencode,codex,...`, `all`, or `none` in `.ai-container/project.env`; non-interactive runs extend silently, `AIDC_AUTO_EXTEND_AGENTS=0` disables) — no npm-global, no Node runtime dependency for the agents themselves
 - persists tool state in per-repo Docker volumes instead of mounting whole host homes
-- seeds selected config from host read-only mounts on first startup
+- seeds selected config from host read-only mounts on first startup (opencode's `opencode.json` + `auth.json` re-seed on **every** start — host logins and key rotations reach new sessions without `aidc sync-config`)
 - creates one `CORE_LOGICS` git worktree per repo and mounts it at `/opt/CORE_LOGICS` for shared cross-repo notes
 - detects the project's toolchains (Go, Rust, Ruby, Java, PHP, Node, Python — plus shell scripts) and installs them automatically; `aidc rescan` re-detects later for a repo that started empty
 - shares one `aidc-base` image (OS, Python, scanners, agents) across all projects — each project's image is a thin toolchain delta on top — and keeps Go/Rust/JDK in one read-only `aidc_toolchains` volume (`aidc tools install`) instead of a full copy per project
 - bakes always-on security scanners (`semgrep`, `gitleaks`, `trufflehog`) plus per-toolchain linters (`gosec`, `bandit`, `cargo-audit`, `bundler-audit`, `shellcheck`) into the image
+- enforces a pre-completion review ritual for semantic bugs (the class deterministic scanners miss): a seeded checklist + `aidc-review-record`, mechanically gated on every hookable agent — Claude Code (Stop hook), opencode (`session.idle` plugin), cursor-agent (`stop` hook) — blocking "done" until the changed code has been reviewed and re-arming on any later edit
 - seeds non-negotiable guidance into `CLAUDE.md` / `AGENTS.md` for every project — security guardrails, test-coverage discipline, and changelog/session-log conventions
 - seeds committed project docs once, never overwriting your edits — `CHANGELOG.md`, `DETAILED_CHANGELOG.md`, and a `logs/` session journal
-- auto-syncs in-container agent session transcripts back to the host on container start and exit, so the host's `/insights` stays current
+- auto-syncs in-container agent session transcripts back to the host on container start and exit, so the host's `/insights` stays current — **credentials travel the other way only**: host auth seeds container-ward, and container auth state (opencode v2 keeps logins in its db) is scrubbed from synced copies and excluded from the host-ward merge, so it never reaches the host
 - ships SafeDep's `pmg` / `vet` for supply-chain interception and `rtk` for token-saving CLI proxying — rtk is wired into every agent it supports (claude, opencode, cursor-agent, omp experimentally), prints a savings summary when a Claude session ends, persists its history across rebuilds, and merges container savings into the host's own rtk db so a plain host `rtk gain` shows the combined total
 - offers an opt-in default-deny egress firewall with a sane allowlist
 
@@ -100,6 +114,7 @@ aidc rescan
 aidc tools <install [go|rust|java|all]|status>
 aidc status [--global]
 aidc destroy [-f] [--purge-worktree] [--purge-scaffold]
+aidc clean [--apply] [--cache] [-f]
 aidc shell
 aidc exec -- <command>...
 aidc claude [--profile NAME] [--provider NAME] [--list-profiles] [-- ...]
@@ -128,11 +143,11 @@ aidc version
 
 `aidc rescan` re-detects the project's languages and rebuilds, so a repo that started empty (or single-language) picks up the matching toolchains and security scanners once code lands. `shellcheck` installs automatically when shell scripts are present.
 
-Session transcripts auto-sync from the container to the host on container start, agent exit, `aidc down`, and `aidc destroy` (before its volumes are removed), so `/insights` on the host stays current without a manual `aidc sync-sessions`. The start sync is the safety net for ungraceful exits (crash / `docker kill`) that the on-exit hooks miss — it catches up anything left in the volume.
+Session transcripts auto-sync from the container to the host on container start, agent exit, `aidc down`, and `aidc destroy` (before its volumes are removed), so `/insights` on the host stays current without a manual `aidc sync-sessions`. The start sync is the safety net for ungraceful exits (crash / `docker kill`) that the on-exit hooks miss — it catches up anything left in the volume. All trigger points share one code path, and the agent-exit sync re-reads its session-sync module (where the sync and merge logic lives) from disk, so a fix there applies even to a session that started before it landed. **Credentials are one-way by contract.** Host-ward: host auth seeds container-ward on every start — including opencode v2 logins, which live in the host's db and reach the container through a small auth snapshot applied at bootstrap (fresher-wins; `AIDC_OPENCODE_SYNC_AUTH=0` opts out). Container-ward: opencode v2's container-side auth state is scrubbed from the synced copy and never merged into the host's db.
 
 Toggle it with `AIDC_AUTO_SYNC_SESSIONS`: set it host-wide in `~/.config/aidc/config.env` (universal default for every project) or per project in `.ai-container/project.env` (overrides the global default). `0` disables auto-sync; manual `aidc sync-sessions` always works regardless.
 
-`aidc opencode-web` gives opencode its "desktop feeling" inside the container: it runs opencode's browser UI (`opencode web`) and publishes it on the **host loopback** at `http://127.0.0.1:4096/` (change with `--port N` or `AIDC_OPENCODE_WEB_PORT`), so a host browser drives an agent that lives in the reproducible container — while the LAN never sees it (opencode binds `0.0.0.0` *inside* the container; the host publish is `127.0.0.1`-only). Auth is on by default: a random `OPENCODE_SERVER_PASSWORD` is generated and printed (set your own by exporting it first; `--username` overrides the default `opencode` user). `--no-auth` disables it — safe only because the port is loopback-only. Opting in (re)creates the container to add the port, exactly like the firewall/hardened overrides; a later plain `aidc <tool>` recreates it back without the port.
+`aidc opencode-web` gives opencode its "desktop feeling" inside the container: it runs opencode's server + browser UI (`opencode serve` on v2) and publishes it on the **host loopback** at `http://127.0.0.1:4096/` (change with `--port N` or `AIDC_OPENCODE_WEB_PORT`), so a host browser drives an agent that lives in the reproducible container — while the LAN never sees it (opencode binds `0.0.0.0` *inside* the container; the host publish is `127.0.0.1`-only). v2 always enforces a server password: a random `OPENCODE_PASSWORD` is generated and printed (set your own by exporting it first; the v1-era `OPENCODE_SERVER_PASSWORD` name still works). The scheme is password-only — `--username` is accepted for compatibility but ignored — and `--no-auth` now just lets opencode mint and print its own password (v2 has no authless mode). Opting in (re)creates the container to add the port, exactly like the firewall/hardened overrides; a later plain `aidc <tool>` recreates it back without the port.
 
 `--provider` remains as a compatibility alias for `--profile`.
 
@@ -202,7 +217,7 @@ echo "AIDC_ISOLATE_VM=1" >> .ai-container/project.env
 
 - Generated files are added to `.git/info/exclude` when the target directory is a git repo, so your project stays clean. The seeded project docs (`CHANGELOG.md`, `DETAILED_CHANGELOG.md`, `logs/`) are *not* excluded — they belong to your repo and are meant to be committed.
 - **Updating**: `aidc update` pulls the latest aidc (ff-only) and re-runs the installer; `aidc upgrade` then brings an existing project's scaffold up to the new templates — it shows a diff first, backs up anything it rewrites (to `.ai-container/backup/`), and never touches user-owned files. Implicit commands (`aidc up`, `aidc claude`, …) only *create missing* scaffold files and print a one-line notice when the scaffold is out of date; they never rewrite your files. `aidc doctor` diagnoses common setup problems.
-- Settings can be set host-wide in `~/.config/aidc/config.env` (universal defaults for every project) or per project in `.ai-container/project.env`, which overrides the global default. Both files are sourced for env vars like `AIDC_AUTO_SYNC_SESSIONS`, `AIDC_ENABLE_EGRESS_FIREWALL`, and `AIDC_ISOLATE_VM`.
+- Settings can be set host-wide in `~/.config/aidc/config.env` (universal defaults for every project) or per project in `.ai-container/project.env`, which overrides the global default. Both files are sourced for env vars like `AIDC_AUTO_SYNC_SESSIONS`, `AIDC_OPENCODE_SYNC_AUTH`, `AIDC_ENABLE_EGRESS_FIREWALL`, and `AIDC_ISOLATE_VM`.
 - Container egress is open by default; set `AIDC_ENABLE_EGRESS_FIREWALL=1` in `.ai-container/project.env` for a default-deny allowlist. See [`docs/security.md`](docs/security.md#optional-egress-firewall).
 - The host-clipboard bridge is **off by default** — no host clipboard socket is mounted into the container. Opt in per (re)create with `aidc up --clipboard` / `aidc rebuild --clipboard`, or persist `AIDC_ENABLE_CLIPBOARD=1` in `.ai-container/project.env`. See [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md).
 - Per-project VM isolation (`--isolate-vm`) is **off by default** due to resource cost. Opt in per (re)create with `aidc up --isolate-vm` / `aidc rebuild --isolate-vm`, or persist `AIDC_ISOLATE_VM=1` in `.ai-container/project.env`. See [Isolation modes](#isolation-modes) above.

@@ -197,7 +197,7 @@ aidc::compose_exec() {
 # since `aidc ci` execs the script directly. Idempotent; non-fatal on failure.
 aidc::ensure_tool_links() {
   local workspace="$1"
-  local home="${AIDC_CONTAINER_HOME:-/home/vscode}"
+  local home="${AIDC_CONTAINER_HOME:-/home/aidc}"
   aidc::compose "$workspace" exec -T workspace sh -c '
     mkdir -p "$1/.local/bin"
     for name in aidc-scan aidc-ci; do
@@ -360,17 +360,21 @@ aidc::cmd_opencode() {
 }
 
 # 'aidc opencode-web' — the opencode "desktop feeling" (issue #5). Runs
-# `opencode web` (headless server + browser UI) inside the container and
-# publishes its port on the HOST LOOPBACK (127.0.0.1) via the
-# compose.opencode-web.yaml override, so the host browser reaches the agent
-# while the LAN cannot. opencode binds 0.0.0.0 *inside* the container (needed
-# for the forwarded port to reach it). Auth is on by default: a random
-# OPENCODE_SERVER_PASSWORD is generated (unless one is already set or --no-auth
-# is passed) and delivered by env-key reference (never on any argv).
+# `opencode serve` (v2 API + web UI; v1's `opencode web` was renamed in v2)
+# inside the container and publishes its port on the HOST LOOPBACK
+# (127.0.0.1) via the compose.opencode-web.yaml override, so the host
+# browser reaches the agent while the LAN cannot. opencode binds 0.0.0.0
+# *inside* the container (needed for the forwarded port to reach it).
+# Auth: v2 ALWAYS enforces a server password — a random OPENCODE_PASSWORD is
+# generated (unless one is already set) and delivered by env-key reference
+# (never on any argv). --no-auth can no longer disable auth outright (v2 has
+# no authless mode): it now just lets opencode mint and print its own
+# password on startup.
 #   --port N        listen/publish port (default 4096; 1024-65535)
-#   --no-auth       start without a server password (LAN-safe only via loopback)
-#   --username NAME HTTP basic-auth username (default: opencode)
-#   -- <args...>    extra flags passed through to `opencode web`
+#   --no-auth       let opencode generate + print its own password (v2 always
+#                   authenticates; loopback-only publishing still applies)
+#   --username NAME accepted for compatibility, ignored (v2 is password-only)
+#   -- <args...>    extra flags passed through to `opencode serve`
 aidc::cmd_opencode_web() {
   local port="${AIDC_OPENCODE_WEB_PORT:-4096}"
   local auth=1
@@ -404,6 +408,7 @@ aidc::cmd_opencode_web() {
         ;;
     esac
   done
+  [[ -z "$username" ]] || aidc::warn "--username is ignored: opencode v2 'serve' is password-only (no basic-auth username)"
 
   # Validate the port before it reaches compose interpolation / the exec argv.
   case "$port" in
@@ -440,38 +445,42 @@ aidc::cmd_opencode_web() {
     # Generate a password only if the caller hasn't supplied one. Kept out of
     # any xtrace; delivered to the exec by env-key reference, never on argv.
     aidc::secret_begin
-    if [[ -z "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
-      OPENCODE_SERVER_PASSWORD="$(aidc::gen_web_password)"
-      export OPENCODE_SERVER_PASSWORD
+    # v1's OPENCODE_SERVER_PASSWORD is honored when set (compat).
+    if [[ -n "${OPENCODE_PASSWORD:-}" ]]; then
+      :
+    elif [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]]; then
+      OPENCODE_PASSWORD="$OPENCODE_SERVER_PASSWORD"
+      export OPENCODE_PASSWORD
+      aidc::warn "using OPENCODE_SERVER_PASSWORD's value as v2's OPENCODE_PASSWORD (v1 name kept working)"
+    else
+      OPENCODE_PASSWORD="$(aidc::gen_web_password)"
+      export OPENCODE_PASSWORD
     fi
     aidc::secret_end
-    AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_SERVER_PASSWORD")
-    if [[ -n "$username" ]]; then
-      export OPENCODE_SERVER_USERNAME="$username"
-      AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_SERVER_USERNAME")
-    fi
+    AIDC_EXEC_ENV_ARGS+=("-e" "OPENCODE_PASSWORD")
     aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only)"
-    aidc::log "  username: ${username:-opencode}"
     aidc::secret_begin
-    aidc::log "  password: $OPENCODE_SERVER_PASSWORD"
+    aidc::log "  password: $OPENCODE_PASSWORD"
     aidc::secret_end
   else
-    aidc::warn "opencode web starting WITHOUT auth (--no-auth): anyone who can reach 127.0.0.1:$port on this host can drive the agent"
-    aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only, no auth)"
+    aidc::warn "opencode v2 always enforces a server password; --no-auth now means opencode mints and prints its own on startup"
+    aidc::log "opencode web UI: http://127.0.0.1:$port/  (loopback only; opencode-generated password printed on startup)"
   fi
 
-  local -a command=("opencode" "web" "--port" "$port" "--hostname" "0.0.0.0")
+  local -a command=("opencode" "serve" "--port" "$port" "--hostname" "0.0.0.0")
   if [[ ${#args[@]} -gt 0 ]]; then
     command+=("${args[@]}")
   fi
 
   local rc=0
   aidc::compose_exec "$workspace" "${command[@]}" || rc=$?
-  aidc::auto_sync_sessions "$workspace" opencode
+  # On-disk sync code (serve sessions are long-lived; see
+  # aidc::auto_sync_sessions_fresh).
+  aidc::auto_sync_sessions_fresh "$workspace" opencode
   return "$rc"
 }
 
-# Random 32-hex-char secret for OPENCODE_SERVER_PASSWORD. Prefers openssl; falls
+# Random 32-hex-char secret for opencode's OPENCODE_PASSWORD. Prefers openssl; falls
 # back to /dev/urandom so it works on hosts without openssl. The fallback reads a
 # fixed 16 bytes with head as the *consumer* (head -c 16 /dev/urandom | …) so it
 # can't trip the SIGPIPE that `tr </dev/urandom | head` raises under
@@ -507,6 +516,236 @@ aidc::cmd_cursor() {
   aidc::log "aidc prepares the env automatically (initializeCommand runs 'aidc up': .env, base image, volumes)"
 }
 
+# True when the effective AIDC_AGENTS selection already carries the agent
+# (or 'all'). Requires the selection to be loaded first — run_tool calls
+# ensure_workspace_ready before any decision below. Empty/unset selection
+# resolves to the 'opencode' default, matching export_compose_env.
+aidc::selection_includes() {
+  local tool="$1"
+  local current="${AIDC_AGENTS:-opencode}"
+  case ",$current," in
+    *,all,*|*",$tool,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# True when this workspace has already been materialized on the Docker engine:
+# a container exists (any state) or the per-project thin image was built.
+# False only on a genuinely first-ever run — the signal run_tool uses to bake
+# the invoked agent into the initial build instead of the build→probe→rebuild
+# dance. Call AFTER vm_ensure (isolate-vm) so ps/inspect hit the VM's engine.
+aidc::workspace_materialized() {
+  local workspace="$1"
+  [[ -n "$(aidc::compose_capture "$workspace" ps -aq workspace 2>/dev/null)" ]] && return 0
+  aidc::image_exists "$workspace"
+}
+
+# Probe-only: does the requested agent binary exist in the project's image?
+# Non-agent tool names pass through. One exec per launch (~100ms) — cheap
+# next to an agent session. The die-with-fix behavior lives in run_tool, which
+# decides between the install prompt (interactive) and silent auto-extend
+# (non-interactive); see aidc::install_missing_agent.
+aidc::agent_installed() {
+  local workspace="$1"
+  local tool="$2"
+  case "$tool" in
+    claude|codex|opencode|grok|omp|cursor-agent) ;;
+    *) return 0 ;;
+  esac
+  if aidc::compose "$workspace" exec -T workspace sh -c 'command -v "$1" >/dev/null 2>&1' sh "$tool"; then
+    return 0
+  fi
+  return 1
+}
+
+# Map an AIDC_AGENTS selection to per-agent `--build-arg WITH_X=1` flags for
+# the base image build (Dockerfile.base's conditional agent stages). This is
+# the canonical mapping; CI workflows and scripts/image-size-report.sh mirror
+# it inline — keep them in sync.
+aidc::agents_build_flags() {
+  local sel="${1:-opencode}"
+  local agent
+  case "$sel" in
+    all) sel="claude,codex,opencode,cursor-agent,grok,omp" ;;
+    none) sel="" ;;
+  esac
+  for agent in claude codex opencode cursor-agent grok omp; do
+    case ",$sel," in
+      *",$agent,"*)
+        printf -- '--build-arg %s=1 ' \
+          "WITH_$(printf '%s' "$agent" | tr 'a-z' 'A-Z' | tr '-' '_')"
+        ;;
+    esac
+  done
+}
+
+# Auto-extend (remaster): 'aidc <tool>' on a project whose image lacks the
+# agent adds it to the AIDC_AGENTS selection (persisted in project.env) and
+# returns 0 so the caller can rebuild — the per-agent stage layout makes that
+# a one-layer build, not a reinstall of every agent. With reason "first-build"
+# (workspace not yet materialized) the log line frames it as baking the agent
+# into the initial build. Returns 1 when the selection need not or must not
+# change: auto-extend disabled (AIDC_AUTO_EXTEND_AGENTS=0), unknown tool,
+# 'all' selected, or the tool already selected (then the image is simply
+# stale → rebuild hint).
+aidc::agents_extend_selection() {
+  local workspace="$1"
+  local tool="$2"
+  local reason="${3:-}"
+  [[ "${AIDC_AUTO_EXTEND_AGENTS:-1}" == "1" ]] || return 1
+  case "$tool" in
+    claude|codex|opencode|cursor-agent|grok|omp) ;;
+    *) return 1 ;;
+  esac
+  if aidc::selection_includes "$tool"; then
+    return 1
+  fi
+  local current="${AIDC_AGENTS:-opencode}"
+  case ",$current," in
+    *,none,*) current="$tool" ;;
+    *) current="${current},${tool}" ;;
+  esac
+
+  # Persist in project.env (the selection's source of truth once aidc runs —
+  # sourcing it overrides the process env), then export for this run.
+  local env_file="$workspace/.ai-container/project.env"
+  if [[ -f "$env_file" ]]; then
+    if grep -qE '^AIDC_AGENTS=' "$env_file"; then
+      sed -i.bak "s/^AIDC_AGENTS=.*/AIDC_AGENTS=$current/" "$env_file" \
+        && rm -f "$env_file.bak"
+    else
+      printf '\n# Added by aidc: agent '"'"'%s'"'"' was invoked but not in the image (AIDC_AGENTS default: opencode).\nAIDC_AGENTS=%s\n' \
+        "$tool" "$current" >>"$env_file"
+    fi
+  fi
+  export AIDC_AGENTS="$current"
+  if [[ "$reason" == "first-build" ]]; then
+    aidc::log "no image for this workspace yet — baking agent '$tool' into the first build (AIDC_AGENTS=$current)"
+  else
+    aidc::log "agent '$tool' is not in this project's image — extended AIDC_AGENTS to '$current'; rebuilding (only the new agent's layer builds; the rest is cached)"
+  fi
+  return 0
+}
+
+# Decide what to do when the invoked agent's binary is missing from the
+# project's image (run_tool probes before every launch):
+#   - interactive terminal: ask y/n before touching anything. y → extend the
+#     selection (a no-op when it's already selected — the stale-image case),
+#     rebuild with --force-recreate, and re-probe so we never hand the user to
+#     a cryptic 'exec: claude: not found' from a container that wasn't
+#     recreated. n → die with the fix.
+#   - non-interactive (scripts/CI): the historical silent auto-extend.
+#   - AIDC_AUTO_EXTEND_AGENTS=0: hard error in every case.
+#   - AIDC_NO_BUILD=1: hard error (installing requires a build; never build
+#     implicitly).
+aidc::install_missing_agent() {
+  local workspace="$1"
+  local tool="$2"
+  local current="${AIDC_AGENTS:-opencode}"
+
+  # The knob wins over everything, prompt included: hard error in every case
+  # (run_tool's early gate already caught not-selectable agents before the
+  # build, so this arm is the selected-but-stale backstop plus direct calls).
+  if [[ "${AIDC_AUTO_EXTEND_AGENTS:-1}" != "1" ]]; then
+    if aidc::selection_includes "$tool"; then
+      aidc::die "agent '$tool' is selected (AIDC_AGENTS=$current) but missing from the built image (stale build)
+fix: run 'aidc rebuild'"
+    fi
+    aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent; AIDC_AUTO_EXTEND_AGENTS=0 disables auto-install)"
+  fi
+
+  # AIDC_NO_BUILD=1 forbids implicit builds (docs/install.md), and installing a
+  # missing agent REQUIRES a build — refuse with the fix instead of silently
+  # building behind the user's back.
+  if [[ "${AIDC_NO_BUILD:-0}" == "1" ]]; then
+    aidc::die "AIDC_NO_BUILD=1 but agent '$tool' is missing from this project's image — installing it requires a rebuild
+fix: run 'aidc rebuild' (optionally after adding '$tool' to AIDC_AGENTS in .ai-container/project.env), then retry 'aidc $tool'"
+  fi
+
+  if aidc::is_interactive; then
+    local prompt
+    if aidc::selection_includes "$tool"; then
+      prompt="agent '$tool' is selected (AIDC_AGENTS=$current) but missing from the built image (stale build) — rebuild now?"
+    else
+      prompt="agent '$tool' is not in this project's image (AIDC_AGENTS=$current) — install it now?"
+    fi
+    printf '[aidc] %s\n' "$prompt" >&2
+    printf '[aidc]   (extends AIDC_AGENTS in .ai-container/project.env and rebuilds — only the new agent'"'"'s layer builds) [y/N] ' >&2
+    local reply
+    read -r reply || reply=""
+    case "$reply" in
+      y|Y|yes|YES) ;;
+      *)
+        if aidc::selection_includes "$tool"; then
+          aidc::die "agent '$tool' is selected but the image is stale
+fix: run 'aidc rebuild' (or re-run 'aidc $tool' and confirm the rebuild prompt)"
+        fi
+        aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent)"
+        ;;
+    esac
+  else
+    if ! aidc::agents_extend_selection "$workspace" "$tool"; then
+      # extend only refuses when the agent is already selected (or 'all') —
+      # a stale image, so mirror the interactive/knob framing instead of the
+      # contradictory "not in this project's image" advice.
+      if aidc::selection_includes "$tool"; then
+        aidc::die "agent '$tool' is selected (AIDC_AGENTS=${AIDC_AGENTS:-opencode}) but missing from the built image (stale build)
+fix: run 'aidc rebuild'"
+      fi
+      aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS=${AIDC_AGENTS:-opencode})
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent)"
+    fi
+  fi
+
+  # Rebuild. extend_selection is a no-op when the agent is already selected
+  # (stale-image case): the rebuild below is what brings the binary in, and
+  # --force-recreate guarantees the running container is replaced with the new
+  # image, not left behind on the old one.
+  aidc::agents_extend_selection "$workspace" "$tool" || true
+  aidc::ensure_base_image "$workspace"
+  aidc::write_devcontainer_env "$workspace"
+  aidc::compose "$workspace" up -d --build --force-recreate workspace
+  aidc::ensure_tool_links "$workspace"
+  if ! aidc::agent_installed "$workspace" "$tool"; then
+    aidc::die "agent '$tool' is still missing after the rebuild — run 'aidc rebuild' and retry 'aidc $tool'
+(the image rebuilt but the binary never landed — check the build output above)"
+  fi
+  aidc::log "agent '$tool' is ready"
+}
+
+# Wait (bounded, background) for a fresh volume's opencode.db to appear, then
+# apply the auth snapshot in-container (bootstrap-state.sh seed-auth). v2
+# keeps credentials ONLY in the db — auth.json is v1 legacy and unread — and
+# the db is created by the agent's first run, i.e. after the bootstrap that
+# seeds everything else. Runs detached: never blocks or fails the launch.
+aidc::opencode_auth_seed_wait() {
+  [[ "${AIDC_OPENCODE_SYNC_AUTH:-1}" == "1" ]] || return 0
+  local workspace="$1"
+  [[ -f "$HOME/.local/share/opencode/.aidc-auth-seed.json" ]] || return 0
+  (
+    set +e
+    local tries=0 out
+    while (( tries < 30 )); do
+      if aidc::compose "$workspace" exec -T workspace test -f /home/aidc/.local/share/opencode/opencode.db 2>/dev/null; then
+        out="$(aidc::compose "$workspace" exec -T workspace \
+          bash /workspace/.devcontainer/scripts/bootstrap-state.sh seed-auth 2>&1)"
+        [[ -n "$out" ]] \
+          && aidc::log "opencode auth seed applied in-container: $out"
+        return 0
+      fi
+      sleep 3
+      tries=$((tries + 1))
+    done
+    aidc::log "opencode auth seed pending: the container db did not appear within 90s (applies at the next start)"
+  ) &
+  disown
+}
+
 aidc::run_tool() {
   local tool="$1"
   local profile="$2"
@@ -515,14 +754,46 @@ aidc::run_tool() {
   local workspace
   workspace="$(aidc::default_workspace)"
 
-  # Agent selection is NOT seeded from the tool: the shared base image (issue #7)
-  # amortizes all agents across every project, so the default bakes in all of
-  # them (one shared base, no per-project agent cost). Set AIDC_AGENTS explicitly
-  # in .ai-container/project.env to build a slim single/few-agent base variant —
-  # the base is content-hashed on the selection and the thin image rebuilds when
-  # it changes (see aidc::image_base_is_current).
+  # Scaffold first (auto-init on a virgin repo) so the AIDC_AGENTS selection —
+  # the input to every agent-availability decision below — is loaded before we
+  # act on it.
+  aidc::ensure_workspace_ready "$workspace"
 
+  if [[ "${AIDC_ISOLATE_VM:-0}" == "1" ]]; then
+    aidc::vm_ensure "$workspace"
+  fi
+
+  # AIDC_AUTO_EXTEND_AGENTS=0 is the historical hard-error knob: fail before
+  # any build when the agent isn't selectable, so a misconfigured first run
+  # doesn't build a useless image. (The stale-image case dies later, in
+  # install_missing_agent, with the matching rebuild hint.)
+  if [[ "${AIDC_AUTO_EXTEND_AGENTS:-1}" != "1" ]] && ! aidc::selection_includes "$tool"; then
+    aidc::die "agent '$tool' is not in this project's image (AIDC_AGENTS defaults to 'opencode')
+fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=opencode,$tool) and run 'aidc rebuild'
+(or set AIDC_AGENTS=all to bake in every agent; AIDC_AUTO_EXTEND_AGENTS=0 disables auto-install)"
+  fi
+
+  # The default selection is opencode only (slim-by-default remaster). On a
+  # first-ever run — nothing built yet — invoking the agent IS the intent:
+  # bake it into the initial selection so the very first build carries it,
+  # skipping the build→probe→rebuild dance entirely.
+  if ! aidc::workspace_materialized "$workspace"; then
+    aidc::agents_extend_selection "$workspace" "$tool" "first-build" || true
+  fi
+
+  # Probe the binary in the running image; on a miss, install_missing_agent
+  # decides between the interactive y/n install prompt and the legacy silent
+  # auto-extend, rebuilds (--force-recreate), and re-probes before launch.
   aidc::ensure_container_running "$workspace"
+  if ! aidc::agent_installed "$workspace" "$tool"; then
+    aidc::install_missing_agent "$workspace" "$tool"
+  fi
+  # v2 opencode keeps credentials ONLY in its db, and on a fresh volume that
+  # db is created by the agent's first run — after this bootstrap. Wait
+  # (bounded, background) for it and apply the host snapshot in-container, so
+  # the first session picks the host's logins up; on an existing db this
+  # applies immediately (new host logins without a restart).
+  aidc::opencode_auth_seed_wait "$workspace"
 
   if [[ "$tool" == "claude" ]]; then
     aidc::resolve_claude_oauth_token
@@ -628,11 +899,13 @@ aidc::run_tool() {
   fi
 
   # Run the agent in the foreground; once it exits, pull its session transcripts
-  # back to the host. Preserve the agent's exit code as our own.
+  # back to the host. Preserve the agent's exit code as our own. The sync runs
+  # the on-disk sync module (this wrapper may have sourced its libraries long
+  # before the agent exited — see aidc::auto_sync_sessions_fresh).
   local rc=0
   aidc::compose_exec "$workspace" "${command[@]}" || rc=$?
   aidc::scrub_profile_env
-  aidc::auto_sync_sessions "$workspace" "$tool"
+  aidc::auto_sync_sessions_fresh "$workspace" "$tool"
   return "$rc"
 }
 
@@ -739,6 +1012,10 @@ aidc::write_devcontainer_env() {
     COMPOSE_PROJECT_NAME
     AIDC_BASE_IMAGE AIDC_TOOLCHAINS AIDC_SECURITY_TOOLS AIDC_AGENTS
     AIDC_PIDS_LIMIT AIDC_MEM_LIMIT AIDC_CPU_LIMIT
+    # opencode auth seed knob: compose interpolates ${AIDC_OPENCODE_SYNC_AUTH:-1}
+    # into the container's environment, so config.env OR project.env gates both
+    # halves (host snapshot generation AND the in-container apply).
+    AIDC_OPENCODE_SYNC_AUTH
     AIDC_WORKSPACE AIDC_DEVCONTAINER_DIR AIDC_CORE_LOGICS_WORKTREE
     AIDC_HOST_SEED_CLAUDE AIDC_HOST_SEED_CODEX AIDC_HOST_SEED_OPENCODE
     AIDC_HOST_SEED_OPENCODE_DATA AIDC_HOST_SEED_GROK AIDC_HOST_SEED_OMP AIDC_HOST_SEED_CURSOR
@@ -824,7 +1101,7 @@ aidc::base_image_tag() {
     cmd="shasum -a 256"
   fi
   input="$(cat "$workspace/.devcontainer/Dockerfile.base" 2>/dev/null)"
-  input+="|AIDC_AGENTS=${AIDC_AGENTS:-all}"
+  input+="|AIDC_AGENTS=${AIDC_AGENTS:-opencode}"
   hash="$(printf '%s' "$input" | $cmd | awk '{print $1}' | cut -c1-12)"
   printf 'aidc-base:%s' "${hash:-latest}"
 }
@@ -845,9 +1122,14 @@ aidc::ensure_base_image() {
   fi
   if ! docker image inspect "$tag" >/dev/null 2>&1; then
     aidc::log "building shared base image $tag (one-time; shared across projects)"
+    # WITH_* per-agent flags (aidc::agents_build_flags) drive the conditional
+    # agent stages; only flagged agents' layers build, and each is cached
+    # independently — extending the selection later builds just the new layer.
+    # shellcheck disable=SC2046  # flag args are controlled tokens from the helper
     ( cd "$workspace/.devcontainer" \
         && docker build -f "$workspace/.devcontainer/Dockerfile.base" \
-             --build-arg AIDC_AGENTS="${AIDC_AGENTS:-all}" \
+             --build-arg AIDC_AGENTS="${AIDC_AGENTS:-opencode}" \
+             $(aidc::agents_build_flags "${AIDC_AGENTS:-opencode}") \
              -t "$tag" "$workspace/.devcontainer" ) \
       || aidc::die "failed to build base image $tag"
     aidc::log "base image $tag ready"
@@ -968,6 +1250,74 @@ aidc::tools_status() {
   done
 }
 
+# Generate the host→container auth seed for opencode v2. Since v2, provider
+# logins land in the host's opencode.db (credential/account tables), NOT in
+# auth.json — so the auth.json file seed can no longer carry them. This writes
+# a small JSON snapshot of JUST the auth tables where the existing read-only
+# opencode-data seed mount exposes it to the container; the container's
+# bootstrap applies it into the volume db (see seed_opencode_auth in
+# bootstrap-state.sh.tmpl). The file includes the secret values and lives
+# 0600 in the host's own opencode data dir — the same trust domain as
+# auth.json next to it. Read-only SELECTs: WAL readers never block the
+# host's opencode. Best-effort and cmp-quiet: regenerated on every compose
+# env pass, logged only when content actually changed. Direction contract:
+# this is the sanctioned host→container half; the container→host session
+# merge independently refuses auth tables.
+aidc::opencode_auth_snapshot() {
+  [[ "${AIDC_OPENCODE_SYNC_AUTH:-1}" == "1" ]] || return 0
+  local base="$HOME/.local/share/opencode"
+  local db="$base/opencode.db"
+  local out="$base/.aidc-auth-seed.json"
+  [[ -f "$db" ]] || return 0
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  command -v "$sqlite" >/dev/null 2>&1 || return 0
+
+  local tmp="$out.tmp.$$"
+  local t js first=1 ok=1 counts=""
+  # The tmp is created 0600 up front (install, not redirect): the file carries
+  # secret values from the first written byte, and a kill between write and
+  # chmod must never leave it over-permissive. mv preserves the mode.
+  install -m 600 /dev/null "$tmp" 2>/dev/null || { aidc::warn "could not create the auth snapshot tmp file"; return 0; }
+  {
+    printf '{"tables": {'
+    for t in credential account account_state control_account; do
+      [[ -n "$("$sqlite" "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
+      js="$("$sqlite" -json "$db" "SELECT * FROM \"$t\";" 2>/dev/null)" || { ok=0; break; }
+      [[ $first -eq 1 ]] || printf ','
+      first=0
+      printf '"%s": %s' "$t" "${js:-[]}"
+      counts+="${counts:+, }$t=$("$sqlite" "$db" "SELECT count(*) FROM \"$t\";" 2>/dev/null)"
+    done
+    printf '}}\n'
+  } >"$tmp" 2>/dev/null
+
+  if [[ $ok -eq 1 && -s "$tmp" ]]; then
+    # Validate JSON when python3 is available; without it, accept the file —
+    # hard-requiring python3 here would silently disable the whole seed on
+    # macOS hosts without it, and the container side re-validates anyway
+    # (json.load failure → warn → skip; fail-safe both directions).
+    if command -v python3 >/dev/null 2>&1 \
+       && ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$tmp" >/dev/null 2>&1; then
+      rm -f "$tmp"
+      aidc::warn "generated opencode auth snapshot is not valid JSON ($out); container auth seed not refreshed"
+    elif cmp -s "$tmp" "$out" 2>/dev/null; then
+      rm -f "$tmp"
+      # Routine pass — silent by default (export_compose_env runs several
+      # times per command; logging here would sprawl over every launch).
+      # Counts remain visible on refresh, and under --debug.
+      aidc::debug "opencode host auth snapshot current (host db: $counts)"
+    elif chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$out" 2>/dev/null; then
+      aidc::log "refreshed the opencode auth seed for containers (host db: $counts)"
+    else
+      rm -f "$tmp"
+      aidc::warn "could not install the opencode auth snapshot ($out); container auth seed not refreshed"
+    fi
+  else
+    rm -f "$tmp"
+    aidc::warn "could not generate the opencode auth snapshot ($out); container auth seed not refreshed"
+  fi
+}
+
 aidc::export_compose_env() {
   local workspace="$1"
   # Capture any CLI/ambient overrides before project.env is sourced, so
@@ -991,6 +1341,10 @@ aidc::export_compose_env() {
   AIDC_HOST_SEED_OPENCODE="$(aidc::mount_dir_or_empty "$HOME/.config/opencode" "opencode")"
   export AIDC_HOST_SEED_OPENCODE_DATA
   AIDC_HOST_SEED_OPENCODE_DATA="$(aidc::mount_dir_or_empty "$HOME/.local/share/opencode" "opencode-data")"
+  # Host → container auth seed (opencode v2 keeps logins in the db, so the
+  # auth.json file seed can't carry them). Writes a small auth-tables JSON
+  # into the opencode-data seed dir; the container's bootstrap applies it.
+  aidc::opencode_auth_snapshot
   export AIDC_HOST_SEED_GROK
   AIDC_HOST_SEED_GROK="$(aidc::mount_dir_or_empty "$HOME/.grok" "grok")"
   export AIDC_HOST_SEED_OMP
@@ -1015,12 +1369,17 @@ aidc::export_compose_env() {
   # base image; this layer adds grype/syft/checkov/bandit when requested).
   export AIDC_SECURITY_TOOLS
   AIDC_SECURITY_TOOLS="${AIDC_SECURITY_TOOLS:-}"
-  # Coding agents baked into the image (AIDC_AGENTS opt-in). Comma-separated
-  # (claude,codex,opencode,cursor-agent,grok,omp); 'aidc <tool>' seeds this to
-  # just that tool for a first build (see run_tool). Unset/empty here means a
-  # plain 'aidc up' bakes in all agents ('all') for back-compat.
+  # Coding agents baked into the image (AIDC_AGENTS selection). Comma-separated
+  # (claude,codex,opencode,cursor-agent,grok,omp). Default is 'opencode' only —
+  # the slim-by-default remaster stance: agents cost ~100-200MB each in the
+  # shared base. Add more per project via .ai-container/project.env
+  # (AIDC_AGENTS=opencode,codex,... or =all / =none); the base is content-
+  # hashed on the selection and per-agent stages are cached independently, so
+  # 'aidc rebuild' — or invoking a missing agent, which bakes it into the
+  # first build and otherwise asks y/n (silent extend in non-interactive
+  # runs; see aidc::install_missing_agent) — applies a change fast.
   export AIDC_AGENTS
-  AIDC_AGENTS="${AIDC_AGENTS:-all}"
+  AIDC_AGENTS="${AIDC_AGENTS:-opencode}"
 
   # Apple `container` already runs each container in its own lightweight VM, so
   # the per-project Lima/Firecracker VM is redundant — and its DOCKER_HOST would

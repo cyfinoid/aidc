@@ -35,15 +35,18 @@ COMPOSE_RC=0
 aidc::compose() { printf '%s\n' "$@" >"$CAP"; return "$COMPOSE_RC"; }
 
 # ── 1. default home: idempotent ln -sf of both scaffold scripts ──
+# AIDC_CONTAINER_HOME is forced empty so the default in runtime.sh is what's
+# asserted — otherwise an ambient value from the surrounding container
+# (exported by compose) would leak in and break the hermetic expectation.
 COMPOSE_RC=0
-aidc::ensure_tool_links "/some/ws"
+( AIDC_CONTAINER_HOME='' aidc::ensure_tool_links "/some/ws" )
 args="$(cat "$CAP")"
 if printf '%s' "$args" | grep -qx 'exec' \
    && printf '%s' "$args" | grep -qx -- '-T' \
    && printf '%s' "$args" | grep -q 'aidc-scan' \
    && printf '%s' "$args" | grep -q 'aidc-ci' \
    && printf '%s' "$args" | grep -q 'ln -sf' \
-   && printf '%s' "$args" | grep -qx '/home/vscode'; then
+   && printf '%s' "$args" | grep -qx '/home/aidc'; then
   ok "execs idempotent ln -sf of aidc-scan + aidc-ci into the default container home"
 else
   fail "unexpected compose args: $args"

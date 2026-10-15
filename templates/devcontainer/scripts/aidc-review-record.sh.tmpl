@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# aidc-managed
+# Record a completed pre-completion review so the review Stop hook
+# (aidc-review-hook.sh) allows the session to stop.
+#
+# Usage: aidc-review-record "<review outcome: findings fixed; deferrals with reasons>"
+#
+# The marker keys the current tree state — tracked diff plus `git status`
+# output, untracked files included — hashed exactly the way the hook hashes
+# it, so any later edit invalidates the record and re-arms the gate. The
+# summary becomes part of the marker line, making a skipped review an
+# auditable act rather than a silent one.
+#
+# Exit codes: 0 recorded, 1 usage error (no summary, nothing to review),
+# 2 environment error (no git, not a repository, unwritable state dir).
+set -uo pipefail
+
+WS="${AIDC_REVIEW_HOOK_WORKSPACE:-/workspace}"
+STATE_DIR="$WS/.ai-container"
+RECORD_FILE="$STATE_DIR/review-done"
+LOG_FILE="$STATE_DIR/review-hook.log"
+
+summary="${1:-}"
+if [[ -z "${summary//[[:space:]]/}" ]]; then
+  echo "usage: aidc-review-record \"<review outcome summary>\"" >&2
+  exit 1
+fi
+
+command -v git >/dev/null 2>&1 || {
+  echo "aidc-review-record: git not found" >&2
+  exit 2
+}
+cd "$WS" 2>/dev/null || {
+  echo "aidc-review-record: cannot enter $WS" >&2
+  exit 2
+}
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  echo "aidc-review-record: $WS is not a git work tree" >&2
+  exit 2
+}
+
+changes="$(git status --porcelain 2>/dev/null || true)"
+if [[ -z "$changes" ]]; then
+  echo "aidc-review-record: nothing changed — there is no diff to review" >&2
+  exit 1
+fi
+
+# Must match the hook's tree hash byte for byte: tracked diff, status lines,
+# and the content of every untracked file (untracked files appear in status
+# as a bare `?? path`, so the content has to be mixed in explicitly).
+tree_hash="$(
+  {
+    git diff HEAD 2>/dev/null
+    printf '%s' "$changes"
+    while IFS= read -r -d '' f; do
+      sha256sum -- "$f" 2>/dev/null || true
+    done < <(git ls-files --others --exclude-standard -z 2>/dev/null)
+  } | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+)"
+if [[ -z "$tree_hash" ]]; then
+  echo "aidc-review-record: could not hash the tree state" >&2
+  exit 2
+fi
+
+now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+if ! printf '%s %s %s\n' "$tree_hash" "$now" "$summary" >"$RECORD_FILE" 2>/dev/null; then
+  echo "aidc-review-record: cannot write $RECORD_FILE" >&2
+  exit 2
+fi
+printf '%s recorded %s\n' "$now" "$summary" >>"$LOG_FILE" 2>/dev/null || true
+echo "review recorded for tree state $tree_hash"

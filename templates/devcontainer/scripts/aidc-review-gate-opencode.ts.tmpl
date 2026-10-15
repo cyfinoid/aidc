@@ -1,0 +1,182 @@
+// aidc-managed (installed to ~/.config/opencode/plugins/ by bootstrap-state;
+// source of truth is the project scaffold at
+// /workspace/.devcontainer/scripts/aidc-review-gate-opencode.ts)
+//
+// Pre-completion review gate for opencode v2 — the blocking-Stop-hook
+// equivalent of Claude Code's review gate. opencode (v1 and v2) has no
+// blocking Stop hook, so when a session's turn ends this plugin runs the
+// shared gate check (aidc-review-hook.sh --check — the same implementation
+// Claude Code and cursor use, single source of truth for the tree signature)
+// and, when it trips, injects the checklist as a user prompt so the agent
+// continues with the review instead of returning control to the user.
+//
+// v2 plugin API (Plugin.define / domain contexts; v1 plugins do NOT run in
+// v2 — https://opencode.ai/v2/docs/build/plugins/migrate-v1):
+//   - entrypoint: default-export `{ id, setup(ctx) }` (the object
+//     `Plugin.define()` returns; a plain object passes the loader's schema
+//     validation without importing @opencode/plugin at runtime — same
+//     transport-only choice rtk's own opencode plugin makes, so nothing
+//     depends on host module mapping under the CLI, Desktop, or Electron).
+//   - events: `ctx.event.subscribe()` yields the server event stream. The
+//     turn-end signal is `session.execution.succeeded|failed|interrupted`
+//     (verified: these fire in serve/run; `session.idle` is also matched for
+//     TUI-lifecycle coverage — the loop guards below dedupe the overlap).
+//   - prompts: `ctx.session.prompt({ sessionID, text, delivery: "steer" })`
+//     re-activates an idle session with the checklist.
+//   - shell: node:child_process.execFile — Bun's `$` helper is not available
+//     in every host that loads plugins (OpenCode Desktop/Electron).
+//
+// Per-location instances: v2 loads one plugin instance per discovered
+// location, and each instance receives events for OTHER locations' sessions.
+// To keep exactly one instance acting per session, a trigger is honored only
+// when the session's own directory (ctx.session.get → location.directory)
+// matches this instance's ctx.location.directory. A subdirectory session is
+// gated only when its own subdirectory location is loaded (fail open
+// otherwise) — and the check then runs against the SCAFFOLD root the script
+// was found under, so the tree hash and the review record live in the same
+// `.ai-container` the record helper writes to (a subdir-scoped workspace
+// would compute a hash `aidc-review-record` never satisfies).
+//
+// Loop protection (opencode has no stop_hook_active / loop_limit): a session
+// is nudged only when the gate trips for a tree state this process has not
+// already nudged it for, capped at AIDC_REVIEW_GATE_MAX_NUDGES (default 3)
+// per session per process; overlapping turn-end events for one session are
+// serialized so concurrent triggers cannot both prompt. Recording a review
+// satisfies the gate outright; editing code changes the signature and
+// legitimately re-arms it.
+//
+// Fail-open everywhere: knob off, non-aidc project (no scaffold scripts),
+// non-git workspace, or any error — the session simply idles normally.
+
+import { execFile } from "node:child_process"
+import { existsSync } from "node:fs"
+import { dirname } from "node:path"
+
+const MAX_NUDGES = Number(process.env.AIDC_REVIEW_GATE_MAX_NUDGES ?? 3)
+const WALK_UP_MAX = 5
+
+const TURN_END = new Set([
+  "session.idle",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+])
+
+// The scaffold root holding <root>/.devcontainer/scripts/aidc-review-hook.sh,
+// searching upward from `dir` at most WALK_UP_MAX levels (a session opened in
+// a subdirectory or git worktree still gates against its repo root). ""
+// when not an aidc workspace.
+function findScaffoldRoot(dir: string | undefined): string {
+  if (!dir) return ""
+  let cur = dir
+  for (let i = 0; i <= WALK_UP_MAX; i++) {
+    const candidate = `${cur}/.devcontainer/scripts/aidc-review-hook.sh`
+    try {
+      if (existsSync(candidate)) return cur
+    } catch {
+      return ""
+    }
+    const parent = dirname(cur)
+    if (parent === cur) return ""
+    cur = parent
+  }
+  return ""
+}
+
+// bash <script> --check with AIDC_REVIEW_HOOK_WORKSPACE set; resolves
+// { code, stdout, stderr } or null when it could not run at all.
+function runCheck(script: string, workspace: string): Promise<{ code: number; stdout: string; stderr: string } | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        "bash",
+        [script, "--check"],
+        { timeout: 60_000, env: { ...process.env, AIDC_REVIEW_HOOK_WORKSPACE: workspace } },
+        (err: any, stdout: any, stderr: any) => {
+          // err is non-null for any non-zero exit — that's the trip case.
+          const code = err && typeof err.code === "number" ? err.code : err ? 1 : 0
+          resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") })
+        },
+      )
+    } catch {
+      resolve(null) // fail open: the check could not even be spawned
+    }
+  })
+}
+
+export default {
+  id: "aidc-review-gate",
+
+  async setup(ctx: any) {
+    const ownDirectory: string | undefined = ctx?.location?.directory
+    const lastNudged = new Map<string, string>()
+    const nudgeCount = new Map<string, number>()
+    const inFlight = new Map<string, Promise<void>>()
+
+    const handleTurnEnd = async (sessionID: string | undefined) => {
+      if (!sessionID) return
+      try {
+        // Exactly one location instance acts per session (see header).
+        const info = await ctx.session.get({ sessionID })
+        const sessionDirectory: string | undefined = info?.location?.directory
+        if (!sessionDirectory || sessionDirectory !== ownDirectory) return
+        const scaffoldRoot = findScaffoldRoot(sessionDirectory)
+        if (!scaffoldRoot) return // non-aidc workspace — nothing to gate
+
+        // The workspace is the scaffold root (NOT the session directory):
+        // the hook hashes that tree and reads that root's review record —
+        // the same place aidc-review-record writes.
+        const result = await runCheck(`${scaffoldRoot}/.devcontainer/scripts/aidc-review-hook.sh`, scaffoldRoot)
+        if (!result) return
+        // 1 = trip (stdout carries the checklist, stderr the tree signature);
+        // 0 = allow; 2 = fail-open skip
+        if (result.code !== 1) return
+        const checklist = result.stdout.trim()
+        if (!checklist) return
+
+        // Loop guard: never nudge the same session twice for an identical
+        // tree state (the gate emits its signature on stderr), and cap total
+        // nudges per session.
+        const treeSig = /^sig (\S+)/m.exec(result.stderr)?.[1] ?? checklist
+        if (lastNudged.get(sessionID) === treeSig) return
+        const count = (nudgeCount.get(sessionID) ?? 0) + 1
+        if (count > MAX_NUDGES) return
+
+        lastNudged.set(sessionID, treeSig)
+        nudgeCount.set(sessionID, count)
+
+        await ctx.session.prompt({
+          sessionID,
+          text: `${checklist}\n\n(aidc review gate, nudge ${count}/${MAX_NUDGES} for this tree state)`,
+          delivery: "steer",
+        })
+      } catch {
+        // fail open: any error leaves the session to idle normally
+      }
+    }
+
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (!TURN_END.has(event.type)) continue
+          const sessionID = event?.data?.sessionID
+          if (!sessionID) continue
+          // Serialize per session: overlapping turn-end events (e.g. the
+          // TUI emitting session.idle right after execution.succeeded, or a
+          // succeeded/failed pair on an aborted run) must not double-prompt;
+          // a queued trigger sees lastNudged set by the one before it.
+          const prev = inFlight.get(sessionID) ?? Promise.resolve()
+          inFlight.set(
+            sessionID,
+            prev.then(() => handleTurnEnd(sessionID)).catch(() => {}),
+          )
+        }
+      } catch {
+        // stream ended or aborted — nothing to do
+      }
+    })()
+
+    return () => controller.abort()
+  },
+}

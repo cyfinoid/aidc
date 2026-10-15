@@ -87,6 +87,14 @@ aidc::ensure_global_config() {
 # guardrail; fails open on scanner errors. Set 0 to disable.
 # AIDC_ENFORCE_SCAN_HOOK=1
 
+# Pre-completion review gate (see the seeded CLAUDE.md/AGENTS.md "Pre-
+# completion review" section for the protocol and checklist). Wired per
+# agent: Claude Code via a Stop hook, opencode via a session.idle plugin,
+# cursor-agent via a `stop` hooks.json entry — all running the same check
+# and honoring this knob (0 disables the gate everywhere; docs-only changes
+# skip it; every surface fails open).
+# AIDC_ENFORCE_REVIEW_HOOK=1
+
 # Container engine ("Docker provider"). Default 'docker' uses your ambient Docker
 # (Docker Desktop / OrbStack / Colima). Set 'apple' to route aidc through Apple's
 # native `container` runtime via a socktainer Docker-API socket — macOS 26 +

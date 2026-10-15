@@ -4,9 +4,10 @@
 # LOOPBACK ONLY (127.0.0.1) so the host browser can reach the agent running
 # inside the container, while the LAN cannot. opencode itself binds 0.0.0.0
 # *inside* the container (required for the forwarded port to reach it); the
-# loopback host-publish here is what keeps that off the network. Auth stays on
-# by default — 'aidc opencode-web' generates an OPENCODE_SERVER_PASSWORD unless
-# you pass --no-auth. The port defaults to 4096; override with
+# loopback host-publish here is what keeps that off the network. v2 always
+# enforces a server password — 'aidc opencode-web' generates an
+# OPENCODE_PASSWORD (v1's OPENCODE_SERVER_PASSWORD is honored when set) and
+# passes it by env reference. The port defaults to 4096; override with
 # AIDC_OPENCODE_WEB_PORT (or 'aidc opencode-web --port N').
 services:
   workspace:

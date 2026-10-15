@@ -3,7 +3,7 @@ set -euo pipefail
 
 mode="${1:-init}"
 tool="${2:-all}"
-home_dir="${AIDC_CONTAINER_HOME:-/home/vscode}"
+home_dir="${AIDC_CONTAINER_HOME:-/home/aidc}"
 
 project_env="/workspace/.ai-container/project.env"
 if [[ -f "$project_env" ]]; then
@@ -13,6 +13,12 @@ fi
 
 ensure_dir() {
   mkdir -p "$1"
+}
+
+# Timestamped warnings (the container's stdout goes to `docker logs`, which is
+# where these get triaged — a wall clock makes that triage possible).
+bootstrap_warn() {
+  printf '[bootstrap %s] warn: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 
 copy_file_from_seed() {
@@ -29,6 +35,37 @@ copy_file_from_seed() {
 
   cp "$source" "$target"
   chmod "$perms" "$target"
+}
+
+# Re-seed a credential-bearing file from the host on EVERY bootstrap, not just
+# the first. copy_file_from_seed is init-once — in init mode an existing
+# volume copy wins forever — which is right for state the container may have
+# customized, but wrong for credentials: a host-side `opencode auth login` or
+# an apiKey rotated in opencode.json after the first seed never reached new
+# sessions, because the stale volume copy shadowed it (they live in persistent
+# named volumes that container recreation doesn't touch). The host seed wins
+# whenever the host file exists; a missing host file is a no-op, so state that
+# exists only inside the container (an in-container-only login) still
+# survives. Mode-independent: identical on init and sync.
+sync_file_from_seed() {
+  local source="$1"
+  local target="$2"
+  local perms="${3:-0600}"
+
+  [[ -f "$source" ]] || return 0
+  ensure_dir "$(dirname "$target")"
+  # Warn-and-continue, not die: bootstrap-state.sh is the container start
+  # command, and an unwritable volume target (e.g. a root-owned dir
+  # materialized by an older image — the failure class ensure_rtk_data_dir
+  # repairs below) must degrade to the stale copy rather than kill the
+  # session. Same fail-open convention as the python merges in this script.
+  # chmod is inside the guarded chain too: fresh content with stale perms is
+  # the same unwarned-degrade class.
+  if cp "$source" "$target" 2>/dev/null && chmod "$perms" "$target" 2>/dev/null; then
+    :
+  else
+    bootstrap_warn "could not re-seed $target from $source (unwritable target?) — keeping the existing copy"
+  fi
 }
 
 copy_dir_from_seed() {
@@ -151,21 +188,29 @@ PY
 }
 
 # Seed the aidc guardrail posture into Claude Code's settings.json:
-#   - a Stop hook running aidc-scan-hook.sh (mechanical enforcement of the
-#     "scan before done" guardrail) — added when AIDC_ENFORCE_SCAN_HOOK=1
-#     (default), removed when 0, other hooks always preserved;
+#   - Stop hooks for the aidc guardrails — aidc-scan-hook.sh (mechanical
+#     enforcement of the "scan before done" guardrail, knob
+#     AIDC_ENFORCE_SCAN_HOOK) and aidc-review-hook.sh (mechanical
+#     enforcement of the "review before done" guardrail, knob
+#     AIDC_ENFORCE_REVIEW_HOOK; both default to on). Each hook is added or
+#     removed independently of the other; other hooks are always preserved.
 #   - enableAllProjectMcpServers pinned to false when absent, so project
 #     .mcp.json servers keep requiring explicit approval.
 # Idempotent; creates the file if the host seeded none.
 ensure_agent_guardrail_settings() {
   local f="$1"
   command -v python3 >/dev/null 2>&1 || return 0
-  local enforce="${AIDC_ENFORCE_SCAN_HOOK:-1}"
-  AIDC_HOOK_ENFORCE="$enforce" python3 - "$f" <<'PY'
+  AIDC_SCAN_HOOK_ENFORCE="${AIDC_ENFORCE_SCAN_HOOK:-1}" \
+    AIDC_REVIEW_HOOK_ENFORCE="${AIDC_ENFORCE_REVIEW_HOOK:-1}" \
+    python3 - "$f" <<'PY'
 import json, os, sys
 p = sys.argv[1]
-enforce = os.environ.get("AIDC_HOOK_ENFORCE", "1") == "1"
-cmd = "/workspace/.devcontainer/scripts/aidc-scan-hook.sh"
+guardrails = [
+    ("/workspace/.devcontainer/scripts/aidc-scan-hook.sh",
+     os.environ.get("AIDC_SCAN_HOOK_ENFORCE", "1") == "1"),
+    ("/workspace/.devcontainer/scripts/aidc-review-hook.sh",
+     os.environ.get("AIDC_REVIEW_HOOK_ENFORCE", "1") == "1"),
+]
 try:
     cfg = json.load(open(p))
 except (FileNotFoundError, ValueError):
@@ -173,23 +218,25 @@ except (FileNotFoundError, ValueError):
 changed = False
 hooks = cfg.setdefault("hooks", {})
 stops = hooks.setdefault("Stop", [])
-have = any(
-    isinstance(e, dict)
-    and any(h.get("command") == cmd for h in e.get("hooks", []) if isinstance(h, dict))
-    for e in stops if isinstance(e, dict)
-)
-if enforce and not have:
-    stops.append({"hooks": [{"type": "command", "command": cmd}]})
-    changed = True
-elif not enforce and have:
-    for e in stops:
-        if isinstance(e, dict) and isinstance(e.get("hooks"), list):
-            kept = [h for h in e["hooks"] if not (isinstance(h, dict) and h.get("command") == cmd)]
-            if len(kept) != len(e["hooks"]):
-                e["hooks"] = kept
-                changed = True
-    hooks["Stop"] = [e for e in stops if not (isinstance(e, dict) and e.get("hooks") == [])]
-if not hooks.get("Stop"):
+for cmd, enforce in guardrails:
+    have = any(
+        isinstance(e, dict)
+        and any(h.get("command") == cmd for h in e.get("hooks", []) if isinstance(h, dict))
+        for e in stops if isinstance(e, dict)
+    )
+    if enforce and not have:
+        stops.append({"hooks": [{"type": "command", "command": cmd}]})
+        changed = True
+    elif not enforce and have:
+        for e in stops:
+            if isinstance(e, dict) and isinstance(e.get("hooks"), list):
+                kept = [h for h in e["hooks"] if not (isinstance(h, dict) and h.get("command") == cmd)]
+                if len(kept) != len(e["hooks"]):
+                    e["hooks"] = kept
+                    changed = True
+# Prune entries emptied by a removal, then the event key itself if bare.
+hooks["Stop"] = [e for e in stops if isinstance(e, dict) and e.get("hooks")]
+if not hooks["Stop"]:
     hooks.pop("Stop", None)
 if not cfg.get("hooks"):
     cfg.pop("hooks", None)
@@ -231,18 +278,245 @@ sync_codex() {
 
 sync_opencode() {
   ensure_dir "$home_dir/.config/opencode"
-  copy_file_from_seed "/host-seed/opencode/opencode.json" "$home_dir/.config/opencode/opencode.json" "0600"
+  # opencode.json carries provider credentials (apiKey/baseURL blocks) and
+  # auth.json IS the credential store — both re-seed from the host on every
+  # start (sync_file_from_seed), so a host-side login or key rotation reaches
+  # new sessions without a manual `aidc sync-config opencode`. Anything the
+  # host copy drops is re-wired right below (permission allows, rtk + review
+  # -gate plugins), so the every-start overwrite is self-healing.
+  sync_file_from_seed "/host-seed/opencode/opencode.json" "$home_dir/.config/opencode/opencode.json" "0600"
   copy_dir_from_seed "/host-seed/opencode/plugins" "$home_dir/.config/opencode/plugins"
   # opencode stores provider credentials in the XDG *data* dir, not the config
   # dir: ~/.local/share/opencode/auth.json. Seed it (and it persists via the
-  # opencode_data_home volume) so a host `opencode auth login` is inherited.
+  # opencode_data_home volume) so a host `opencode auth login` is inherited —
+  # re-applied on every start; a login made only inside the container (no host
+  # auth.json) still survives, since a missing host seed is a no-op.
   ensure_dir "$home_dir/.local/share/opencode"
-  copy_file_from_seed "/host-seed/opencode-data/auth.json" "$home_dir/.local/share/opencode/auth.json" "0600"
+  sync_file_from_seed "/host-seed/opencode-data/auth.json" "$home_dir/.local/share/opencode/auth.json" "0600"
+  # Host → container auth seeding: opencode v2 keeps provider logins in the
+  # db, so the file seed above can't carry them. Applies the host's
+  # .aidc-auth-seed.json snapshot (generated host-side on every compose env
+  # pass) into this container's volume db. The container→host direction
+  # stays closed — the session merge independently refuses auth tables.
+  seed_opencode_auth
+  # Seed the permission allows AFTER the config copy: the host seed overwrite
+  # above drops them on every start, so this re-adds them (merge-only — a
+  # user-set rule, whatever its value, is never clobbered).
+  ensure_opencode_permissions
   # rtk ships an opencode plugin (~/.config/opencode/plugins/rtk.ts). Install
   # AFTER the plugins seeding: copy_dir_from_seed rsync --deletes in sync mode,
   # which would wipe a plugin installed before it. Idempotent, so this repairs
   # the wipe on every init/sync.
   wire_rtk_opencode
+  # Same wipe-repair logic for aidc's own review-gate plugin: it must be
+  # (re-)copied after the rsync on every init/sync.
+  wire_aidc_opencode_gate
+}
+
+# Seed opencode's `permission.external_directory` allow rules for the paths
+# every aidc session legitimately touches OUTSIDE the workspace — without
+# them opencode asks (per session: an "always" approval only lasts the
+# current session) on every single one:
+#   /opt/CORE_LOGICS/**       the shared guidance repo AGENTS.md tells the
+#                             agent to read AND write (aidc mounts it at
+#                             /opt/CORE_LOGICS; AIDC_CORE_LOGICS_DIR).
+#   ~/.local/share/rtk/**     rtk's history db + tee logs — read/written by
+#                             the rtk wiring every command goes through.
+#   /tmp/**                   the container's designated scratch space (the
+#                             agents' own standing instruction says to use
+#                             /tmp/opencode for temporary work).
+# Merge-only, never clobber: a key the user (or an explicit host config)
+# already set — allow, ask, or deny — is left exactly as it is. Removing the
+# knob (AIDC_OPENCODE_SEED_PERMISSIONS=0) deletes only the defaults listed
+# above that are still set to "allow", never anything else. Override the
+# default list with AIDC_OPENCODE_EXTERNAL_ALLOW (colon-separated glob list;
+# empty disables). Idempotent; safe on every init/sync. Same python3-merges
+# pattern as ensure_rtk_session_end_settings — fails open without python3.
+# Apply the host's opencode auth snapshot (.aidc-auth-seed.json, generated
+# host-side on every compose env pass by lib/aidc/runtime.sh
+# aidc::opencode_auth_snapshot) into this container's volume db. opencode v2
+# keeps provider logins in the db — NOT auth.json — so the file seed can't
+# carry them; this is the host→container half of the one-way credential
+# contract (the container→host session merge independently refuses auth
+# tables). Per table: only columns the container schema actually has
+# (version-tolerant intersection with the snapshot's), PK-conflict upsert on
+# time_updated recency for tables that have it (a fresher host login wins; a
+# fresher container-side refresh is kept), plain INSERT OR IGNORE for
+# account_state (no timestamps). Counts logged, values never. Best-effort:
+# any failure warns and skips — the snapshot regenerates on the host at the
+# next start.
+seed_opencode_auth() {
+  [[ "${AIDC_OPENCODE_SYNC_AUTH:-1}" == "1" ]] || return 0
+  local db="$home_dir/.local/share/opencode/opencode.db"
+  local snap="/host-seed/opencode-data/.aidc-auth-seed.json"
+  [[ -f "$snap" ]] || return 0
+  if [[ ! -f "$db" ]]; then
+    # Fresh volume: the db is created by opencode itself, and the seed needs
+    # it to exist. Force it with a throwaway headless run — `opencode run`
+    # initializes the db + schema BEFORE any model call, so the run may fail
+    # right after (no credentials yet) with the db left initialized. The
+    # managed-service port is free at bootstrap (the agent's service starts
+    # later). If the kick fails, the HOST watches for the db and applies the
+    # snapshot itself (aidc::opencode_auth_seed_wait → seed-auth mode).
+    timeout 30 opencode run "/exit" >/dev/null 2>&1 || true
+    if [[ ! -f "$db" ]]; then
+      bootstrap_warn "container opencode.db still absent after the init run — the host applies the auth snapshot as soon as opencode creates it"
+      return 0
+    fi
+  fi
+  command -v python3 >/dev/null 2>&1 || return 0
+  AIDC_AUTH_DB="$db" AIDC_AUTH_SNAP="$snap" python3 - <<'PY' || bootstrap_warn "could not apply the host auth snapshot to $db"
+import json, os, sqlite3, sys
+from datetime import datetime
+
+db = os.environ["AIDC_AUTH_DB"]
+try:
+    with open(os.environ["AIDC_AUTH_SNAP"]) as fh:
+        snap = json.load(fh)
+except (ValueError, OSError):
+    sys.exit(1)
+
+# table → primary key columns (control_account is composite). The closing
+# brace is indented so no column-0 `}` appears inside the heredoc — the test
+# suite extracts this function with a `^}` range end.
+PK = {
+    "credential": ("id",),
+    "account": ("id",),
+    "control_account": ("email", "url"),
+    "account_state": ("id",),
+    }
+
+con = sqlite3.connect(db)
+try:
+    con.execute("PRAGMA busy_timeout=3000")
+    counts = {}
+    for table, pk in PK.items():
+        rows = (snap.get("tables") or {}).get(table) or []
+        if not rows:
+            continue
+        dst_cols = [r[1] for r in con.execute(f'PRAGMA table_info("{table}")')]
+        if not dst_cols:
+            continue  # table absent from this container's schema version
+        cols = [c for c in rows[0].keys() if c in dst_cols]
+        if not cols:
+            continue
+        has_ts = "time_updated" in cols
+        pk_test = " AND ".join(f'"{c}" = ?' for c in pk)
+        for row in rows:
+            pk_vals = [row.get(c) for c in pk]
+            exists = con.execute(
+                f'SELECT 1 FROM "{table}" WHERE {pk_test}', pk_vals).fetchone()
+            if exists is None:
+                cols_q = ", ".join(f'"{c}"' for c in cols)
+                ph = ", ".join("?" for _ in cols)
+                con.execute(f'INSERT INTO "{table}" ({cols_q}) VALUES ({ph})',
+                            [row.get(c) for c in cols])
+                counts[table] = counts.get(table, 0) + 1
+            elif has_ts:
+                new_ts = row.get("time_updated")
+                old = con.execute(
+                    f'SELECT "time_updated" FROM "{table}" WHERE {pk_test}',
+                    pk_vals).fetchone()[0]
+                if new_ts is not None and (old is None or new_ts > old):
+                    sets = ", ".join(f'"{c}" = ?' for c in cols if c not in pk)
+                    vals = [row.get(c) for c in cols if c not in pk] + pk_vals
+                    con.execute(f'UPDATE "{table}" SET {sets} WHERE {pk_test}', vals)
+                    counts[table] = counts.get(table, 0) + 1
+    con.commit()
+    # Totals AFTER the apply — how many credentials the container can actually
+    # see (the number to compare against the host snapshot's count). Tables
+    # missing from a pre-v2 db report 0.
+    now = {}
+    for t in ("credential", "account"):
+        try:
+            now[t] = con.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0]
+        except sqlite3.Error:
+            now[t] = 0
+finally:
+    con.close()
+detail = ", ".join(f"{t}: {n}" for t, n in counts.items()) or "nothing new"
+now_s = ", ".join(f"{t}={n}" for t, n in now.items()) or "auth tables absent"
+print(f"[bootstrap {datetime.now():%Y-%m-%d %H:%M:%S}] seeded host auth rows into the container db ({detail}); container db now has {now_s}")
+PY
+}
+
+ensure_opencode_permissions() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  local cfg="$home_dir/.config/opencode/opencode.json"
+  local enforce="${AIDC_OPENCODE_SEED_PERMISSIONS:-1}"
+  local defaults="/opt/CORE_LOGICS/**:~/.local/share/rtk/**:/tmp/**"
+  # '-' not ':-' so an explicitly-empty override disables seeding entirely.
+  local paths="${AIDC_OPENCODE_EXTERNAL_ALLOW-$defaults}"
+  AIDC_OC_PERM_ENFORCE="$enforce" AIDC_OC_PERM_PATHS="$paths" \
+    AIDC_OC_PERM_DEFAULTS="$defaults" python3 - "$cfg" <<'PY'
+import json, os, sys
+
+p = sys.argv[1]
+enforce = os.environ.get("AIDC_OC_PERM_ENFORCE", "1") == "1"
+defaults = [s for s in os.environ.get("AIDC_OC_PERM_DEFAULTS", "").split(":") if s]
+paths = [s for s in os.environ.get("AIDC_OC_PERM_PATHS", "").split(":") if s]
+
+try:
+    cfg = json.load(open(p))
+except FileNotFoundError:
+    cfg = {}
+except (ValueError, OSError):
+    # Unparseable/unreadable config: leave it exactly as it is (same
+    # fail-open contract as strip_host_hooks / ensure_rtk_session_end_settings)
+    # — opencode itself will surface the problem to its owner.
+    sys.exit(0)
+if not isinstance(cfg, dict):
+    sys.exit(0)
+
+perm = cfg.get("permission")
+if perm is not None and not isinstance(perm, dict):
+    # e.g. the documented whole-config shorthand `"permission": "ask"` —
+    # a user-set shape we must not replace.
+    sys.exit(0)
+ext = perm.get("external_directory") if isinstance(perm, dict) else None
+if ext is not None and not isinstance(ext, dict):
+    # e.g. `"external_directory": "ask"` — likewise a valid user value.
+    sys.exit(0)
+if not isinstance(ext, dict):
+    ext = {}
+
+changed = False
+if enforce:
+    for path in paths:
+        if path not in ext:
+            ext[path] = "allow"
+            changed = True
+else:
+    # Off: retract only our defaults, and only where they still say "allow"
+    # (a different value means a human put it there).
+    for path in defaults:
+        if ext.get(path) == "allow":
+            del ext[path]
+            changed = True
+
+if ext:
+    if perm is None:
+        perm = {}
+    perm["external_directory"] = ext
+elif isinstance(perm, dict) and "external_directory" in perm:
+    del perm["external_directory"]
+if isinstance(perm, dict) and perm:
+    cfg["permission"] = perm
+
+# Write only when something changed, or when seeding into a config that does
+# not exist yet (never on the retract-only path — nothing to retract, and a
+# knob-off invocation must not create files).
+if changed or (enforce and paths and not os.path.exists(p)):
+    try:
+        with open(p, "w") as fh:
+            json.dump(cfg, fh, indent=2)
+            fh.write("\n")
+        # Match the seed contract (copy_file_from_seed 0600): opencode.json can
+        # carry provider API keys in custom headers.
+        os.chmod(p, 0o600)
+    except OSError:
+        pass  # fail open: a read-only config dir is not bootstrap's problem
+PY
 }
 
 sync_grok() {
@@ -268,7 +542,7 @@ sync_omp() {
 
 # The rtk_data volume mounts at ~/.local/share/rtk, where rtk keeps history.db —
 # the single db every rtk-wired agent appends to and 'rtk gain' reads. The image
-# pre-creates that path as vscode so a *fresh* volume inherits the ownership, but
+# pre-creates that path as aidc so a *fresh* volume inherits the ownership, but
 # Docker seeds a named volume only when it is first created: a volume that
 # already materialised root-owned (built by an image predating that mkdir) stays
 # root-owned through any number of rebuilds, and every rtk invocation then fails
@@ -280,7 +554,7 @@ ensure_rtk_data_dir() {
   [[ -d "$dir" ]] || ensure_dir "$dir" 2>/dev/null || true
   [[ -d "$dir" ]] || return 0
   # -w is the condition that actually matters (uid/gid can differ from 1000 when
-  # align_uid has remapped vscode); only escalate when the check fails.
+  # align_uid has remapped aidc); only escalate when the check fails.
   [[ -w "$dir" ]] && return 0
   sudo -n chown -R "$(id -u):$(id -g)" "$dir" 2>/dev/null || true
   # Re-test rather than trusting chown's exit status: sudo may be absent or
@@ -289,7 +563,7 @@ ensure_rtk_data_dir() {
   # runs from the container entrypoint under `set -e`, where aborting would
   # trade "savings untracked" for "container dead".
   [[ -w "$dir" ]] && return 0
-  echo "[bootstrap] $dir not writable and could not be repaired — 'rtk gain' will record nothing" >&2
+  bootstrap_warn "$dir not writable and could not be repaired — 'rtk gain' will record nothing"
 }
 
 # rtk wiring for the non-claude agents rtk supports (coverage matrix in
@@ -305,7 +579,7 @@ wire_rtk_opencode() {
   command -v rtk >/dev/null 2>&1 || return 0
   rtk init --global --auto-patch --hook-only --opencode >/dev/null 2>&1 || true
   [[ -f "$home_dir/.config/opencode/plugins/rtk.ts" ]] \
-    || echo "[bootstrap] rtk opencode plugin missing after init" >&2
+    || bootstrap_warn "rtk opencode plugin missing after init"
 }
 
 wire_rtk_cursor() {
@@ -315,7 +589,61 @@ wire_rtk_cursor() {
   ensure_dir "$home_dir/.cursor"
   rtk init --global --auto-patch --hook-only --agent cursor >/dev/null 2>&1 || true
   [[ -f "$home_dir/.cursor/hooks.json" ]] \
-    || echo "[bootstrap] rtk cursor hooks.json missing after init" >&2
+    || bootstrap_warn "rtk cursor hooks.json missing after init"
+}
+
+# Wire the review gate into Cursor's ~/.cursor/hooks.json as a `stop` hook:
+# on clean completions the wrapper runs the shared gate check and, when it
+# trips, returns followup_message (Cursor auto-continues the agent with it).
+# Merge, never clobber: rtk's preToolUse entry and any user hooks are
+# preserved. Idempotent. No removal knob here on purpose — when
+# AIDC_ENFORCE_REVIEW_HOOK=0 the gate check exits allow and the entry
+# degrades to a cheap no-op; the file still self-heals on every init/sync.
+wire_aidc_review_cursor() {
+  local wrapper="$scripts_dir/aidc-review-gate-cursor.sh"
+  [[ -f "$wrapper" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  ensure_dir "$home_dir/.cursor"
+  AIDC_CURSOR_HOOK_SCRIPT="$wrapper" python3 - "$home_dir/.cursor/hooks.json" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+cmd = os.environ.get("AIDC_CURSOR_HOOK_SCRIPT")
+try:
+    cfg = json.load(open(p))
+except (FileNotFoundError, ValueError):
+    cfg = {}
+changed = False
+cfg.setdefault("version", 1)
+hooks = cfg.setdefault("hooks", {})
+stops = hooks.setdefault("stop", [])
+have = any(
+    isinstance(e, dict) and e.get("command") == cmd
+    for e in stops
+)
+if not have:
+    stops.append({"command": cmd, "loop_limit": 5})
+    changed = True
+if changed:
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+PY
+  [[ -f "$home_dir/.cursor/hooks.json" ]] \
+    || bootstrap_warn "cursor hooks.json missing after review-gate wiring"
+}
+
+# Install aidc's opencode review-gate plugin. Source of truth is the project
+# scaffold overlay (upgrades on re-init); the copy lands in the global plugin
+# directory. Same wipe-repair contract as wire_rtk_opencode: runs after the
+# plugins rsync on every init/sync.
+wire_aidc_opencode_gate() {
+  local src="$scripts_dir/aidc-review-gate-opencode.ts"
+  local dst="$home_dir/.config/opencode/plugins/aidc-review-gate.ts"
+  [[ -f "$src" ]] || return 0
+  ensure_dir "$(dirname "$dst")"
+  cp "$src" "$dst" 2>/dev/null || true
+  [[ -f "$dst" ]] \
+    || bootstrap_warn "aidc review-gate opencode plugin missing after install"
 }
 
 wire_rtk_omp() {
@@ -335,7 +663,7 @@ wire_rtk_omp() {
     cp "$tmp/.pi/agent/extensions/rtk.ts" "$dst" 2>/dev/null || true
   fi
   rm -rf "$tmp"
-  [[ -f "$dst" ]] || echo "[bootstrap] rtk omp extension missing after init" >&2
+  [[ -f "$dst" ]] || bootstrap_warn "rtk omp extension missing after init"
 }
 
 sync_cursor() {
@@ -347,6 +675,8 @@ sync_cursor() {
   # see docs/security.md.
   copy_file_from_seed "/host-seed/cursor/cli-config.json" "$home_dir/.cursor/cli-config.json" "0600"
   wire_rtk_cursor
+  # After rtk's merge so both writers coexist (merge is idempotent).
+  wire_aidc_review_cursor
 }
 
 sync_gitconfig_overlay() {
@@ -358,8 +688,9 @@ sync_gitconfig_overlay() {
 }
 
 # Make the aidc container-side tools callable by name (agents run aidc-scan
-# before declaring work done — see the seeded CLAUDE.md/AGENTS.md guardrails;
-# aidc-ci is human/agent convenience for replaying the project's workflows).
+# and aidc-review-record before declaring work done — see the seeded
+# CLAUDE.md/AGENTS.md guardrails; aidc-ci is human/agent convenience for
+# replaying the project's workflows).
 # The scripts themselves live in the read-only /workspace/.devcontainer
 # overlay, so symlinks are all that's needed and they track scaffold
 # upgrades automatically.
@@ -368,7 +699,7 @@ scripts_dir="${AIDC_CONTAINER_SCRIPTS_DIR:-/workspace/.devcontainer/scripts}"
 install_tool_links() {
   local name script
   ensure_dir "$home_dir/.local/bin"
-  for name in aidc-scan aidc-ci; do
+  for name in aidc-scan aidc-review-record aidc-ci; do
     script="$scripts_dir/$name.sh"
     [[ -f "$script" ]] || continue
     ln -sf "$script" "$home_dir/.local/bin/$name"
@@ -387,7 +718,7 @@ install_agent_hooks() {
   # without re-writing CLAUDE.md/RTK.md (both already seeded from the host).
   if command -v rtk >/dev/null 2>&1; then
     rtk init --global --auto-patch --hook-only >/dev/null 2>&1 \
-      || echo "[bootstrap] rtk init --global failed" >&2
+      || bootstrap_warn "rtk init --global failed"
     # Verify the hook landed instead of trusting rtk's exit code (it exits 0 on
     # partial success — the same reason the wire_rtk_* helpers assert), and
     # leave the marker unwritten when it did not. That omission IS the retry
@@ -396,7 +727,7 @@ install_agent_hooks() {
     # Matched on the PreToolUse command rather than the bare string "rtk",
     # which the SessionEnd reporter's own path would also satisfy.
     if ! grep -q '"rtk hook' "$home_dir/.claude/settings.json" 2>/dev/null; then
-      echo "[bootstrap] rtk claude hook missing after init — retrying on next start" >&2
+      bootstrap_warn "rtk claude hook missing after init — retrying on next start"
       return 0
     fi
   fi
@@ -406,7 +737,7 @@ install_agent_hooks() {
 }
 
 align_uid() {
-  # No-op unless invoked as root AND /workspace is owned by a non-vscode uid.
+  # No-op unless invoked as root AND /workspace is owned by a non-aidc uid.
   # On macOS (Docker Desktop / OrbStack) bind mounts already present the
   # container user's uid, so this stays dormant. Kept here so the setup is
   # correct if the compose entrypoint is ever switched to root.
@@ -418,8 +749,8 @@ align_uid() {
   host_gid="$(stat -c %g /workspace 2>/dev/null || echo 1000)"
   [[ "$host_uid" -eq 1000 && "$host_gid" -eq 1000 ]] && return 0
 
-  usermod -u "$host_uid" vscode 2>/dev/null || true
-  groupmod -g "$host_gid" vscode 2>/dev/null || true
+  usermod -u "$host_uid" aidc 2>/dev/null || true
+  groupmod -g "$host_gid" aidc 2>/dev/null || true
   chown -R "$host_uid:$host_gid" "$home_dir" /commandhistory 2>/dev/null || true
 }
 
@@ -433,10 +764,10 @@ run_firewall_if_enabled() {
   local refresh="${AIDC_FIREWALL_REFRESH_SECONDS:-300}"
   if [[ "$(id -u)" -eq 0 ]]; then
     AIDC_FIREWALL_REFRESH_SECONDS="$refresh" "$script" \
-      || echo "[bootstrap] firewall init failed" >&2
+      || bootstrap_warn "firewall init failed"
   else
     sudo -n env AIDC_FIREWALL_REFRESH_SECONDS="$refresh" "$script" \
-      || echo "[bootstrap] firewall init failed (sudo required)" >&2
+      || bootstrap_warn "firewall init failed (sudo required)"
   fi
 }
 
@@ -500,8 +831,18 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
       ensure_rtk_data_dir
       sync_tool "$tool"
       ;;
+    seed-auth)
+      # One-shot host→container credential apply, for the moment a fresh
+      # volume's db first EXISTS: opencode creates opencode.db (empty) on its
+      # first run — too late for this bootstrap, which ran before the agent —
+      # so the HOST waits for that file (aidc::opencode_auth_seed_wait) and
+      # execs this mode the moment it appears. Applies the auth snapshot into
+      # the now-real db; synthesis covered the first run via auth.json —
+      # which v2 does not read, so this apply is what actually arms the db.
+      seed_opencode_auth
+      ;;
     *)
-      echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|omp|cursor|all]" >&2
+      echo "usage: bootstrap-state.sh [init|sync|seed-auth] [claude|codex|opencode|grok|omp|cursor|all]" >&2
       exit 1
       ;;
   esac

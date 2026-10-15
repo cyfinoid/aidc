@@ -13,7 +13,7 @@ Two paths, which you can use together:
 
 ## Path 1 — Cursor GUI on the host, execution in the container
 
-`aidc init` already scaffolds the Dev Containers wiring: `.devcontainer/devcontainer.json` points at aidc's `compose.yaml`, service `workspace`, folder `/workspace`, user `vscode`.
+`aidc init` already scaffolds the Dev Containers wiring: `.devcontainer/devcontainer.json` points at aidc's `compose.yaml`, service `workspace`, folder `/workspace`, user `aidc`.
 
 ```bash
 cd /path/to/your/repo
@@ -60,11 +60,11 @@ aidc cursor-agent -- --help   # pass flags through to cursor-agent
 
 aidc runs it as `cursor-agent --sandbox disabled -f`: the container is already the isolation boundary, so cursor-agent's own sandbox is redundant.
 
-The binary is only in the image if `cursor-agent` is in the agent set. It is by default (`AIDC_AGENTS=all`), but if you've pinned the set, include it:
+The binary is only in the image if `cursor-agent` is in the agent set. Since the remaster the default is `AIDC_AGENTS=opencode` (slim base), but you don't have to configure anything: if `cursor-agent` is the first agent you invoke on a fresh project it's baked into the initial build; on an existing project invoking `aidc cursor-agent` asks y/n, then extends the selection (persisted in `.ai-container/project.env`) and rebuilds — only cursor-agent's layer builds, the rest is cached. To pin it up front:
 
 ```bash
 # .ai-container/project.env
-AIDC_AGENTS=claude,cursor-agent
+AIDC_AGENTS=opencode,cursor-agent
 ```
 
 Then `aidc rebuild` — an existing image fast-starts without the new agent.

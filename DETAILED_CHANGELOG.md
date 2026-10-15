@@ -8,6 +8,1576 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-15 — host→container opencode auth seeding + timestamped messages (completes the credential contract)
+
+**Summary:** The user tested the staged 2.6.0 work and hit the gap: host
+opencode-v2 logins still never reached containers — the file seed carries
+`auth.json`, which v2 no longer writes. Implemented the designed
+host→container seeding in both halves, plus the user-requested timestamps on
+every aidc/bootstrap message. Release renumbered 2.6.0 → 2.7.0 at the user's
+call (never tagged; the seeding belongs in the first release).
+
+**Why / process note:** The seeding had been deferred out of the 2.6.0
+release prep without putting that scoping decision back to the user — they
+rightly expected it in 2.6.0. Process correction recorded here and honored
+going forward: deferrals, scope cuts, and version/naming decisions get
+surfaced as explicit decision points, not folded silently into a release.
+
+**How:**
+
+- Host half (`aidc::opencode_auth_snapshot`, `lib/aidc/runtime.sh`, called
+  from `aidc::export_compose_env`): 4 read-only SELECTs off the host db
+  (WAL readers never block opencode) → `.aidc-auth-seed.json` (0600, auth
+  tables only) inside `~/.local/share/opencode/` — exposed to the container
+  by the existing read-only opencode-data seed mount, no new mounts.
+  `cmp`-quiet (rewrites only on content change — an early draft included a
+  `generated` epoch that defeated this; dropped, no consumer read it).
+- Container half (`seed_opencode_auth` + `seed_opencode_auth_json`,
+  `bootstrap-state.sh.tmpl`, called from `sync_opencode`): python3 + sqlite3
+  (parameter binding — token values never touch shell escaping or logs).
+  Volume db present: version-tolerant column intersection with the db's
+  schema; PK-conflict upsert on `time_updated` recency (fresher host login
+  wins, fresher container-side refresh kept); `INSERT OR IGNORE` for
+  `account_state` (no timestamps); pre-v2 volume dbs are a clean no-op with
+  the init hint. Volume db ABSENT (fresh folder): bootstrap KICKS opencode
+  headlessly (`timeout 30 opencode run "/exit" || true` — `run` initializes
+  the db + schema before any model call, and the managed-service port is
+  still free at bootstrap) and then applies the snapshot rows into the
+  now-real db, so the FIRST session carries current host logins. Empirically
+  established and load-bearing: v2 ignores `auth.json` entirely (fresh db +
+  populated auth.json → zero credential rows, `auth list` empty), so an
+  earlier auth.json-synthesis intermediate was removed as dead code. Counts
+  logged, values never. Backstop: `aidc::opencode_auth_seed_wait` (host,
+  called on every agent launch) watches for the container db and execs
+  `bootstrap-state.sh seed-auth` (new mode) the moment it appears — also
+  gives RUNNING containers new host logins without a restart.
+- Knob: `AIDC_OPENCODE_SYNC_AUTH=0` gates both halves.
+- Observability (user request), tuned after the first cut sprawled the
+  routine line over every launch (export_compose_env runs several times per
+  command): the host logs auth-table counts ONLY on refresh (`refreshed the
+  opencode auth seed for containers (host db: credential=18, …)`); the
+  cmp-quiet pass is `aidc::debug`-only; the container apply line logs what
+  was pushed AND post-apply totals (`container db now has credential=N,
+  account=M`); bootstrap output goes to `docker logs` (it is the container
+  start command); host output to the terminal.
+- Timestamps: `aidc::log`/`warn`/`die` → `[aidc YYYY-MM-DD HH:MM:SS] …`;
+  the template's 11 `[bootstrap]` echoes → a timestamped `bootstrap_warn`
+  helper. Suite message contracts grep substrings, so prefixes break
+  nothing (verified by the full run).
+
+**Commands:** `bash tests/opencode-auth-seed.test.sh` (14 passed) · full
+suite 40/40 green · `shellcheck --severity=warning` clean · `aidc-scan`
+clean.
+
+**Verification:** New suite covers both halves: snapshot shape/0600/knob/
+no-host-db/partial-schema/cmp-quiet; seed insert/upsert/downgrade-protection/
+account_state idempotency/column-intersection/pre-v2 no-op/knob/missing-db
+hint/corrupt-snapshot rollback (14 cases — the knob cases are discriminating
+in both directions: knob-off asserted non-application, knob-on contrast
+asserts the same snapshot applies). The suite caught two real bugs in
+the first draft (the `generated` field breaking cmp-quiet; a column-0 `}` in
+the embedded python breaking function extraction). Fresh-eyes review found
+no P1s; adopted fixes: the snapshot tmp is created 0600 via `install` and
+the mv/chmod install path is guarded (a kill mid-write or a perms accident
+can no longer leave the secret file over-permissive or abort an aidc
+command); `AIDC_OPENCODE_SYNC_AUTH` is forwarded through compose
+`environment:` so one setting in config.env *or* project.env gates both
+halves; both knob tests made discriminating; a corrupt-snapshot rollback
+case added; the python success line, `aidc::debug` and the trace banner
+timestamped too; changelog range/suite-count wording corrected.
+
+**Notes:** Host-to-container runs only at bootstrap (container start), so a
+host login made mid-session lands at the next session — the snapshot
+regenerates on every compose-env pass regardless. The container-side counts
+log what changed, never values; the snapshot file sits in the host's own
+opencode dir at 0600, the same trust domain as the `auth.json` beside it.
+
+---
+
+## 2026-10-15 — CI pin-check: codex + grok missing from the sbom image (installer drift)
+
+**Summary:** The sbom workflow's `check-image-pins` failed on the PR:
+`codex` and `grok` were "executable file not found" in the built
+`aidc-image-scan:ci` while the image build itself had succeeded. Both
+upstream install scripts changed behavior under the agent stages'
+assumptions. Fixed by pinning assumptions explicitly and adding build-time
+assertions so future installer drift fails the BUILD, not the pin check.
+
+**Diagnosis (empirical, ran both installers in sandbox HOMEs):**
+- codex (chatgpt.com/codex/install.sh): with `--release`, the current
+  installer writes the binary under `$HOME/.codex/packages/standalone/…` and
+  symlinks `$CODEX_INSTALL_DIR/codex` (default `$HOME/.local/bin`). In the
+  build stage `HOME=/root`, so everything landed under `/root/…` — outside
+  every path the main stage copies.
+- grok (x.ai/cli/install.sh): the installer downloads the versioned binary
+  to `$HOME/.grok/downloads/grok-<platform>` and creates
+  `$GROK_BIN_DIR/{grok,agent}` as SYMLINKS to it. The build-stage `test -x`
+  passed because the target existed inside the stage — but the final image
+  copies only `.local/`, so the copied symlink dangled and the runtime exec
+  failed with "executable file not found in $PATH". (Installer exits 0
+  regardless — green build, missing agent.)
+
+**How:** the grok stage sets `HOME=/home/aidc`, lets the installer run
+best-effort, then installs the downloaded binary from
+`~/.grok/downloads/` explicitly and asserts. The codex stage — whose
+dereference approach failed in the real CI build for a reason the truncated
+log didn't expose — no longer uses the installer at all: it downloads
+`codex-package-<target>.tar.gz` from `releases.openai.com/codex/releases/`
+(GitHub fallback), verifies against the published `SHA256SUMS`, extracts,
+installs `bin/codex` into `.local/bin`, and asserts `--version` executes.
+All six agent stages end with `test -x` on their binary (drift detector:
+upstream changes fail the image build, where they're diagnosable, instead
+of the pin check). New suite cases in
+`tests/base-image-stages.test.sh` (32 → 38) assert every agent-1 stage
+carries its `test -x` guard and mkdirs `~/.local/bin` first.
+
+**Verification:** sandbox-ran both installers before and after the fix
+(codex-cli 0.162.1 and grok 1.0.52 binaries produced at the expected paths
+and executable); stage suite 38/38; full loop 40/40; shellcheck + aidc-scan
+clean. The definitive validation is the CI sbom build on push.
+
+---
+
+## 2026-10-15 — GitHub Actions updated to latest + dependabot
+
+**Summary:** All six pinned actions updated to their latest releases —
+checkout v6→v7.0.1, upload-artifact v4→v7.0.2, cache v4.3.0→v6.1.0,
+setup-buildx v3.9.0→v4.4.1, scorecard-action v2.4.3→v2.5.0, codeql-action
+v3.36.3→v4.38.3 — and `.github/dependabot.yml` added (actions ecosystem,
+weekly) so they stay current.
+
+**How:** latest tags verified authoritatively via `git ls-remote --tags`
+per action repo; SHA pins updated to the peeled commit SHAs (repo
+convention: `@<sha> # vX.Y.Z`), applied across all 8 workflows (checkout
+×9, upload-artifact ×3, the rest ×1 — 16 `uses:` total, all SHA-pinned).
+`AIDC_OPENCODE_SYNC_AUTH` untouched. Dependabot cannot run the workflows,
+so the first CI run on each bump PR stays the validation.
+
+---
+
+## 2026-10-15 — v3.0.0: final renumber of the first tagged release + retro-tagging plan
+
+**Summary:** At the user's instruction, the first tagged release lands as
+**v3.0.0** (the in-flight 2.7.0 label was never tagged). `AIDC_VERSION` →
+3.0.0; the changelog section retitled `## [3.0.0] - 2026-10-15`; README
+highlights retitled. No other version references existed (grepped).
+
+**Retro-tagging:** the user wants older versions populated as tags so they
+can be checked out. Versions 2.2.0–2.5.0 exist as real states of the tree
+(each `bumping X` commit sets `AIDC_VERSION` and cuts its changelog section);
+2.6.0/2.7.0 never existed as code states. The provided command loop finds
+each bump commit via `git log -S` on the version line, tags it annotated,
+and self-verifies by reading the version back out of the tagged tree. Each
+pushed tag triggers `release.yml`, which validates tag↔`AIDC_VERSION` at
+that commit and publishes a GitHub Release from that commit's changelog
+section — so retro-tags populate Releases too. Push order: oldest first,
+`v3.0.0` last so GitHub's "Latest" lands on it.
+
+---
+
+## 2026-10-15 — release prep: README refresh, tests CI (version landed on v3.0.0)
+
+**Summary:** Pre-tag work for the first tagged release: `AIDC_VERSION`
+2.5.0 → 2.6.0 → 2.7.0 across this session, landing on a single versioned changelog section (first-tag framing; later renumbered to [3.0.0] — see the v3.0.0 entry below; the
+auth-direction fix moved there from the 2.5.0 cut), a README refresh
+(release/tests/shellcheck/Scorecard badges, "What's new in v2.7.0",
+credential-direction accuracy), and a new `tests` GitHub Actions workflow
+running the 40 hermetic unit suites on every push/PR — the one `.github` gap
+found while double-checking the release machinery.
+
+**Why:** The 2.5.0 label was a changelog cut, never a tag; the post-cut fixes
+(the opencode host-credential re-seed, the auth-direction guards) justified a
+renumber to 2.7.0 when the seeding feature landed, so the first tag carries it. The release workflow is
+tag-driven and validates two invariants — tag == `AIDC_VERSION` (parsed from
+`lib/aidc/common.sh` only; grep confirmed no other copy) and a non-empty
+`## [X.Y.Z]` CHANGELOG section — both pre-checked locally before pushing.
+The tests workflow closes a real gap: suites exercising merge gates, scrub
+guards, seed contracts, and scaffold structure ran only when a human
+remembered, on one machine.
+
+**How:** version bump (single line); `tests.yml` (ubuntu-latest, no Docker —
+the suites stub the container plumbing; checkout pinned to the same v6 SHA
+the other workflows pin; read-only permissions; per-suite output with
+`::error` annotation on failure); release.yml comment-drift fix; CHANGELOG
+surgery (new section, auth bullet moved, Added/Changed entries); README
+badge block + highlights + two accuracy edits (feature bullet, session-sync
+paragraph — both now state the one-way credential contract and the v2
+auth-in-db caveat with the device-code interim).
+
+**Verification:** full suite 39/39 (version bump safe — suites use their own
+fixtures), `shellcheck --severity=warning` clean, `aidc-scan` clean,
+`release.yml` invariants pre-checked (version line parses; `[2.7.0]` section
+non-empty).
+
+**Notes:** after merge: `git tag v2.7.0 && git push origin main v2.7.0` —
+the workflow publishes the Release from the changelog section. Scorecard
+badge populates on its next scheduled run. Follow-ups: host→container db
+auth seeding (next minor), host `opencode auth list` audit for
+container-originated duplicates.
+
+---
+
+## 2026-10-15 — auth direction: container credential rows never flow to the host (opencode v2 keeps auth in the db)
+
+**Summary:** The user's constraint — "only creds from host to container, never
+the reverse" — turned out to be violated by the *existing* session sync, not
+just by the planned host→container auth-seeding feature. Auditing the merge
+against that constraint found that since opencode v2, provider logins live in
+`opencode.db` (`credential` + `account` tables), and `aidc::opencode_db_merge`
+iterated every shared table — so every sync could `INSERT OR IGNORE`
+container-side credential rows into the host's own db. Fixed with two guards:
+the merge now skips auth tables (known names + a token-column schema catch),
+and the quarantined db copy is scrubbed of credential rows right after
+extract. Session merging is unchanged.
+
+**Why (the diagnosis chain that found it):** A report that a fresh OpenAI
+login on the host never reached container sessions. Evidence gathered across
+host and container: the host's `auth.json` has not been written by a login
+since Sep 21 (v1 era) — a device-code login today touched only
+`opencode.db-wal` — while `opencode auth list` on the host shows *four*
+OpenAI entries where `auth.json` holds one; the container's v2.0.29 db has a
+`credential` table with exactly the 8 providers of the seeded `auth.json`
+(v2 imports the legacy file on first run) and empty `account` tables. Net:
+v2 auth is db-resident; aidc seeds only `auth.json`; and the sync's
+table-agnostic merge meant container db auth rows were eligible to flow the
+wrong way on every auto-sync trigger.
+
+**How:**
+
+- `aidc::opencode_table_is_auth` (`lib/aidc/sync.sh`): true for the known
+  auth tables (`credential`, `account`, `account_state`, `control_account`;
+  case-folded — SQL resolves table names case-insensitively, same reasoning
+  as the journal exclusion) **or** any table with `access_token`/
+  `refresh_token` columns (schema-driven catch for future upstream auth
+  tables; deliberately specific — generic names like `value`/`key` would
+  false-positive session tables and silently drop session data).
+- `aidc::opencode_db_merge`: skips such tables in both full and
+  restricted-additive modes; logs the excluded names once per sync (names
+  only, never values).
+- `aidc::opencode_scrub_auth` + wiring in `aidc::sync_session_tool`: the
+  quarantined `opencode.db` is scrubbed right after the tar extract, before
+  the merge stages its private copy — DELETE in one transaction, then
+  `PRAGMA wal_checkpoint(TRUNCATE)` (a checkpoint cannot run inside a
+  transaction — first attempt failed with exactly that). Best-effort with a
+  warn-and-name-the-directory on failure. This makes the at-rest quarantine
+  honest again: the docs' "credentials never leave the container" was already
+  untrue for v2 dbs.
+- Direction contract completed in the same release — host→container auth seeding (see the 2.7.0 Added entry):
+  read host rows, insert into the container volume's db with
+  `INSERT OR IGNORE`/time-updated-wins, epoch-gated like the session merge,
+  `AIDC_OPENCODE_SYNC_AUTH=0` opt-out. Never the reverse.
+
+**Commands:** `bash tests/sync-sessions.test.sh` (44 passed) · full suite 39
+/39 green · `shellcheck --severity=warning` clean · `aidc-scan` clean.
+
+**Verification:** Three new cases: direct `aidc::opencode_db_merge` with
+populated `credential`/`account`/`future_auth` tables — session rows merge,
+auth rows never do, and the token-column guard catches an auth table under an
+unknown name; end-to-end `aidc::sync_session_tool` — the at-rest quarantine
+db is scrubbed while the host db still receives the session row (the host
+fixture carries its own credential row so the host-side assertion is
+falsifiable); scrub-helper unit case. First implementation failed its own
+test (checkpoint inside the transaction) — exactly what the case exists to
+catch. Fresh-eyes review (diff-only handoff) found no P1s; adopted fixes:
+warn on the sqlite3-absent scrub path (was a silent return — unflagged
+credential rows in the at-rest copy), `PRAGMA secure_delete=ON` so freed
+page content is zeroed (closing the freelist residual the reviewer probed),
+the falsifiable host-fixture assertion, a restricted-additive-mode guard
+case with the audit-log assertion, and honest changelog wording.
+
+**Notes:** Existing host dbs are NOT retro-cleaned — with `INSERT OR IGNORE`
+and no provenance column, container-originated rows (suspects: duplicate
+"OpenAI"/"OpenAI 2" entries in `opencode auth list`) are indistinguishable
+from host-created ones; audit manually. The interim user workaround for
+in-container auth stays: device-code `opencode auth login` inside the
+container (the credential lands in that repo's volume db and persists).
+Host on opencode v2.0.25 vs container 2.0.29 — the epoch-ahead gap 2.5.0
+already documents; upgrading the host closes it.
+
+---
+
+## 2026-10-14 — opencode host-credential re-seed: `opencode.json` + `auth.json` now re-seed on every bootstrap
+
+**Summary:** New sessions in a container could not see credentials the user
+configured at host level (`~/.config/opencode/opencode.json` provider blocks,
+`~/.local/share/opencode/auth.json`) unless they manually ran `aidc sync-config
+opencode`. Root cause: the seed contract was init-once — `copy_file_from_seed`
+returns early in `init` mode when the target exists, and the opencode targets
+live in persistent named volumes — so the first-ever seed shadowed every later
+host change. `sync_opencode` now seeds both credential-bearing files through a
+new mode-independent `sync_file_from_seed`: host wins whenever the host file
+exists; a missing host file is a no-op (in-container-only logins survive).
+
+**Why:** The opencode volumes (`opencode_home`, `opencode_data_home`) exist to
+persist state across container recreation — which is exactly what made the
+staleness permanent: recreation re-runs `bootstrap-state.sh init`, but init-once
+skips anything the volume already has, so a host `opencode auth login` or an
+apiKey rotated in `opencode.json` *after* the first seed never propagated. The
+bind mount itself was never the problem — `/host-seed/opencode` is live and
+showed the new host content all along; only the copy policy was stale. The
+init-once contract remains right for everything the container may legitimately
+customize (settings, plugin dirs — and the post-copy rewiring
+(`ensure_opencode_permissions`, `wire_rtk_opencode`, `wire_aidc_opencode_gate`)
+already re-adds aidc's own additions after any overwrite), but credentials are
+the one file class where the host is unambiguously the source of truth: a stale
+key looks identical to a broken setup, and "run `aidc sync-config` after
+rotating" is exactly the kind of undocumented step that surfaces as "the
+container can't authenticate" weeks later.
+
+**How:**
+
+- New `sync_file_from_seed` in
+  `templates/devcontainer/scripts/bootstrap-state.sh.tmpl`:
+  `copy_file_from_seed` minus the init-once early return, plus a default 0600
+  third argument, plus warn-and-continue on a failed copy — a failed
+  `cp`/`chmod` (unwritable volume target) logs `[bootstrap] could not re-seed
+  …` and keeps the existing copy instead of killing the container start under
+  `set -e` (same fail-open convention as the script's python merges, and the
+  same failure class `ensure_rtk_data_dir` repairs).
+- `sync_opencode` uses it for `/host-seed/opencode/opencode.json` and
+  `/host-seed/opencode-data/auth.json`. Everything else in the function is
+  unchanged (plugins dir stays init-once; permission seeding stays *after* the
+  config overwrite; rtk + review-gate plugins re-wire after the rsync).
+- Other agents untouched: codex/grok/omp/cursor/claude keep init-once + manual
+  `aidc sync-config <tool>`. `aidc sync-config opencode` still works — sync
+  mode already force-overwrote, so it is now merely redundant for these two
+  files.
+
+**Commands:** `bash tests/agent-auth-seed.test.sh` (11 passed) ·
+`bash tests/opencode-permissions.test.sh` (20 passed) · full suite
+`for t in tests/*.test.sh; do bash "$t"; done` — 39/39 suites, 0 failures.
+
+**Verification:** Behavioral cases added to `tests/agent-auth-seed.test.sh`
+before the recorder stubs take over: a host seed overwrites a stale volume copy
+(content + *exact* 0600 mode checked — `find -perm 0600` is bits-set and would
+also match 0644), a missing host seed leaves the volume copy untouched, a
+failing `cp` (shadowed function) degrades to a `[bootstrap] could not re-seed`
+warning with the stale copy kept instead of killing the start, and a structural
+guard asserts `sync_file_from_seed` contains no `$mode` reference (the
+init-once skip must not reappear). The recorder assertions moved from `FILE|`
+to `SYNC|` records; `tests/opencode-permissions.test.sh` case 10 (permission
+seeding must follow the config overwrite) updated to the new call name.
+
+**Notes:** Design choice — host-wins rather than newest-mtime-wins: aidc's own
+permission seeding and opencode's token refresh both rewrite the volume copies,
+so mtime comparison would permanently favor the volume and the bug would
+reappear for any host edit after the first start. Deliberately scoped to
+opencode (the reported case): extending host-wins to codex/grok auth.json is a
+one-line change per tool if it surprises someone the same way, but each tool
+has its own in-container-login tradeoff worth a separate decision. Docs
+updated: `docs/security.md` (seed table prose + the inherit-a-login summary)
+and the README bullet; CHANGELOG entry folded into `[2.5.0]` (pre-tag).
+
+---
+
+## 2026-10-14 — schema-skip log split: name the mismatch (epoch-ahead vs column drift) and its remedy
+
+**Summary:** When the opencode session merge refuses on schema grounds, the
+log line now says *which* mismatch it hit — container migration journal ahead
+(expected transient; upgrade the host's opencode), journal on one side only,
+or column/type drift on a named table (genuine mismatch) — instead of the old
+conflated "container db newer than host, or column/type drift" that left the
+two causes with different remedies indistinguishable.
+
+**Why:** A user pasted the skip line right after the container pin moved to
+opencode 2.0.29 — with the host on opencode **v2.0.25** (not v1, as first
+assumed). Diagnosis from live data: the container db's `migration` journal
+holds 50 ids, the newest dated `20260923013825`, `20261007190000`,
+`20261010180456` — i.e. the v2 line keeps appending journal ids across
+*minors*, so a 2.0.25 host holds a strict subset and the epoch arm of the
+gate refuses exactly as designed (same refusal as v2-container→v1-host,
+same remedy: upgrade the host; its db migrates in place on next launch and
+the next `aidc sync-sessions` merges, including everything parked in the
+quarantine). The old conflated message could not say which arm had tripped —
+the user had no way to tell "expected, upgrade the host" from "genuine drift,
+investigate". The rtk history.db merge shared the same conflated wording.
+(Evidence note, recorded honestly: the container journal and the host's
+*version* were verified; the host's journal contents were not inspected —
+under the new precedence the message reads epoch-ahead either way, since
+epoch reasons are checked before drift.)
+
+**How:**
+
+- `aidc::opencode_db_schema_match` (`lib/aidc/sync.sh`) keeps its return
+  status semantics but now prints a reason token on refusal (stdout was
+  previously unused by the function): `epoch-ahead <n>` (container journal
+  holds n ids the host lacks; n distinguishes a minor gap of 1–2 from a
+  v1→v2 gap of 12), `journal-one-sided`, or `column-drift <table>`. Silent
+  on success. **Epoch reasons are checked before per-table drift, first
+  match wins** (a fresh-eyes review catch): a newer opencode build typically
+  `ALTER`s shared tables too — the normal way the schema grows — so the pair
+  is both journal-ahead and column-drifted, and the journal gap is the root
+  cause with the remedy; checking drift first would have reported the
+  "genuine mismatch" line with no remedy in exactly the motivating scenario.
+  The refusal *set* is unchanged — only which reason is reported.
+- `aidc::opencode_merge_to_base` captures the token and logs per cause: the
+  epoch-ahead line states the gap ("migration journal 1 id(s) ahead — the
+  container runs a newer opencode build") and the remedy (upgrade the host's
+  opencode to at least the container's version and launch it once; the host
+  db migrates in place and the next sync merges); column drift names the
+  first drifted table; one-sided says the epochs can't be compared; a
+  defensive `*` arm keeps a generic line for any unforeseen token.
+- `aidc::rtk_merge_to_base` (same gate, shared for the rtk history.db) also
+  captures — required, not cosmetic: with the gate now writing stdout, an
+  uncaptured `if ! gate` call would leak the raw token to the terminal. Its
+  drift arm names the table; rtk carries no migration journal, so the epoch
+  arms are inert there (kept in the `*` fallback).
+- `docs/opencode-schema-epochs.md`: the v2-epoch section records the
+  confirmed live case (2.0.25 host vs 2.0.29 container) and the
+  implementation notes describe the reason tokens.
+- Tests: both suites' `aidc::log` stubs now append to a capture file instead
+  of discarding (matching the real function's `"$*"` signature), and the
+  message contract is asserted — epoch-ahead names cause + gap + remedy and
+  not drift; drift names the table and not an epoch; one-sided names its
+  cause; host-ahead merge logs no skip; rtk drift names `commands`; a
+  journal-ahead **plus** drifted-table pair reports epoch-ahead (precedence).
+
+**Commands:**
+
+    bash tests/sync-sessions.test.sh   # 27 passed (6 new: 4 message-contract + 2 precedence)
+    bash tests/rtk-gain.test.sh        # 38 passed (1 new message assertion)
+    shellcheck --severity=warning lib/aidc/sync.sh tests/sync-sessions.test.sh tests/rtk-gain.test.sh
+    aidc-scan
+
+**Verification:** Both suites green (27/27 and 38/38); shellcheck clean at
+CI's severity; live diagnosis cross-checked against the container db
+(`SELECT id FROM migration ORDER BY id` — 50 ids) and the user-reported host
+version (`opencode v2.0.25`). Fresh-eyes subagent review over the diff
+(checklist per AGENTS.md) — findings and dispositions below.
+
+**Notes:**
+
+- The user's skipped sessions are safe at
+  `~/.local/share/aidc/sessions/opencode/aidc-e4b116dc`; once the host's
+  opencode reaches ≥ 2.0.29 and has been launched once, the next sync merges
+  them (each sync refreshes the quarantine from the full container db).
+- The gate's stdout is now part of its contract; any future caller must
+  capture it or accept the token printing.
+
+**Pre-completion review (fresh-eyes subagent, findings → dispositions):**
+
+- **P2 — drift checked before journal** → fixed: gate reordered to check
+  epoch reasons first (root cause + remedy beats symptom); refusal set
+  unchanged; new case 14b pins the precedence (journal-ahead + drifted
+  shared table → epoch-ahead message).
+- **P3 — "confirmed live" overstated** (host journal never inspected; only
+  the version was user-reported) → fixed here, in the epoch doc, and in the
+  session log: the skip and the container journal are verified facts; the
+  arm attribution is now a design guarantee under the new precedence, not
+  an observation.
+- **P3 — assertion-count claim wrong** (5 was the pair's total, misfiled
+  under sync-sessions) → fixed: 27 (6 new) / 38 (1 new).
+- **P3 — session log referenced a "recorded outcome" that didn't exist yet**
+  → fixed: this entry is written after the record step; see the session log.
+- **P3 — `case '*'` fallbacks dead-by-construction** → kept deliberately,
+  comments now say so: a future gate token must never silence the skip line
+  entirely (fail-safe, not dead code by accident).
+- **P3 — stub captured `$1`, real `aidc::log` prints `$*`** → fixed in both
+  stubs.
+
+Re-ran after the fixes: 27/27 + 38/38 green, shellcheck clean, `aidc-scan`
+clean; outcome recorded via `aidc-review-record`.
+
+**Extended later the same session: verified-additive gap merging.**
+
+User challenge after seeing the diagnosis: *".29 is point release in .25
+range so they should merge seamlessly."* Verified rather than assumed (and
+the point matters — the 2026-09-09 session recorded the same lesson):
+
+- Fresh 2.0.25 db (scratch HOME, `opencode serve` boot): **49 journal ids**
+  vs the container's 50. The gap is exactly one id,
+  `20261010180456_project_time_archived`.
+- Upstream migration file (fetched from the v2.0.29 tag): a single
+  `ALTER TABLE project ADD time_archived integer` — purely additive.
+- Bidirectional schema diff over every shared table of both dbs: no delta
+  other than `project.time_archived`.
+
+So the pair IS mergeable — not because point releases never change schema
+(this range did), but because the change is additive. Journal-ahead is still
+refused by default because a journal id can also be a data-reshaping
+migration (`reset_v2_session_state` class) invisible to pragma dumps.
+
+**How:**
+
+- `AIDC_OPENCODE_ADDITIVE_MIGRATIONS_DEFAULT` in `lib/aidc/sync.sh` — the
+  allowlist (currently the one id above, with its receipt in
+  `docs/opencode-schema-epochs.md`). `AIDC_OPENCODE_ADDITIVE_MIGRATIONS`
+  overrides/extends; `${var-default}` (not `:-`) so explicitly-empty
+  disables, unsetting restores the default.
+- Gate: on a journal gap, `aidc::opencode_gap_all_additive` (every gap id on
+  the allowlist) AND a runtime purely-additive shape check (host columns ⊆
+  container columns on every shared table, same comm machinery reversed)
+  → prints `additive-ahead <n>` and returns 0; anything else refuses with
+  `epoch-ahead <n>` / `column-drift <table>` as before.
+- Merge: `aidc::opencode_db_merge` takes a third arg for restricted-columns
+  mode — collists come from the destination instead of the source (the shape
+  check guarantees dst ⊆ src, so dst's list is the shared intersection).
+- **Bug surfaced and fixed while implementing:** the merge loop used to
+  include the `migration` journal table itself (safe in full mode only
+  because the gate's invariant made every journal insert a no-op collision).
+  A restricted merge would have INSERTed the container's gap id into the
+  HOST's journal — falsifying the host's epoch fingerprint so its own
+  upgrade would skip replaying a migration it never ran (permanent schema
+  divergence). `migration` is now excluded from both modes (rtk's merge too,
+  defensively; lowercased compare, since SQL table names are case-insensitive
+  while bash matches are not); the additive-merge test asserts the host
+  journal is untouched, and a case-variant-journal test pins the exclusion.
+- Caller logs the degraded mode visibly: "host opencode.db is 1 migration(s)
+  behind the container (gap verified additive-only); merging shared columns
+  (gap columns land empty until the host's opencode catches up)".
+
+**Commands (extension):**
+
+    # live verification (scratch HOME under /tmp/opencode, cleaned after):
+    VERSION=2.0.25 bash install.sh --no-modify-path   # then `opencode serve` boot
+    sqlite3 .../opencode.db "SELECT id FROM migration ORDER BY id;"   # 49 ids
+    curl raw.githubusercontent.com/sst/opencode/v2.0.29/.../20261010180456_project_time_archived.ts
+    bash tests/sync-sessions.test.sh   # 33 passed (6 new: 14c-14g)
+    bash tests/rtk-gain.test.sh        # 38 passed
+    shellcheck --severity=warning lib/aidc/sync.sh tests/sync-sessions.test.sh
+    aidc-scan
+
+**Verification (extension):** 33/33 + 38/38 green; shellcheck clean;
+`aidc-scan` clean. Fresh-eyes subagent re-review of the extended diff
+(checklist per AGENTS.md): no P1/P2; five P3 findings, all fixed —
+
+- journal-table exclusion was an exact case-sensitive bash match while SQL
+  addresses tables case-insensitively (a `Migration`-cased db could slip
+  past and get its journal falsified) → lowercased compare in both merge
+  functions + case-variant regression test (14g);
+- the rtk caller silently dropped the new `additive-ahead` success token
+  (mispointed `AIDC_RTK_DB` would then fail a full-mode merge with a cryptic
+  rollback message) → loud skip with its own log line;
+- the allowlist loop's `for a in $allow` glob-expanded overrides containing
+  `*?[`, and blank journal ids were skipped rather than refused →
+  `read -a` word-splitting + blank-id-refuses-the-gap;
+- `comm` needs BINARY-collation input ordering but ran under the ambient
+  locale (pre-existing exposure, two new call sites widened it) →
+  `LC_ALL=C` on every gate `comm`;
+- the reviewer independently re-verified the upstream receipts (50 vs 49
+  journal ids at v2.0.29/v2.0.25, the sole delta being the allowlisted
+  migration) and the claimed invariants (a)–(e).
+
+Re-recorded via `aidc-review-record` after the fixes. Side-quest debt paid:
+the experiment's 2.0.25 install had downdated the container's own binary via
+the shared `~/.opencode/bin` — reinstalled 2.0.29 and verified
+`opencode --version` before proceeding.
+
+**Extended once more the same session: post-exit sync freshness.**
+
+User, after confirming the fix worked on a manual sync: *"earlier message
+came at /exit so it was the exit codeblock there is also a start and other
+sections where sync is kicked in. check and ensure we use common methods for
+all of these."*
+
+**Audit (every trigger, verified in context):** up/down→up recovery,
+rebuild, down, destroy, opencode-web bring-up, agent exit, serve exit —
+all call `aidc::auto_sync_sessions`; manual `aidc sync-sessions` calls
+`cmd_sync_sessions`; both funnel into the same `aidc::sync_session_tool` →
+gated per-tool merges covered by the test suite. No divergent path exists;
+container-side hooks (`rtk-session-end.sh`, review-gate plugins) are
+display-only and never run the host merge. **The `/exit` stale message was
+therefore not a second method** — it was the same method executed from the
+agent wrapper's in-memory definitions: `bin/aidc` sources `lib/aidc/*.sh`
+once at startup, the wrapper blocks on the agent for the session's
+lifetime, and the post-exit sync runs functions captured before any
+mid-session edit.
+
+**How:**
+
+- `lib/aidc/sync.sh`: new `aidc::auto_sync_sessions_fresh` — with
+  `AIDC_ROOT` set (bin/aidc exports it), re-sources `lib/aidc/sync.sh` from
+  disk inside a subshell and runs the ordinary `auto_sync_sessions` there,
+  so the parent's possibly-stale definitions cannot be the ones that sync;
+  without `AIDC_ROOT` (tests source the lib directly) it falls back to the
+  in-process call, keeping test stubs authoritative. `AIDC_AUTO_SYNC_SESSIONS=0`
+  gates both paths identically. Broken tree → skip, never stale fallback:
+  a `bash -n` pre-gate (parses without executing) plus an explicit
+  in-subshell `if ! . "$module"; then exit 0; fi` catch — the latter because
+  a subshell that is the left operand of `||` has `set -e` suppressed
+  inside, so a failed source would otherwise continue into the parent's
+  inherited (stale) definitions, the exact bug being fixed (fresh-eyes
+  review catch, reproduced empirically). Freshness is module-scoped by
+  design: all sync/merge logic lives in sync.sh; cross-module helpers
+  (compose, log) remain the wrapper's in-memory versions.
+- `lib/aidc/runtime.sh`: exactly the two post-exit sites (agent-runner exit,
+  `opencode serve` exit) call the fresh variant. The short-lived triggers
+  are fresh processes by construction and stay on the direct call.
+  (`aidc shell` is a third long-lived wrapper with no post-exit sync at all
+  — pre-existing, flagged by review, left as-is: interactive-shell exits
+  relying on the next trigger is the current contract.)
+- `README.md`: the auto-sync paragraph notes the module-scoped freshness.
+- Tests (`tests/sync-sessions.test.sh`, case 17): a shadowed
+  `sync_session_tool` (simulating stale in-memory code) is ignored when
+  `AIDC_ROOT` is set — the on-disk reload performs the real merge; the
+  no-`AIDC_ROOT` fallback uses the parent's (shadowed) definitions; the
+  opt-out knob gates the fresh path itself (AIDC_ROOT re-set for that
+  sub-case); an unparseable or missing module skips without a stale
+  fallback. Definitions and the compose_capture stub are restored after
+  the section so nothing leaks.
+
+**Commands:** `bash tests/sync-sessions.test.sh` (37 passed),
+`shellcheck --severity=warning` on sync.sh/runtime.sh/the test (clean),
+full 40-suite run, `aidc-scan` clean, fresh-eyes re-review, re-recorded.
+
+---
+
+## 2026-10-14 — opencode to v2 (2.0.29), the external-directory permission seed, and a full pin refresh
+
+**Summary:** Three related changes. (1) The container's opencode pin moves
+from the v1 line (1.18.32) to v2 (2.0.29): new install channel, a rewritten
+review-gate plugin on the v2 plugin API, `opencode-web` following the
+`web`→`serve` rename, and docs for the new db epoch. (2) The recurring
+permission prompts for `/opt/CORE_LOGICS` and rtk's data dir — opencode
+asking *every session* because `external_directory` defaults to ask and
+"always" approvals are session-scoped — are fixed by a merge-only config
+seed. (3) Every other image pin is refreshed (rtk 0.48.0→1.0.1 major).
+
+**Why:** The 2.2.0 changelog deferred the v2 move with two explicit revisit
+conditions: rtk shipping a v2-compatible plugin, and the sync/insights
+storage format being verified. Both are now true — rtk 0.52.0 added
+"support OpenCode V2, Desktop, and Windows" (current rtk is 1.0.1), and we
+verified the storage story by running the actual binaries rather than
+trusting docs. The permission prompts were a user report from daily use:
+"opencode inside aidc container doesn't get the /opt permissions; it asks for
+those and rtk folder permissions invariably every time."
+
+**How (v2 research, all verified empirically against 2.0.29):**
+
+- *Install channel.* v2 ships via npm (`@opencode/cli-<os>-<arch>`), installed
+  by `https://opencode.ai/v2/install` — the same installer shape (fetch to
+  file, `VERSION` env pin, `--no-modify-path`, installs to
+  `~/.opencode/bin`). The anomalyco/opencode GitHub releases (which
+  `update-pins.sh` used) only serve the v1 line — v1.19.0 was latest there —
+  so the pin script now reads
+  `https://opencode.ai/update/api/latest/cli/npm` (`"version":"2.0.29"`).
+- *Storage.* Same `~/.local/share/opencode/` + `opencode.db`; same Drizzle
+  `migration` journal. A fresh v2 db carries 50 migration ids; opening a copy
+  of a real v1 db (38 ids) migrates it in place to 50, keeping the v1 tables
+  (`session`, `message`, `part`, `todo`) and adding v2 ones (`session_v2`,
+  `session_inbox`, `session_pending`, `instruction_*`, `kv`, `worktree`). New
+  sessions are written to `session_v2`. The existing epoch gate + generic
+  shared-table merge in `aidc::opencode_merge_to_base` therefore needs no
+  code change: v2-container→v1-host skips to quarantine by design (container
+  journal ahead), v2→v2 merges, and the epoch table in
+  `docs/opencode-schema-epochs.md` gained a v2 section recording all of this.
+- *Plugin API.* v2 does not run v1 plugins. The new API is
+  `{ id, setup(ctx) }` (what `Plugin.define` returns — we deliberately use a
+  plain object with top-level `node:` imports, mirroring rtk's own plugin,
+  so nothing depends on host module mapping under OpenCode Desktop/Electron).
+  Decisive detail found by live-testing a serve instance: **`session.idle`
+  does not fire in v2 serve/run** — the turn-end signal is
+  `session.execution.succeeded|failed|interrupted`. The plugin matches those
+  plus `session.idle` (TUI coverage) with per-session serialization so the
+  overlapping events cannot double-prompt. A second v2 behavior matters:
+  one plugin instance loads per location and events fan out across
+  locations, so the plugin acts only when the session's own directory
+  (`ctx.session.get(...).location.directory`) matches `ctx.location.directory`
+  — exactly one instance nudges per session. The check-script lookup walks up
+  ≤5 parent dirs from the session directory (the v1 worktree fallback without
+  git plumbing). Validated end-to-end against a live 2.0.29 serve with a
+  fake always-tripping gate: exactly one injected checklist prompt
+  ("FAKE-CHECKLIST … nudge 1/3 for this tree state"), loop guards deduping
+  subsequent turns.
+- *`opencode-web`.* v2 renamed `web` to `serve` (same `--port/--hostname`),
+  and `serve` **always** enforces a password: unset → it mints and prints
+  one; clients authenticate with `OPENCODE_PASSWORD` (not v1's
+  `OPENCODE_SERVER_PASSWORD`). `aidc opencode-web` now execs `opencode serve`,
+  generates/delivers `OPENCODE_PASSWORD` by env-key reference (honoring a
+  pre-set v1 `OPENCODE_SERVER_PASSWORD`), warns that `--no-auth` can no
+  longer disable auth (v2 mints its own), and accepts-but-ignores
+  `--username` (v2 is password-only). `docs/security.md` and the README
+  reflect the new posture.
+- *rtk.* 1.0.1's breaking changes (`rtk proxy`→`rtk bypass`, licence split)
+  don't touch aidc's surface (`rtk init --global --auto-patch --hook-only
+  --opencode`, `rtk gain -f json`, `--agent cursor` — all verified against
+  the 1.0.1 binary). Its generated plugin is dual-shape (v2 `setup()` + v1
+  `server()`), so the bootstrap wiring is unchanged.
+
+**How (permission fix):** opencode's permission docs + live db inspection
+showed the `permission` table empty while the user approved prompts every
+session — "always" is documented as session-scoped. The ask comes from
+`external_directory` (default "ask") for any path outside the workspace.
+`ensure_opencode_permissions` in `bootstrap-state.sh.tmpl` merges
+`permission.external_directory` allow rules for `/opt/CORE_LOGICS/**`,
+`~/.local/share/rtk/**`, and `/tmp/**` into `~/.config/opencode/opencode.json`
+after the config seed copy (sync mode overwrites the file, so the seed must
+run after it): keys are only added when absent (a user rule of any value is
+never touched), the file is chmod 0600 (provider API keys can live in
+headers), an unparseable config is left untouched (fail open, like the
+sibling python helpers), no-python3 fails open, and
+`AIDC_OPENCODE_SEED_PERMISSIONS=0` / `AIDC_OPENCODE_EXTERNAL_ALLOW` (empty
+disables) are the knobs. Note the OS-level ownership was never the problem
+(`/opt/CORE_LOGICS` and `~/.local/share/rtk` are `aidc:aidc`) — this is
+purely opencode's in-tool permission layer.
+
+**Commands and verification:**
+
+- Live v2 experiments in `/tmp/opencode` (scratch HOME): install 2.0.29 via
+  the v2 channel, `opencode run` + `opencode serve` + `opencode api` drives,
+  event-stream logging plugin, v1-db migration test, fake-gate repo.
+- `bash tests/*.test.sh` — all 40 suites green (601 cases), including the
+  new `tests/opencode-permissions.test.sh` (16) and the updated
+  `tests/opencode-web.test.sh` (17) and `tests/update-pins.test.sh` (26).
+- `shellcheck --severity=warning` on every changed shell file: clean (CI's
+  exact gate).
+- `aidc-scan`: clean (semgrep, gitleaks, shellcheck; rest out of scope).
+
+**Notes / gotchas:**
+
+- The running aidc-for-aidc container keeps opencode 1.18.32 until the next
+  `aidc rebuild` (the `.devcontainer/` scaffold mount is read-only from
+  inside; templates are the source of truth, refreshed on `aidc init`).
+- A host still running opencode v1 will see container-session syncs skip the
+  host-db merge (journal-ahead epoch gate) until the host's own opencode
+  upgrades — sessions remain in the aidc quarantine; that is the designed
+  degradation, not a regression.
+- `aidc sync-config opencode` from a v1 host still rsyncs the host's
+  *plugins* into the container; v1-shaped host plugins will not run under
+  container v2 (upstream stance: "V1 plugin implementations do not run in
+  V2"). aidc-managed plugins (rtk's, the review gate) are v2-native and
+  re-installed after the rsync. Host plugin porting is the host owner's move.
+- The sbom scaffold template (`templates/ci/github-sbom.yml.tmpl`) drifted
+  from the Dockerfile pins because `update-pins.sh` only writes the
+  Dockerfile; re-synced manually this time. A future change could teach
+  update-pins.sh to rewrite it too.
+
+---
+
+## 2026-10-04 — visible watchdog for the Keychain OAuth token lookup
+
+**Summary:** `aidc::resolve_claude_oauth_token` (the 2.3.0 feature that reads
+`CLAUDE_CODE_OAUTH_TOKEN` from the macOS Keychain on demand) can block for a
+very long time with zero on-screen feedback, and its only hint — "if this
+hangs, macOS is waiting on a Keychain access prompt" — was an `aidc::debug`
+line, invisible without `--debug`. A watchdog now prints that hint visibly
+(`aidc::warn`) once the read outlives a grace period, and the completion debug
+line reports elapsed seconds.
+
+**Why:** user report — after `aidc upgrade` to 2.3.0, the first
+`aidc claude` printed `agent 'claude' is ready` and then sat silent "for a
+long long time" before eventually resolving on its own, despite Keychain
+approvals already being in place. Two plausible blocks fit: (1) a Keychain
+ACL dialog hidden behind other windows (Always-Allow grants are per-app and
+can be invalidated by macOS updates or item rewrites, so "approved once"
+doesn't hold forever), or (2) `securityd` simply being slow — notably, case
+(2) explains the self-resolution, since a dialog needs a click. Either way
+the failure mode is the same: the `security -w` read blocks silently and the
+user has no idea aidc is even involved.
+
+**How:** in `lib/aidc/profiles.sh`, the blocking
+`security find-generic-password ... -w` read is now bracketed by a watchdog:
+
+- A background subshell sleeps `AIDC_KEYCHAIN_HINT_DELAY` seconds (default 5;
+  `0` or a malformed value disables it) and then `aidc::warn`s a fixed string:
+  what is likely blocking, find the hidden dialog and click Always Allow, and
+  the Ctrl-C/export-`CLAUDE_CODE_OAUTH_TOKEN` escape hatch. No secret values.
+- Spawned *inside* the `secret_begin`/`secret_end` region so a `--debug`
+  xtrace can't leak into the subshell (the region suppresses xtrace at fork
+  time).
+- Once the read returns, the watchdog subshell is `kill`ed and `wait`ed (both
+  `|| true`) — the killed subshell can no longer print, so there is no
+  spurious hint on the normal fast path, and the code is set -e safe. (The
+  subshell's `sleep` child is not reaped — `kill` signals only the subshell —
+  but the orphan is silent and self-limiting: it exits on its own within
+  hint_delay seconds holding nothing that matters.)
+- Elapsed time added to the completion debug line, so a slow `securityd` is
+  measurable next time.
+
+**Commands:**
+
+    bash tests/resolve-oauth-token.test.sh   # 11 passed, 0 failed
+    shellcheck lib/aidc/profiles.sh tests/resolve-oauth-token.test.sh
+
+**Verification:** `tests/resolve-oauth-token.test.sh` gained a `STUB_DELAY`
+knob on its `security` stub (models the hung lookup) and four cases: the
+hint fires on a slow lookup and the token still resolves; a fast lookup with
+an unfired 30s watchdog stays silent (kill-before-fire works); `0` disables;
+a malformed value (`abc`) disables. Existing 7 cases unchanged and green.
+`aidc-scan` clean (semgrep/gitleaks/shellcheck).
+
+**Notes:** `aidc doctor`'s keychain check (status.sh) reads item *metadata*
+only — no `-w` — which does not trigger the ACL gate, so it can't hang and
+needed no change. The stale `security` binary on PATH caveat: on Linux hosts
+there is no `security` tool at all (no-op arm runs first).
+
+---
+
+## 2026-10-03 — agent install prompt + first-build bake in run_tool
+
+**Summary:** Invoking an agent that isn't in the project image used to
+silently auto-extend `AIDC_AGENTS` and rebuild (interactive *and* scripted
+runs alike), and the rebuild ran through compose's fast-path (`up -d --build`)
+without `--force-recreate` and without re-verifying the binary — so when the
+rebuild didn't take, the launch surfaced as a bare `exec: claude: not found`
+from inside the container, with no hint that a rebuild chain had run and
+failed to replace the container. New behavior, per the reported expectation:
+
+1. **First-ever run is baked, not patched.** `run_tool` now scaffolds first
+   (so `project.env` and the selection are loaded), then checks
+   `aidc::workspace_materialized` (container in any state, or built image).
+   On a virgin workspace the invoked agent extends the selection *before*
+   `ensure_container_running`, so the initial build carries it — no
+   build→probe→rebuild dance, no prompt.
+2. **Existing workspace: y/n prompt.** A missing agent on a materialized
+   workspace prompts before touching anything (`aidc::install_missing_agent`).
+   y → extend + rebuild; n → hard error with the fix, selection untouched.
+   An agent that is *selected* but missing (stale image — previously a
+   straight die) gets the same prompt framed as a rebuild. Non-interactive
+   runs (scripts/CI, stdin not a TTY) keep the historical silent auto-extend.
+3. **The rebuild is verified.** The install path rebuilds with
+   `up -d --build --force-recreate` (mirroring `aidc rebuild`) and re-probes
+   `command -v` afterwards; a rebuild that didn't land now dies with
+   "still missing after the rebuild — run 'aidc rebuild'" instead of the
+   cryptic exec error.
+4. **`AIDC_AUTO_EXTEND_AGENTS=0` fails earlier and cheaper:** before any
+   project-image build, when the agent isn't in the selection — a
+   misconfigured first run no longer builds a useless opencode-only image
+   before erroring. (Selected-but-stale with the knob off errors after the
+   container check, with the matching rebuild hint.)
+5. **`AIDC_NO_BUILD=1` is honored in the install path:** it refuses with
+   "installing requires a rebuild" instead of the implicit build the old
+   compose_up-routed path technically allowed to be skipped — parity with
+   the knob's documented "never build implicitly" contract.
+
+**Why:** user report — `aidc claude` as a first command failed with
+"claude not found"; after `aidc opencode`, a later `aidc claude` kept failing
+until a manual `aidc rebuild`. The silent extend was also surprising: a
+multi-minute rebuild should be an explicit yes.
+
+**Changed files:**
+
+- `lib/aidc/runtime.sh` — new `aidc::selection_includes`,
+  `aidc::workspace_materialized`, `aidc::install_missing_agent`;
+  `aidc::agents_extend_selection` gains a "first-build" reason (different log
+  line) and reuses `selection_includes`; `run_tool` restructured
+  (scaffold → VM ensure → knob gate → first-build bake → container → probe →
+  install prompt); `export_compose_env` comment updated.
+- `tests/agents-opt-in.test.sh` — rewritten: 26 hermetic cases covering the
+  first-build bake (persisted before container start), interactive y/n (with
+  `--force-recreate` + re-probe assertions), the stale-image prompt, the
+  non-interactive legacy path, the early knob-off error, the AIDC_NO_BUILD
+  refusal, and unit coverage for the two new helpers. Subshell-capture
+  pitfalls documented in-suite.
+- `tests/token-delivery.test.sh` — harness seam: stub the two new seams
+  (`ensure_workspace_ready`, `workspace_materialized`) so the suite keeps
+  exercising only token delivery.
+- `lib/aidc.sh` (help), `README.md`, `docs/install.md`, `docs/cursor.md` —
+  behavior wording.
+
+**Deliberately not changed:** `templates/devcontainer/Dockerfile.base.tmpl`'s
+comment still says "auto-extends ... when an invoked agent is missing" —
+editing it would change the base content hash and force a fleet-wide base
+rebuild for a comment; the runtime-side comments carry the new behavior.
+
+**Commands / verification:**
+
+    bash tests/agents-opt-in.test.sh     # 26 passed, 0 failed
+    bash tests/token-delivery.test.sh    # 15 passed
+    full suite: 37/38 suites green; tests/agent-auth-seed.test.sh fails on
+    pristine HEAD too (pre-existing, unrelated bootstrap fixture bug)
+
+---
+
+## 2026-10-03 — release 2.3.0 cut (version line + changelog section)
+
+**Summary:** `lib/aidc/common.sh` bumped to `AIDC_VERSION="${AIDC_VERSION:-2.3.0}"`;
+the accumulated `[Unreleased]` CHANGELOG entries (agent install prompt +
+first-build bake, container user rename, minimal OS base) cut into
+`## [2.3.0] - 2026-10-03` with a fresh empty `[Unreleased]` above, per
+`docs/releasing.md` steps 1–2. Minor bump: additive behavior change, no CLI
+breaks. Commit/tag/push (steps 3) left to the maintainer. Consequence per
+design: projects stamped 2.2.0 now report scaffold-stale and are offered
+`aidc upgrade`.
+
+While re-running the suite after the bump, a test-harness bug introduced by
+the same day's knob fix surfaced (hidden earlier by a `tail` that masked a
+missing summary line): `tests/agents-opt-in.test.sh` case 14 ran `run_tool`
+directly in the current shell with `INTERACTIVE=1` leaked from case 13b, took
+the prompt path, and `aidc::die`'s `exit 1` — which escapes `|| true` in the
+current shell — killed the suite before its summary. Fixed by resetting
+`INTERACTIVE` explicitly in cases 14/15 and subshelling case 14; suite is now
+25/25 → 26/26 after the follow-up fixes. Full suite: only the pre-existing
+`agent-auth-seed` failure remains
+(fails on pristine HEAD; flagged 2026-09-26).
+
+---
+
+## 2026-09-26 — container user renamed vscode → aidc (uid/gid 1000 unchanged)
+
+**Summary:** With the base image self-owned (previous entry), the container
+user identity no longer has to match the devcontainers-base convention.
+Renamed to `aidc` everywhere it identifies the *user*: home `/home/aidc`,
+group `aidc`, sudoers file `/etc/sudoers.d/aidc`, `USER aidc`,
+`remoteUser: "aidc"`, compose `user: aidc`. uid/gid stay 1000.
+
+**Trigger:** "now since we are doing this ourselves. replace vscode user to
+aidc user."
+
+**Renamed (files touched):**
+
+- `templates/devcontainer/Dockerfile.base.tmpl` — groupadd/useradd/sudoers
+  block, `.zshrc` COPY target, `/commandhistory` chown, `USER`, `HOME`,
+  PATH shim prefix, agent-stage mkdirs and `COPY --chown` lines, volume
+  mount-point mkdir block, header comments.
+- `templates/devcontainer/Dockerfile.tmpl` — toolchain `ENV PATH` prefix,
+  security-tools comment, `COPY --chown` for project-setup.sh.
+- `templates/devcontainer/compose.yaml.tmpl` — `user:`, `HOME`,
+  `GIT_CONFIG_GLOBAL`, `AIDC_CONTAINER_HOME`, `CLAUDE_CONFIG_DIR`, all eight
+  named-volume mount `target:` paths.
+- `templates/devcontainer/devcontainer.json.tmpl` — `remoteUser` only.
+  `customizations.vscode` and `ms-vscode-remote.*` extension IDs are VS
+  Code-the-editor namespaces — deliberately untouched.
+- `templates/devcontainer/scripts/bootstrap-state.sh.tmpl` — `home_dir`
+  default, `align_uid`'s `usermod`/`groupmod` targets, comments.
+- `templates/devcontainer/project-setup.sh.tmpl` — header comment.
+- `lib/aidc/common.sh` — `AIDC_CONTAINER_USER`/`AIDC_CONTAINER_HOME`
+  defaults (env overrides still win, so anything pinned to the old values
+  keeps working through a transition).
+- `lib/aidc/runtime.sh` — `ensure_tool_links` home default.
+- `lib/aidc/sync.sh` — the six agent session-store container paths.
+- `scripts/image-size-report.sh` — `du` targets and table label.
+- `docs/install.md`, `docs/security.md`, `docs/cursor.md`,
+  `docs/apple-container.md` — path table, exec snippet, prose.
+- Tests: `base-image-os` (provisioning patterns), `base-image-stages`
+  (mkdir patterns), `claude-config-dir`, `rtk-gain` (fixture layout +
+  template grep), `sync-sessions` (fixture remap), `scan-link` (default
+  home + hermeticity fix).
+
+**Why uid/gid 1000 must not move:** host bind-mount compatibility —
+`/workspace` is owned by the host user, normally uid 1000; the whole
+`align_uid` mechanism exists for the cases where it isn't.
+
+**Why existing volumes survive:** named volumes are keyed by *name* and
+re-seed only when fresh. Renaming the user moves the mount *target*
+(`/home/vscode/.claude` → `/home/aidc/.claude`) but the same volume lands
+there, and everything inside is uid 1000 — now `aidc`'s uid. No data
+migration needed.
+
+**Hermeticity bug found by the rename:** `tests/scan-link.test.sh`'s
+default-home case relied on `AIDC_CONTAINER_HOME` being unset in the
+environment — but *this container* (built from the old image) exports
+`AIDC_CONTAINER_HOME=/home/vscode` via compose, so the case silently
+asserted the ambient value instead of the default. It passed on the old
+code only because ambient matched the old literal. The case now forces
+`AIDC_CONTAINER_HOME=''` (`:-` default kicks in) — shellcheck SC1007
+avoided by using `''`.
+
+**Verification:** full suite `tests/*.test.sh`: 37 passed, 1 failed —
+`agent-auth-seed.test.sh`, which fails identically on a pristine HEAD
+worktree (`git worktree add`, both suites run side by side): pre-existing,
+environmental, unrelated to the rename — flagged, not fixed here.
+shellcheck clean on touched shell files; aidc-scan clean.
+
+**Notes:** a running container built from the old image (like this session
+container) still has its `vscode` user and exports
+`AIDC_CONTAINER_HOME=/home/vscode` — the env knobs make scaffold scripts
+behave correctly inside it regardless. New/`aidc rebuild`ed projects get
+the `aidc` user end to end. Historical changelog entries and session logs
+intentionally still say `vscode` — they document the past state. In
+particular, the preceding base-image entry (same Unreleased batch) quotes
+`vscode` provisioning strings because it was authored before this rename;
+that entry describes Change A as merged, this entry supersedes the names.
+
+---
+
+## 2026-09-26 — self-owned minimal OS base: devcontainers base retired for stock ubuntu:26.04
+
+**Summary:** The shared base image (`Dockerfile.base.tmpl`) was built
+`FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd…`.
+That base cost ~110 MB compressed vs ~30 MB for stock ubuntu:24.04 and ~42 MB
+for ubuntu:26.04, and shipped ~70 packages (nano, wget, man-db, ncdu, strace,
+dialog, apt-utils, lsb-release, oh-my-zsh, …) that nothing in the scaffold
+uses — pure grype-triage surface. It was kept because it silently provided
+load-bearing pieces. This change repins to `ubuntu:26.04`
+(`@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78`,
+the OCI index digest as of the 2026-09-16 monthly push) and provisions those
+pieces explicitly.
+
+**Trigger:** "do we really need that as the base image should we create our
+own base image minimal and optimal and reduce the fluff that way" — followed
+by a candidate comparison (debian 13 / ubuntu 26.04 / alpine) on registry
+sizes before committing.
+
+**Candidate evaluation** (Docker Hub compressed sizes, amd64): alpine 3.22
+3.8 MB, ubuntu:24.04 29.8 MB, ubuntu:26.04 41.6 MB, debian:13 49.4 MB,
+devcontainers/base:ubuntu-24.04 ~110 MB. Alpine was ruled out on
+compatibility, not size: semgrep (heaviest always-on scanner) publishes
+manylinux/glibc wheels only — no musl; Temurin ships no musl JDK; the
+claude/opencode native binaries are bun-compiled glibc targets; and every
+checksum-pinned GitHub artifact would need a second musl naming+SHA variant,
+doubling the `update-pins.sh` matrix. Debian 13 was fully compatible but
+strictly worse than Ubuntu here (largest base, no workflow difference).
+26.04 won over 24.04: newer packages, LTS to 2031 vs 2029, +12 MB — and the
+base repin was happening either way, so the migration is not done twice. All
+pinned binaries/debs are glibc-forward-compatible with the newer base;
+`gh` 2.46 confirmed present in resolute/universe; nodesource uses the
+distro-agnostic `nodistro` suite.
+
+**What the devcontainers base was providing (all now explicit):**
+
+- `vscode` user uid/gid 1000 → stock `ubuntu` user/group (uid/gid 1000,
+  shipped by default on ubuntu 24.04+ images — the reviewer's rootfs pull of
+  the pinned digest confirmed `ubuntu:x:1000:1000` in /etc/passwd) is
+  removed with `userdel --remove ubuntu || true` + `groupdel ubuntu || true`
+  first, or `groupadd --gid 1000 vscode` aborts the build; then
+  `useradd --create-home --shell /usr/bin/zsh` in the `base` stage, before
+  `USER vscode`.
+- passwordless sudo → `/etc/sudoers.d/vscode`, `0440` (the thin per-project
+  layer's toolchain arms build as vscode via `sudo apt-get`).
+- `git`, `openssh-client`, `less`, `procps` → added to the apt list (git and
+  openssh-client were entirely invisible before — never installed anywhere in
+  the repo, always inherited).
+- `git config --system --add safe.directory '*'` → preserves devcontainers
+  behavior for bind mounts owned by a non-1000 host uid.
+- zsh config → minimal `.zshrc` heredoc (`HISTFILE=/commandhistory/
+  .zsh_history` matching the existing bash volume wiring, share/ignore-dups
+  setopts, compinit, simple prompt). oh-my-zsh NOT carried over: ~100 MB of
+  the inherited layer, and no scaffold component or agent uses it; humans can
+  add it via project-setup.sh.
+- Dockerfile.toolchain.tmpl → same 26.04 digest; now installs
+  `ca-certificates curl` (stock ubuntu lacks them; every arm fetches over
+  TLS) and keeps its rust-arm `build-essential`.
+
+**Deliberately not carried over:** nano, wget, man-db, ncdu, strace, dialog,
+apt-utils, lsb-release, oh-my-zsh. wget in particular: every pinned fetch in
+all three templates uses curl; projects wanting wget add it in
+project-setup.sh.
+
+**Expected size impact:** ~70 MB less per base image (~110 → ~42 MB
+compressed) — roughly 2–3% of a multi-GB final image, since the tooling
+layers dominate. The primary wins are CVE surface (~70 fewer packages for
+the always-on grype scans) and supply-chain ownership (Canonical index
+digest instead of Microsoft's feature-built image, and no more waiting on
+devcontainers/base rebuilds to pick up distro patches — repin ubuntu directly
+via the existing "docker pull, read Digest" workflow).
+
+**Files changed:** `templates/devcontainer/Dockerfile.base.tmpl` (FROM,
+apt list, user/sudo/git/zsh block), `templates/devcontainer/Dockerfile.toolchain.tmpl`
+(FROM + curl/ca-certificates prelude), `.github/scripts/validate-scaffold.sh`
+(lint shim `lint_base=ubuntu:26.04` — tag not digest, so the lint shim
+doesn't churn on monthly repins), new `tests/base-image-os.test.sh`.
+
+**Verification:** `bash tests/base-image-os.test.sh` (17 cases: same digest
+in both templates, anchored to FROM/ARG pin lines; no non-comment
+mcr/devcontainers references across templates/devcontainer; previously
+inherited packages present; stock-ubuntu-user removal guard present;
+provisioning ordered before `USER vscode`, zsh HISTFILE wired, toolchain
+curl present); `bash tests/base-image-stages.test.sh`
+(32) still green; toolchain-volume/compose-file-args/update-pins/
+check-image-pins/validate-scaffold/devcontainer-env suites all green
+(119 total); `bash -n` + shellcheck clean; aidc-scan clean. Digest resolved
+via the Docker Hub tag API (OCI index, media type
+`application/vnd.oci.image.index.v1+json`), matching the existing
+multi-arch index-pin convention. First real `docker build` of the template
+in CI (image-size.yml, sbom.yml) is the remaining smoke — no docker daemon
+in the working container to pre-verify the build.
+
+**Notes:** `tests/clean.test.sh` uses `ubuntu:24.04` strings as canned
+`docker images` fixtures — cosmetic mock data, left alone. `lib/aidc/vm.sh`
+pins an ubuntu 24.04 *cloud image* for the VM provider — a separate runtime,
+out of scope here. `aidc::base_image_tag` keys the content hash of
+`Dockerfile.base` itself, so every project rebuilds its shared base once
+after pulling this change; old `aidc-base:<hash>` images become garbage
+collectable via `aidc clean`.
+
+---
+
+## 2026-09-26 — release 2.2.0 cut; opencode v2 evaluated, v1 pin advanced to 1.18.32
+
+**Summary:** The review-gate work (multi-agent pre-completion review) is cut
+as `2.2.0` per `docs/releasing.md` (version line in `lib/aidc/common.sh`,
+`[Unreleased]` → `[2.2.0] - 2026-09-26` in CHANGELOG.md, fresh empty
+Unreleased above). Commit/tag/push are left to the maintainer (signing key).
+Alongside: `OPENCODE_VERSION` pin advanced 1.18.30 → 1.18.32 (the version
+this container runs and the plugin was validated against), and OpenCode v2
+was evaluated as a candidate for the default agent — and deferred.
+
+**Trigger:** "bump the version of aidc also please... investigate what are
+the improvements we have in v2 of opencode does that helps us in reducing
+complexity of our code with opencode being our default agent should we bump
+opencode version to v2."
+
+### The v2 evaluation (evidence, not vibes)
+
+Sources: opencode.ai v2 docs (plugins, build/plugins, intro), the installed
+API's own type definitions, GitHub tags. Facts:
+
+- **v2 is a separate major and channel**: v2.0.9 current; installs via
+  `https://opencode.ai/v2/install` / npm `@opencode/cli` / brew
+  `opencode-v2` tap; the v1 script and package are unchanged.
+- **The plugin API is a ground-up rewrite**: v1's hook-object
+  (`{ "tool.execute.before": ... }`) becomes `Plugin.define({ id, setup(ctx) })`
+  with domain contexts (`ctx.session`, `ctx.vcs`, `ctx.storage`,
+  `ctx.event.subscribe`) and typed hooks (`ctx.session.hook("prompt"|"context"|
+  "compaction"|...)`, `ctx.tool.hook`, `ctx.shell.hook`,
+  `ctx.permission.hook`).
+- **Decisive negative**: v2's hook inventory contains *no* end-of-turn /
+  stop / idle interception hook. Session hooks fire at prompt admission,
+  model dispatch, transport, retry; tool/shell/permission hooks fire around
+  operations. Nothing fires when the agent finishes a turn — which is the
+  one moment the review gate needs. The gate's opencode front end
+  (session.idle event → shared check → prompt injection, with signature
+  dedup + nudge cap as loop protection) is therefore required on v2 too;
+  only call shapes improve (`ctx.session.prompt({ sessionID, text })`,
+  `ctx.session.synthetic`, durable `ctx.storage` for the nudge ledger).
+  Net complexity delta for us: ~zero, arguably negative (v2 needs a manual
+  `event.subscribe()` iterator + AbortController cleanup instead of v1's
+  one-line `event` hook).
+- **Migration risk for aidc specifically**: rtk's opencode plugin is a v1
+  named-function export — compatibility with v2's loader is unverified;
+  config schema changes (`plugin` → `plugins` array) touch the seeded
+  `~/.config/opencode/opencode.json` and rtk init; and aidc's session
+  sync/insights parse opencode's storage, whose layout may change across
+  majors (the config-vs-data-dir split pattern in CORE_LOGICS documents how
+  much rides on that format).
+- v1.18.32 is also where object-form plugin loading landed (1.18.29+), the
+  compatibility path v2 docs recommend for dual-support packages.
+
+### Decision
+
+Stay on v1; advance the pin to 1.18.32 with a comment at the pin pointing at
+this analysis. Revisit triggers: rtk ships a v2-compatible plugin; sync/
+insights verified against v2 storage; or opencode adds a completion-time
+hook (which would genuinely simplify the gate). The move is then a two-line
+change (install URL + version ARG).
+
+### Commands & verification
+
+```bash
+git ls-remote --tags https://github.com/anomalyco/opencode   # v1.18.32 latest v1; v2.0.9 latest v2
+bash tests/check-image-pins.test.sh                           # fixture-based, unaffected
+bash tests/review-hook.test.sh && bash tests/scan-hook.test.sh
+aidc-scan
+```
+
+---
+
+## 2026-09-26 — review gate extended beyond Claude Code: opencode plugin + cursor stop hook
+
+**Summary:** The pre-completion review gate shipped earlier today enforced
+only for Claude Code; opencode — the aidc *default* agent since the image
+remaster — and cursor-agent had prose-only guardrails. Both runtimes turn out
+to have usable end-of-turn hook points, so the gate now runs everywhere aidc
+can hook, off one shared check implementation.
+
+**Trigger:** "is it only catering to claude code stop hook. what about
+opencode or other agents we have in system."
+
+### Surface research (what each runtime actually offers)
+
+- **opencode 1.18.32** — plugins (TS) receive `client` (SDK), `$` (Bun
+  shell), `worktree`, `directory`; an `event` hook exposes `session.idle`.
+  Two traps found while reading the *installed* API's type definitions
+  (`packages/plugin/src/index.ts`), not just the docs: (1) the community
+  ralph-loop plugin returns `{ inject }` from the event handler — the
+  current `Hooks.event` signature is `Promise<void>`, so that return path is
+  not a supported contract; (2) the reliable channel is
+  `client.session.prompt(...)` (documented "useful for plugins" for the
+  `noReply` variant; the normal variant triggers an agent turn, which is
+  exactly the block-and-continue semantics wanted here).
+- **cursor-agent** — `hooks.json` has a first-class `stop` hook whose output
+  `{ followup_message }` auto-continues the agent, with a built-in
+  `loop_limit` (default 5). Input carries `status` and `workspace_roots`.
+- **codex** — `notify` fires after turns but cannot inject into them;
+  **grok / omp** — no feed-back hook point. These stay prose-only (omp's pi
+  extension surface is a possible follow-up).
+
+### Design
+
+Single source of truth for the gate logic (the same drift concern the
+checklist warns about): `aidc-review-hook.sh` gained a `--check` mode —
+exit 0 allow / 1 trip (checklist on stdout, tree signature on stderr) /
+2 fail-open-skip — with the Claude Stop hook as the default mode over the
+same core. New front ends are thin:
+
+- `templates/devcontainer/scripts/aidc-review-gate-opencode.ts.tmpl` —
+  plugin: on `session.idle`, run the check via Bun shell with
+  `AIDC_REVIEW_HOOK_WORKSPACE=<worktree>`; on trip, inject the checklist via
+  `client.session.prompt`. Loop protection is self-imposed (opencode has no
+  `stop_hook_active`/`loop_limit`): per-session set of already-nudged tree
+  signatures (the `sig` line) plus a per-session cap,
+  `AIDC_REVIEW_GATE_MAX_NUDGES` (default 3). Installing = copying the file
+  from the read-only scaffold overlay into `~/.config/opencode/plugins/`
+  (`wire_aidc_opencode_gate`, run after the plugins rsync on every
+  init/sync, same wipe-repair contract as rtk's plugin).
+- `templates/devcontainer/scripts/aidc-review-gate-cursor.sh.tmpl` —
+  wrapper: reads Cursor's stdin payload, gates only `status=completed`, maps
+  the first workspace root onto the check, emits
+  `{"followup_message": checklist}` on trip, always exits 0 otherwise
+  (Cursor treats other exit codes as hook failures; the gate's posture is
+  fail-open). Registered into `~/.cursor/hooks.json` by
+  `wire_aidc_review_cursor` — a merge (rtk's `preToolUse` entry and user
+  hooks preserved), `loop_limit: 5`, idempotent, deliberately no removal
+  knob (knob off ⇒ the check exits allow and the entry is a cheap no-op).
+
+`AIDC_ENFORCE_REVIEW_HOOK` now gates all three surfaces from project.env /
+config.env. AGENTS.md template coverage note updated; CLAUDE.md stays
+Claude-phrased (accurate as-is). `lib/aidc/common.sh` registers both new
+scaffold files.
+
+### Testing & honesty notes
+
+- `tests/review-hook.test.sh` grew 23 → 32 cases: `--check` matrix
+  (trip/allow/docs-only/helper-missing, sig line format), cursor wrapper
+  (trip → followup JSON, error status → silent, recorded → silent), and the
+  hooks.json merge (adds stop entry, preserves rtk, idempotent, no-wrapper
+  no-op).
+- **Not testable in this container:** the opencode plugin's TS is never
+  executed here (no standalone bun/node; opencode is a self-contained
+  binary). Its logic is deliberately thin (one event handler, one shell-out,
+  one SDK call), syntax re-read manually, and the failure mode of a bad load
+  is opencode's plugin loader warning + a prose-only gate — fail-open, not
+  silent misbehavior. First live `aidc up` in an opencode project is the
+  real test.
+- Set -e hazards in the new tests (expected-failure commands) were caught by
+  reading before the first run; no false greens shipped.
+
+### Commands & verification
+
+```bash
+bash tests/review-hook.test.sh   # 32/32
+bash tests/scan-hook.test.sh     # 14/14 (no regression)
+shellcheck templates/devcontainer/scripts/aidc-review-{hook,gate-cursor}.sh.tmpl tests/review-hook.test.sh
+aidc-scan
+```
+
+---
+
+## 2026-09-26 — pre-completion review gate: surface the bug class AI PR reviewers kept finding after push
+
+**Summary:** Two llama-swap PRs cut through aidc (#1158 Intel/Metal hw
+detection, #1159 sysfs GPU stats) shipped with P1/P2 logic bugs that every
+in-container gate — tests, coverage, `aidc-scan` — scored clean on; they were
+found only by Greptile/CodeRabbit reviewing the diff *after push*. All of them
+are semantic: a fallback-defeating early return, capacity double-counted for
+integrated GPUs in direct contradiction of the commit's own stated intent,
+fdinfo VRAM sums without per-client dedup, records with missing `drm-pdev`
+counted against every GPU on the host, repo test-naming directives ignored,
+tests that call the real host binary for an absence-case. aidc now attacks
+that class at dev time: a seeded "Pre-completion review" section in
+CLAUDE.md/AGENTS.md (checklist + two-stage protocol), a `aidc-review-record`
+helper, and — Claude Code only — a second Stop hook that blocks "done" until
+a review is recorded for the current tree state and re-arms on any later edit.
+
+**Trigger:** "is it possible we could have surfaced these bugs in aidc itself.
+if yes i want to create a plan on how to do it." — plan approved with: enforce
+by default, both review stages (self + fresh-eyes subagent), hermeticity as a
+checklist bullet.
+
+### What landed
+
+- `templates/AGENTS.md.tmpl` / `templates/CLAUDE.md.tmpl` — "Pre-completion
+  review (non-negotiable for code changes)" section inside the
+  `aidc:core-logics` block: two-stage protocol (self-review; fresh-eyes
+  subagent handed only the diff + task description + repo docs) over a
+  six-item checklist distilled from the llama-swap findings.
+- `templates/devcontainer/scripts/aidc-review-record.sh.tmpl` — the record
+  helper. Keys a tree signature (tracked diff + status + *content of every
+  untracked file*, sorted) and writes `.ai-container/review-done` carrying
+  hash, timestamp, and the caller's findings summary. Exit 1 on empty
+  summary / clean tree, 2 on environment errors.
+- `templates/devcontainer/scripts/aidc-review-hook.sh.tmpl` — the gate.
+  Mirrors the scan hook's posture (fail-open, `stop_hook_active` loop guard,
+  knob `AIDC_ENFORCE_REVIEW_HOOK` default 1, outcomes to
+  `.ai-container/review-hook.log`); adds a docs-only scope skip and blocks
+  with the checklist on stderr (exit 2) when non-doc code changed without a
+  matching record. Fails open when the record helper is missing — the agent
+  would otherwise have no way to satisfy the gate.
+- `templates/devcontainer/scripts/bootstrap-state.sh.tmpl` —
+  `ensure_agent_guardrail_settings` now manages both guardrail hooks
+  independently (per-hook knobs, shared idempotent seeding/pruning);
+  `install_tool_links` exposes `aidc-review-record` on PATH.
+- `lib/aidc/common.sh` — both new scripts added to `AIDC_MANAGED_PATHS` and
+  `AIDC_OVERWRITE_TEMPLATE_MAP` (keeps the destroy-scaffold structural guard
+  green).
+- `lib/aidc/config.sh` — `AIDC_ENFORCE_REVIEW_HOOK` documented in the
+  project.env template.
+- `tests/review-hook.test.sh` — 23 hermetic cases: gate matrix (clean tree /
+  unreviewed / docs-only / mixed docs+code / record→allow / post-review edit
+  re-arm / untracked gating / loop guard / knob / missing helper fail-open),
+  helper usage errors, and the two-hook settings seeding (idempotence,
+  per-knob removal, Stop-key pruning, user-hook preservation).
+- `docs/security.md` — "Review-gate enforcement (Claude Code)" section;
+  README bullet; `/opt/CORE_LOGICS/patternlist.md` — the five patterns added
+  as reusable cross-repo guidance.
+
+### The bug the work itself found (and fixed)
+
+Debouncing both hooks keyed a hash of `git diff HEAD` + `git status
+--porcelain` — content-insensitive for **untracked files** (they hash as a
+bare `?? path` line). A file edited after a clean scan / recorded review
+would ride the old signature past the gate: the scan hook could wave through
+a secret added to a scan-clean untracked file; the review gate could wave
+through post-review edits to new files. Caught in validation step 4 of this
+very change (edit-untracked → expected re-arm, got allow). The signature now
+mixes `sha256sum` of every untracked file (via `git ls-files --others
+--exclude-standard -z`, NUL-safe) into both hooks and the record helper,
+sorted for order stability, with a non-empty-hash guard so an infra failure
+cannot produce a fake match. The identical pre-existing weakness in the scan
+hook debounce was fixed in the same pass rather than left as "pre-existing".
+
+### Commands & verification
+
+- `bash tests/review-hook.test.sh` — 23/23; `bash tests/scan-hook.test.sh` —
+  14/14 (no regression from the seeding rewrite); `bash
+  tests/destroy-scaffold.test.sh` — 9/9 (managed-paths guard).
+- `shellcheck` clean on both new templates and the test suite.
+- End-to-end in a scratch repo (`/tmp/opencode/review-gate-validation`)
+  reconstructing the llama-swap bug classes with `go vet`/`go test` green
+  over them: unreviewed → exit 2; record → exit 0; untracked edit/delete →
+  re-armed (exit 2); helper missing → fail-open.
+- Fresh-eyes protocol dogfood: a general subagent given only the diff, task
+  description, repo directive, and checklist flagged all four visible bug
+  classes with file:line (the fifth — naming — vacuous: the test file was
+  absent at review time) plus three extras, including one real bug embedded
+  unintentionally. Checklist validated against the bug classes it was built
+  from.
+
+### Notes / rollout
+
+- Existing projects pick the new guidance + hooks up on the next explicit
+  `aidc init` (overwrite mode re-merges the marker block, preserving user
+  text; bootstrap-state re-seeds settings.json idempotently). Create-mode
+  paths (auto-bootstrap on `aidc up`) deliberately leave existing blocks
+  untouched.
+- The gate cannot verify review *quality* — by design it converts a silent
+  skip into a logged, deliberate act. Docs-only diffs skip it.
+
+---
+
+## 2026-09-25 — remaster disk experiments: image GC (`aidc clean`), a size-measurement harness, and a slimmer base
+
+**Summary:** Ground-up pass on what aidc's images cost on disk. Four levers
+landed: (1) a `aidc clean` command that garbage-collects the stale
+content-hashed images the model has been leaking since issue #7, (2) a
+read-only measurement script (`scripts/image-size-report.sh`) so slimming is
+measurable instead of guesswork, (3) the shared base's biggest controllable
+cost — the agent set — now defaults to `opencode` only, builds in per-agent
+cached stages, and auto-extends when an invoked agent is missing (add the
+layer and move forward), and (4) build-time strips of
+dead weight in the semgrep venv, the uv-managed CPython, and two apt packages.
+`trufflehog` was flagged as dead weight (~150-200 MB, nothing in aidc invokes
+it — `aidc-scan.sh` uses gitleaks for secrets) but was consciously KEPT: it is
+documented as an always-on scanner and referenced as an ad-hoc tool in the
+seeded CLAUDE.md/AGENTS.md guardrails; dropping it is a security-posture
+decision, not an engineering one, and stays open for a separate call.
+
+**Trigger:** "we are now in a new remaster branch … I want to experiment to
+reduce disk required for the base image …" followed by: keep opencode as the
+default; make each agent its own layer so invoking a missing one adds it and
+moves forward, reusing what's already built; and keep base rebuilds a
+host-wide one shot.
+
+### Findings that shaped the work
+
+- **The leak, not just the size.** `aidc::ensure_base_image` and
+  `aidc::ensure_toolchain_image` build a *new* tag per content hash and never
+  removed old ones; compose rebuilds leave dangling images. On a host that
+  tracks aidc development (this one), every pin bump has left a full ~3 GB
+  `aidc-base:<oldhash>` behind. "Massive docker image set" was mostly this.
+- **The default bakes six agents.** `AIDC_AGENTS` defaulted to `all`
+  (~1 GB); the opt-in machinery from issue #8 existed but nothing used it
+  unless the user set it.
+- **No measurement.** `image-size.yml` reports one total against a 6 GB soft
+  ceiling; there was no per-layer/per-component view, so any slimming was
+  unverifiable.
+
+### Change 1 — `aidc clean` (new module `lib/aidc/clean.sh`)
+
+- Candidates: (a) `aidc-base:<12-hex>` tags not referenced by ANY local
+  image's `aidc.base` label (one batched `docker image inspect` over all
+  image IDs; the label is what the fast-path check in `aidc::image_base_is_current`
+  already trusts); (b) `aidc-toolchain-store-<lang>:<12-hex>` tags whose hash
+  differs from the current `aidc::toolchain_image_tag` (the shared volume
+  keeps its contents — only the one-shot store images go); (c) dangling
+  images, via `docker image prune -f` semantics (never an image a container
+  uses).
+- Safety: only tags matching the strict hash patterns are considered — a
+  custom `AIDC_BASE_IMAGE=my-base:tag` or hand-tagged `aidc-base:custom` can
+  never match. Dry-run is the default; `--apply` prompts unless `-f`;
+  `--cache` additionally runs `docker builder prune -f` (off by default: the
+  build cache is what keeps rebuilds fast). Redoing a removed base is a
+  rebuild, not a correctness event.
+- Honesty about sizes: per-image `docker size` overstates the reclaim (base
+  OS layers are shared), so the dry-run line says "approx reclaim" and the
+  apply path prints before/after `docker system df` Images sizes.
+- Wired through `lib/aidc.sh` (dispatch, `known` command list, help text),
+  `completions/aidc.bash` (command table asserted by
+  `tests/cli-errors.test.sh`), README command list, `docs/install.md`
+  (command table + cleanup section).
+- Docker is reached only through `aidc::clean_docker`, so
+  `tests/clean.test.sh` (20 cases) stubs it entirely: dry-run lists/keeps the
+  right refs and mutates nothing, apply removes exactly the stale refs +
+  prunes dangling, failed `rmi` is counted not fatal, the all-in-use set
+  exits early, dangling-only sets still prune, `--cache` prunes the builder
+  cache, the prompt aborts, help/flag validation. Lesson from a red run: a
+  fixture hash must be hex (`oldhash00000` correctly failed the
+  `[0-9a-f]{12}` ownership pattern), and `aidc::die` inside a directly-called
+  function exits the whole suite — wrap in a subshell.
+
+### Change 2 — `scripts/image-size-report.sh`
+
+- Defaults to the exact `aidc-base:<hash>` tag `aidc::base_image_tag` computes
+  (same sha256 input: Dockerfile.base + `|AIDC_AGENTS=<sel>`), so the report
+  always describes the image aidc actually starts. `--image` inspects any
+  ref; `--build` builds the default first (refused with `--image` so pinned
+  refs are never built); `--top N`; `--json`.
+- Sections: largest `docker history` layers (sizes normalized to bytes for
+  sorting; heredoc COPY layers span real newlines and their continuation rows
+  are filtered by requiring a size-shaped first field), then one throwaway
+  `docker run` (read-only `du`, image's default user) with `@@section`
+  markers for: top-level dirs, `/home/vscode` children (agents, config),
+  `/opt` + `/opt/uv` children, `/opt/uv/tools` (semgrep lives here),
+  `/opt/uv/python` (uv-managed CPython), `/usr/local/bin` (scanners,
+  helpers).
+- Offline-tested against a stub `docker` with canned `history`/`du` output;
+  two bugs found and fixed that way (missing `@@top-level` marker, heredoc
+  continuation rows leaking into `--json` with `bytes:0`).
+
+### Change 3 — per-agent stages, `AIDC_AGENTS` defaults to `opencode`, auto-extend on invoke
+
+**Direction from the maintainer:** keep `opencode` as the personal default,
+and make invoking a missing agent *add that layer and move forward* — "since
+images are already built we simply reuse them" — rather than dying with a fix
+message. That required breaking the one constraint that made selection
+changes expensive: all six agents installed in a single RUN, so the
+`AIDC_AGENTS` build-arg was inside one cache key and ANY selection change
+re-downloaded every agent.
+
+- `Dockerfile.base.tmpl` restructured into per-agent conditional stages: a
+  global-scope `ARG WITH_<AGENT>=0` per agent (declared before the first
+  FROM — stage-scoped ARGs are invisible to FROM selector lines, the first
+  draft had them mid-file and the graph validation caught it), an
+  `agent-<name>-1` stage carrying exactly the old per-agent install lines
+  (same vendor installers, same paths), an `agent-<name>-0` stage that only
+  pre-creates the directories the final COPY reads (so a not-selected agent
+  contributes a byte-scale layer instead of a failed COPY), a
+  `FROM agent-<name>-${WITH_<AGENT>}` selector stage, and a final `FROM base
+  AS main` that COPY-merges each selected payload back onto base
+  (`--chown=vscode`). Binaries land at the SAME `~/.local/bin` etc. paths,
+  so PATH, the named-volume mount points, grok's shadow-avoidance, and the
+  CI pin probes are all unchanged. Version-pins moved to the global ARG
+  block (`update-pins.sh`/`check-image-pins.sh` patterns still match).
+  Stage graph + every RUN block validated offline (comment-stripping +
+  continuation-joining, then `bash -n` + a FROM-resolution pass) — no docker
+  in this environment.
+- `lib/aidc/runtime.sh`: `aidc::agents_build_flags` maps a selection
+  (`opencode` default, `all`, `none`, comma lists; unknown names ignored) to
+  `--build-arg WITH_X=1` tokens; `ensure_base_image` passes them (plus
+  `AIDC_AGENTS` as provenance). The three `:-claude` fallbacks (hash input,
+  build-arg, `export_compose_env`) become `:-opencode`.
+- Auto-extend: `aidc::agent_installed` is now a probe-only check (return
+  0/1); `run_tool` on a miss calls `aidc::agents_extend_selection` — which
+  appends the tool to the selection, persists it in
+  `.ai-container/project.env` (replacing an existing `AIDC_AGENTS=` line in
+  place, appending a commented block otherwise; file wins over the process
+  env once sourced, so persistence is the only durable form), re-exports it,
+  and returns 0 — then run_tool runs `ensure_base_image` →
+  `write_devcontainer_env` → `compose_up` → `ensure_tool_links`. Because the
+  selection rehashes the base tag and stages are cached per agent, that
+  rebuild runs exactly one install layer and recreates the container.
+  `AIDC_AUTO_EXTEND_AGENTS=0` (or a selection that already includes the
+  tool, or `all`) falls back to the hard error with the fix message — an
+  already-selected-but-missing binary means a stale image, so the hint is
+  `aidc rebuild`.
+- Migration edge, documented: an image built before this change (or with an
+  explicit selection) plus an unset `AIDC_AGENTS` rehashes to the new
+  default set on the first extend/rebuild — the label-vs-tag fast path
+  rebuilds it once.
+- CI: `sbom.yml` passes all six `WITH_*=1` (pin coverage for every agent);
+  `image-size.yml` pins `AIDC_AGENTS=opencode` + `WITH_OPENCODE=1` so the
+  probe measures the shipping default. `scripts/image-size-report.sh
+  --build` mirrors the flag mapping inline (noted as a mirror — runtime.sh
+  is canonical).
+- Docs: README, `docs/install.md` override block, `docs/cursor.md` (invoking
+  `aidc cursor-agent` now auto-extends; pinning up front still shown).
+- Tests: `tests/agents-opt-in.test.sh` now 14 cases — flags mapping
+  (default/all/none/list/unknown), auto-extend success (project.env
+  persisted + exported + rebuild chain invoked), in-place line replacement,
+  idempotence when already selected, knob-off die, `all`-selected die,
+  present-agent no-rebuild, non-agent passthrough. Two suite lessons: a
+  function's `exit` (aidc::die) is caught by a subshell, not by `|| true`;
+  and side effects inside `$( )` (exports, globals) never reach the parent —
+  observe them via files or run in the current shell.
+- **First real build caught a stage-isolation bug the offline validation
+  could not**: `agent-opencode-1`'s `ln -sf …/.local/bin/opencode` failed
+  with "No such file or directory" — the old monolithic RUN pre-created
+  `~/.local/bin` before installing, but the staged layout starts each agent
+  stage from `base`, which has no `~/.local/bin` (the final `main` stage
+  creates it), and the installer only creates `~/.opencode/bin`. Fix: every
+  `agent-*-1` stage now `mkdir -p`s its target dirs as the RUN's first
+  command (self-sufficiency regardless of installer behavior). New
+  `tests/base-image-stages.test.sh` (32 cases) is the structural guard so CI
+  — which also has no docker — catches this class: per-agent stage trios,
+  mkdir-first in every install stage, global-scope ARGs before the first
+  FROM, `main` merging every selector, and `bash -n` over all RUN blocks
+  (with `--mount=` flags stripped the way the builder consumes them). The
+  guard was validated against a mutation (removing opencode's mkdir makes
+  exactly that one case fail). A completed-but-failed build keeps its stage
+  cache, so the retry resumes at the failed stage.
+
+### Change 4 — build-time strips in `Dockerfile.base.tmpl`
+
+- semgrep (heaviest uv tool): after `uv tool install semgrep`, the venv is
+  stripped of directories named `tests` (`find -type d -name tests -prune
+  -exec rm -rf {} +`) and `__pycache__`/`*.pyc`. `dist-info` is deliberately
+  kept (console scripts + importlib metadata). Same technique distro
+  packaging uses; `check-image-pins.sh` still probes `semgrep --version` in
+  CI.
+- CPython 3.13 (uv-managed): `test`, `idlelib`, `tkinter`, and the static
+  `libpython3.13.a` removed (globbed, `rm -rf`-tolerant). Precompiled stdlib
+  `__pycache__` deliberately KEPT — `PYTHONDONTWRITEBYTECODE=1` means
+  removed bytecode would never be regenerated and every python start would
+  recompile.
+- apt: `nano` dropped (vim present) and `dnsutils` dropped (nothing in
+  scaffold/scripts calls dig/nslookup; a comment at the apt block names both
+  and the per-project path back via `project-setup.sh`). `gh` was audited and
+  KEPT — `aidc-ci.sh` capability-gates on it; `gnupg` kept (node arm uses
+  `gpg --dearmor`); `sqlite3` kept (session merge); the iptables/ipset/
+  bubblewrap/socat set kept (firewall/sandbox/clipboard).
+
+### Verification
+
+- `shellcheck --severity=warning` clean on all new/edited shell.
+- `bash .github/scripts/check-module-deps.sh` → 9 modules, layering OK.
+- Full `tests/*.test.sh` suite green (now including `clean.test.sh`;
+  `agents-opt-in.test.sh` 7 cases).
+- `bash -n` + stubbed-docker smoke of `image-size-report.sh` human + JSON
+  paths.
+- Not runnable here (no docker): a real base rebuild + `semgrep scan` smoke
+  after the strip, the pin-check image build, and the size delta itself —
+  first `aidc up` on a docker host will produce the real numbers via
+  `scripts/image-size-report.sh`; CI's `image-size.yml` now reports the slim
+  default on every PR.
+
+### Notes / open items
+
+- `aidc status --global` gained a `docker disk` block (the maintainer's real
+  numbers made the need concrete: the images tab summed to ~40 GB while
+  `docker system df` said 17.55 GB, with 8.7 GB images + 4.7 GB idle build
+  cache + ~5 GB exited-container layers reclaimable). `aidc::status_host_disk`
+  renders the `system df` rows with the reclaim knob per row; the block
+  degrades silently when the daemon reports nothing. Covered by the new
+  `tests/status-global.test.sh` (fake docker on PATH; 11 cases). Suite
+  lesson: the stub's `case "$1 $2"` patterns must match the real invocation
+  shapes — `docker system df` is `"system df"`, not `"system"`.
+- Doc addition after a maintainer report ("OrbStack images tab shows one
+  `aidc_<project>-…:latest` per folder, each 3.39 GB"): the shared-image
+  section of `docs/install.md` now explains the per-image size double-count
+  (thin images list at ~base size because shared layers are counted per image;
+  `docker system df` is the deduplicated truth) and names `aidc clean` as the
+  reclaim for the real extras (orphaned `aidc-base:<oldhash>` tags).
+- The base-image content hash changes (template edits + default change), so
+  the next `aidc up` rebuilds the shared base once; old bases from before
+  this change are exactly what `aidc clean` then reclaims.
+- Open for a future decision: dropping `trufflehog` (unused by tooling,
+  ~150-200 MB) and whether `aidc-scan`'s "secrets always" should name gitleaks
+  alone; and `syft`/`grype` remain in the base because `aidc-scan`'s license
+  gate (`scripts/ci/aidc-sbom-code.sh`) needs them when manifests change.
+
+---
+
 ## 2026-09-21 — pre-merge audit of the `enhancements` branch: CI test drift, a red suite, the unported half of PR #32, and the missing Cursor guide
 
 **Summary:** An audit ahead of opening the `enhancements` → `main` pull request,

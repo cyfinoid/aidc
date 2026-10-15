@@ -9,10 +9,50 @@
 #
 # Base image and uv stage pinned by index (multi-arch) digest.
 # To repin: `docker pull <ref>:<tag>` then read the "Digest:" line.
-FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec AS uv
-FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04@sha256:d94c97dd9cacf183d0a6fd12a8e87b526e9e928307674ae9c94139139c0c6eae
+#
+# Per-agent build flags (remaster) — declared BEFORE the first FROM so they are
+# global-scope and usable in the FROM selector lines of the agent stages below.
+# One ARG per agent, 0/1: each agent's install layer is cached INDEPENDENTLY,
+# so adding an agent to the selection runs only that agent's install and
+# everything already built is reused (this is what makes the 'aidc <tool>'
+# auto-extend rebuild fast). aidc::agents_build_flags (lib/aidc/runtime.sh)
+# derives the flags from the AIDC_AGENTS selection; CI passes them explicitly.
+# AIDC_AGENTS itself remains the selection source of truth (it keys the base
+# image content hash) and is passed as provenance.
+ARG AIDC_AGENTS="opencode"
+ARG WITH_CLAUDE=0
+ARG WITH_CODEX=0
+ARG WITH_OPENCODE=0
+ARG WITH_CURSOR_AGENT=0
+ARG WITH_GROK=0
+ARG WITH_OMP=0
+# Agent version pins — global-scope for the same reason; refreshed by
+# scripts/update-pins.sh, asserted by .github/scripts/check-image-pins.sh.
+ARG CLAUDE_VERSION=2.1.300
+ARG CODEX_VERSION=0.162.1
+# v2 line: Plugin.define/setup() API; the review-gate plugin and rtk's plugin
+# (rtk >= 0.52.0) are written against it. Installed from the v2 channel
+# (https://opencode.ai/v2/install), which resolves/downloads from npm
+# (@opencode/cli-<os>-<arch>); latest v2 comes from
+# https://opencode.ai/update/api/latest/cli/npm (update-pins.sh).
+ARG OPENCODE_VERSION=2.0.29
+ARG GROK_VERSION=1.0.52
+ARG OMP_VERSION=18.10.4
 
-ARG GIT_DELTA_VERSION=0.19.2
+FROM ghcr.io/astral-sh/uv:0.10@sha256:72ab0aeb448090480ccabb99fb5f52b0dc3c71923bffb5e2e26517a1c27b7fec AS uv
+# Minimal self-owned OS base (replaces mcr.microsoft.com/devcontainers/base,
+# ~110MB → ~42MB compressed): stock ubuntu:26.04 plus exactly the pieces the
+# devcontainers image used to provide for us — the aidc user (uid/gid 1000,
+# bind-mount compat), passwordless sudo (the thin per-project layer's
+# toolchain arms build as aidc via sudo apt-get), git + openssh-client, and
+# a minimal zsh config. oh-my-zsh is deliberately NOT installed (agents don't
+# use it; humans can add it in project-setup.sh). Everything the devcontainers
+# base shipped that nothing here uses (nano, wget, man-db, ncdu, strace,
+# dialog, apt-utils, lsb-release) stays out — smaller apt/CVE surface for the
+# always-on grype to triage.
+FROM ubuntu:26.04@sha256:da6fc2be547864451aa253836dd926da33623312df4a9a243e35dc877c378a78 AS base
+
+ARG GIT_DELTA_VERSION=0.20.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -23,20 +63,23 @@ RUN apt-get update \
       bubblewrap \
       ca-certificates \
       curl \
-      dnsutils \
       fd-find \
       fzf \
       gh \
+      git \
       gnupg \
       ipset \
       iptables \
       iproute2 \
       jq \
-      nano \
+      less \
+      openssh-client \
+      procps \
       ripgrep \
       rsync \
       socat \
       sqlite3 \
+      sudo \
       tmux \
       unzip \
       vim \
@@ -46,6 +89,38 @@ RUN apt-get update \
     && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
+# Trimmed from the list above (disk experiments, remaster): `nano` (vim is
+# already present) and `dnsutils` (nothing in the scaffold calls dig/nslookup;
+# `getent hosts` covers the quick check). Install either per project via
+# project-setup.sh if wanted — ~15MB combined. `wget` also stays out: every
+# pinned fetch here and in the toolchain templates uses curl.
+
+# Replicate the user/sudo/git setup the devcontainers base provided. uid/gid
+# 1000 must match host bind-mount ownership; zsh is the default terminal
+# (devcontainer.json). safe.directory '*' preserves the devcontainers-base
+# behavior for bind mounts owned by a non-1000 host uid.
+# ubuntu 24.04+ images ship a default `ubuntu` user/group at uid/gid 1000 —
+# remove it first or the groupadd below aborts the build (gid in use).
+RUN userdel --remove ubuntu || true \
+    && groupdel ubuntu || true \
+    && groupadd --gid 1000 aidc \
+    && useradd --uid 1000 --gid aidc --create-home --shell /usr/bin/zsh aidc \
+    && echo 'aidc ALL=(root) NOPASSWD:ALL' > /etc/sudoers.d/aidc \
+    && chmod 0440 /etc/sudoers.d/aidc \
+    && git config --system --add safe.directory '*'
+
+# Minimal zsh config (replaces the oh-my-zsh rc the devcontainers base used to
+# ship). History goes to the persistent /commandhistory volume, matching the
+# bash wiring further down.
+COPY --chown=aidc:aidc <<'EOF' /home/aidc/.zshrc
+# aidc-managed: minimal zsh setup (no oh-my-zsh)
+HISTFILE=/commandhistory/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+setopt share_history hist_ignore_dups hist_ignore_space
+autoload -Uz compinit && compinit
+PROMPT='%n@%m %1~ %#'
+EOF
 
 # Download-and-verify helper used by every pinned tool below. Fails the build
 # on checksum mismatch. The literal sha "SKIP" disables verification — only
@@ -70,8 +145,8 @@ echo "$sha  $dest" | sha256sum -c - >/dev/null || {
 EOF
 RUN chmod 0755 /usr/local/bin/aidc-fetch-verified
 
-ARG GIT_DELTA_SHA256_AMD64=ea4f0222950ee750a3d38dd80d03bce4cee07a3f63928fc47548383bcaf23093
-ARG GIT_DELTA_SHA256_ARM64=0edc36cf514f1bd84becac3e94ee8ae9f8818c6a1f99f7b2ee67b362afa253d3
+ARG GIT_DELTA_SHA256_AMD64=0683067a4cbbcc19b9fd2841253131d1b37ccfa724725098d811d4d0d9fcc25b
+ARG GIT_DELTA_SHA256_ARM64=6e08b734d611037eb9eb5db883cab7ac0a089216a9efdc1d2caac44319029c28
 RUN ARCH=$(dpkg --print-architecture) \
     && case "$ARCH" in \
          amd64) DELTA_SHA="$GIT_DELTA_SHA256_AMD64" ;; \
@@ -91,7 +166,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv python install 3.13 \
     && ln -sf "$(uv python find 3.13)" /usr/local/bin/python3 \
     && ln -sf /usr/local/bin/python3 /usr/local/bin/python \
-    && uv tool install ast-grep-cli
+    && uv tool install ast-grep-cli \
+# Stdlib slimming: the test suite, idle, and tkinter are never used in a
+# container agent shell, and libpython's static archive only serves static
+# CPython embedding. All removals are globbed and rm -rf-tolerant. Precompiled
+# __pycache__ is deliberately KEPT: PYTHONDONTWRITEBYTECODE=1 (below) means
+# removed bytecode would never be regenerated, slowing every python start.
+    && rm -rf /opt/uv/python/*/lib/python3.13/test \
+              /opt/uv/python/*/lib/python3.13/idlelib \
+              /opt/uv/python/*/lib/python3.13/tkinter \
+              /opt/uv/python/*/lib/libpython3.13.a
 
 ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
     NPM_CONFIG_AUDIT=true \
@@ -112,9 +196,9 @@ ENV NPM_CONFIG_IGNORE_SCRIPTS=true \
 # before installs. Binaries installed system-wide; shell/shim wiring done
 # per-user below. Pinned release artifact, checksum-verified (previously a
 # floating `main`-branch curl|sh installer).
-ARG PMG_VERSION=v0.28.1
-ARG PMG_SHA256_AMD64=6eedee215faa4ea42b4cb8c1e18961c31803df1bb2acd7b5aaee6484352b5303
-ARG PMG_SHA256_ARM64=8acba49e44d2fed67f9a1931c8b277c6d25fc087a44976939e13bcff80ce8624
+ARG PMG_VERSION=v0.31.0
+ARG PMG_SHA256_AMD64=0e56d235585d9feec3612b481c7faa05b346c93ac52611e2f8e79f57c8200ab8
+ARG PMG_SHA256_ARM64=0025a18811ac89f69df975dafcfc1c76c226a74126698f76ed0574b07a8917c9
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) PMG_ASSET="pmg_Linux_x86_64.tar.gz"; PMG_SHA="$PMG_SHA256_AMD64" ;; \
@@ -135,9 +219,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # newest tag, update VET_VERSION, rebuild, and commit. "latest" is honoured
 # for ad-hoc overrides but resolves at build time, which defeats the pin —
 # avoid in committed configs.
-ARG VET_VERSION=v1.19.0
-ARG VET_SHA256_AMD64=4e39ea7fb7c11e1edcdcf41a3c71766f62fb7f4533930b850afbd1bb441bb221
-ARG VET_SHA256_ARM64=0cf95eca4d79e9252e11f2a0d87e928a36efa3b417b853724eafa0b3748cf923
+ARG VET_VERSION=v1.20.0
+ARG VET_SHA256_AMD64=cb875389498d7a4cb6f0edda19ae18e976739a8f88187f994ccb8396e925569c
+ARG VET_SHA256_ARM64=764deb67ed4642f156e1384125e3709b098e5b8ef3330f83ba31b4836e890c4e
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) VET_ARCH="x86_64"; VET_SHA="$VET_SHA256_AMD64" ;; \
@@ -158,9 +242,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # SCA is handled by vet/pmg above; this layer covers code-pattern and secret
 # scans. trufflehog is a pinned, checksum-verified release artifact
 # (previously a floating `main`-branch curl|sh installer).
-ARG TRUFFLEHOG_VERSION=v3.97.4
-ARG TRUFFLEHOG_SHA256_AMD64=dc24007c2f233bd61c05beabeb44aa27ea9b43288166279209abe0458c5ce76b
-ARG TRUFFLEHOG_SHA256_ARM64=7e65e771d2a247964056aa5edba0f8ae3945895e5dce867fe0ffbc7b0128239a
+ARG TRUFFLEHOG_VERSION=v3.99.2
+ARG TRUFFLEHOG_SHA256_AMD64=3c7b0d1dc4278294269bfdd7594bca8bb28c78da0a4a06ad202ded37b48deca4
+ARG TRUFFLEHOG_SHA256_ARM64=929b81efffca752eafd58bf6f17bf725d354f338636a7bbbee65c086d2f9ddf3
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv tool install semgrep \
     && ARCH_RAW="$(dpkg --print-architecture)" \
@@ -178,7 +262,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && aidc-fetch-verified "https://github.com/trufflesecurity/trufflehog/releases/download/${TH_TAG}/trufflehog_${TH_VER}_linux_${TH_ARCH}.tar.gz" /tmp/trufflehog.tar.gz "$TH_SHA" \
     && tar -xzf /tmp/trufflehog.tar.gz -C /usr/local/bin trufflehog \
     && chmod 0755 /usr/local/bin/trufflehog \
-    && rm /tmp/trufflehog.tar.gz
+    && rm /tmp/trufflehog.tar.gz \
+# semgrep is the heaviest uv tool in the image. Its venv ships vendored test
+# suites and __pycache__ that are dead weight at runtime (semgrep's CLI and
+# engine never import its own tests). Distro packaging drops these the same
+# way. dist-info metadata is deliberately KEPT (importlib + console scripts
+# need it), and the strip runs before the layer is committed.
+    && find /opt/uv/tools/semgrep -type d -name tests -prune -exec rm -rf {} + \
+    && find /opt/uv/tools/semgrep -type d -name __pycache__ -prune -exec rm -rf {} + \
+    && find /opt/uv/tools/semgrep -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
 # Pinned. To bump: check https://github.com/gitleaks/gitleaks/releases for the
 # newest tag, update GITLEAKS_VERSION, rebuild, and commit. "latest" still
@@ -212,12 +304,12 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # https://github.com/anchore/grype/releases, update the ARG, rebuild, commit.
 # Direct release artifacts, checksum-verified (previously vendor installer
 # scripts fetched from `main`, which could bypass the version pin).
-ARG SYFT_VERSION=v1.51.1
-ARG SYFT_SHA256_AMD64=8fcb33017a0dc1058298c923c436d19dfa68ae93968e0b423248542e3afb9fc3
-ARG SYFT_SHA256_ARM64=a7fd2b784e6664acd44719270574f6cd8c6864fc2b1700bf9099bd1cccda7d7f
-ARG GRYPE_VERSION=v0.118.0
-ARG GRYPE_SHA256_AMD64=1d444c5e7360471815f7158f71935fcecc68a3c417d85c7344f770854300bba2
-ARG GRYPE_SHA256_ARM64=32aceeb8ee837244775fcb522372c8b3a47914986385f3148f4ee2c930482a84
+ARG SYFT_VERSION=v1.54.1
+ARG SYFT_SHA256_AMD64=c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+ARG SYFT_SHA256_ARM64=dfdf0537610113edbefe1f1fc6548bc957b2d77439636ec824fcf0e10d46d054
+ARG GRYPE_VERSION=v0.120.1
+ARG GRYPE_SHA256_AMD64=0a9ee97ef5ae2ee953b0a80098105052e846cdbe319a57d808b519c33cd1343d
+ARG GRYPE_SHA256_ARM64=29f47391dc283aa79fcc38e65224cd61f64dec0ecfd0db7074128ebf8ff23514
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) A_ARCH="amd64"; SYFT_SHA="$SYFT_SHA256_AMD64"; GRYPE_SHA="$GRYPE_SHA256_AMD64" ;; \
@@ -238,9 +330,9 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 # Pinned release artifact, checksum-verified (previously a floating
 # `master`-branch curl|sh installer). Note the vendor's per-arch targets:
 # musl for x86_64, gnu for aarch64 — that is what rtk publishes.
-ARG RTK_VERSION=v0.48.0
-ARG RTK_SHA256_AMD64=e4e650fa1677c0de2f6839a6040d7b17f312d32f163c402b75af70e9e5af1a91
-ARG RTK_SHA256_ARM64=5ed65486a96077bd6bba7c87fdc9d0e4a1918d19619be3c87380888389a30c7c
+ARG RTK_VERSION=v1.0.1
+ARG RTK_SHA256_AMD64=5b919c3bccb799b67a61866d0e617410a4fcdf173e2614440e59de2fa2003436
+ARG RTK_SHA256_ARM64=cd627c4091ad90b5e5aca83ca5af66ee4b8aa8537a736533fa90544f461f1c2b
 RUN ARCH_RAW="$(dpkg --print-architecture)" \
     && case "$ARCH_RAW" in \
          amd64) RTK_TARGET="x86_64-unknown-linux-musl"; RTK_SHA="$RTK_SHA256_AMD64" ;; \
@@ -259,7 +351,7 @@ RUN ARCH_RAW="$(dpkg --print-architecture)" \
 
 RUN mkdir -p /commandhistory \
     && touch /commandhistory/.bash_history /commandhistory/.zsh_history \
-    && chown -R vscode:vscode /commandhistory \
+    && chown -R aidc:aidc /commandhistory \
     && echo 'export HISTFILE=/commandhistory/.bash_history' >> /etc/bash.bashrc
 
 # Clipboard bridge: pbpaste/xclip/wl-paste all proxy to a host Unix socket
@@ -312,22 +404,23 @@ PY
 EOF
 RUN chmod 0755 /usr/local/bin/aidc-bootstrap-claude
 
-USER vscode
+USER aidc
 
-ENV HOME=/home/vscode
+ENV HOME=/home/aidc
 # ~/.pmg/bin is FIRST on PATH on purpose. pmg interception rides on these PATH
 # shims, NOT on the shell aliases pmg also writes to ~/.zshrc/~/.bashrc: build
 # RUN steps and exec'd agent subprocesses never source rc files, so only the
 # shims (first on PATH at build and runtime) reliably gate npm/pip/uv/etc.
-ENV PATH=/home/vscode/.pmg/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/bin
+ENV PATH=/home/aidc/.pmg/bin:/home/aidc/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 # Wire pmg in before ANY user-level package install so nothing slips past it.
 RUN pmg setup install \
     && pmg setup doctor || true
 
-# Coding agents as native prebuilt binaries, version-pinned. Each installer is
-# fetched to a file and then executed (never piped) so the executed bytes can
-# be inspected. Version contracts verified against each vendor's installer:
+# Coding agents as native prebuilt binaries, version-pinned, ONE STAGE EACH.
+# Each installer is fetched to a file and then executed (never piped) so the
+# executed bytes can be inspected. Version contracts verified against each
+# vendor's installer:
 #   claude:   positional arg (stable|latest|X.Y.Z); verifies the binary against
 #             its manifest SHA256 internally.
 #   codex:    --release X.Y.Z → github.com/openai/codex release rust-vX.Y.Z.
@@ -342,59 +435,146 @@ RUN pmg setup install \
 # first" invariant above still holds. Grok's binary is forced into
 # ~/.local/bin via GROK_BIN_DIR so the grok_home volume mounted at ~/.grok at
 # runtime cannot shadow it.
-# AIDC_AGENTS opt-in (issue #8): install only the requested agents so a project
-# that only uses one doesn't pay ~1 GB for all five. Comma-separated; "all"
-# (the default, for back-compat) installs every agent. aidc seeds this from the
-# tool being run on a first build. Because AIDC_AGENTS is part of the base image
-# content hash (see aidc::base_image_tag), changing the selection builds a fresh
-# base. Version pins and the fetch-to-file (never piped) contract are unchanged.
-ARG CLAUDE_VERSION=2.1.266
-ARG CODEX_VERSION=0.153.4
-ARG OPENCODE_VERSION=1.18.30
-ARG GROK_VERSION=1.0.24
-ARG OMP_VERSION=18.1.15
-ARG AIDC_AGENTS="all"
-# Every path a named volume mounts over is pre-created here, as vscode: Docker
+#
+# AIDC_AGENTS selection (issue #8; remaster): default 'opencode'. Comma-
+# separated; 'all' = every agent, 'none' = scanner-only base. aidc turns the
+# selection into the WITH_* flags (aidc::agents_build_flags) and auto-extends
+# it when an invoked agent is missing (cached stages make that rebuild fast);
+# the selection is persisted per project in .ai-container/project.env and keys
+# the base image content hash (see aidc::base_image_tag). Version pins and the
+# fetch-to-file (never piped) contract are unchanged.
+
+FROM base AS agent-opencode-1
+ARG OPENCODE_VERSION
+# Stage self-sufficiency: base has no ~/.local/bin (the final main stage
+# creates it), and installers only create their own dirs — every agent stage
+# pre-creates the dirs it writes to (structural guard: tests/base-image-stages.test.sh).
+RUN mkdir -p /home/aidc/.local/bin /home/aidc/.opencode \
+    && curl -fsSL https://opencode.ai/v2/install -o /tmp/install-opencode.sh \
+    && VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path \
+    && ln -sf /home/aidc/.opencode/bin/opencode /home/aidc/.local/bin/opencode \
+    && test -x /home/aidc/.local/bin/opencode \
+    && rm -f /tmp/install-opencode.sh
+FROM base AS agent-opencode-0
+# Not selected: only pre-create the directories the final stage COPY reads, so
+# the selector resolves for both flag values and contributes a byte-scale layer.
+RUN mkdir -p /home/aidc/.local/bin /home/aidc/.opencode
+FROM agent-opencode-${WITH_OPENCODE} AS sel-opencode
+
+FROM base AS agent-claude-1
+ARG CLAUDE_VERSION
+RUN mkdir -p /home/aidc/.local/bin \
+    && curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
+    && bash /tmp/install-claude.sh "$CLAUDE_VERSION" \
+    && test -x /home/aidc/.local/bin/claude \
+    && rm -f /tmp/install-claude.sh
+FROM base AS agent-claude-0
+RUN mkdir -p /home/aidc/.local/bin
+FROM agent-claude-${WITH_CLAUDE} AS sel-claude
+
+FROM base AS agent-codex-1
+ARG CODEX_VERSION
+# Direct-install from upstream's release package. The interactive installer
+# drifted twice (HOME=/root default landing everything under /root/.codex, and
+# a symlink into a directory the main stage doesn't copy), so this stage does
+# what the installer does, deterministically: download the versioned package
+# (releases.openai.com with a GitHub fallback), verify against the published
+# SHA256SUMS, extract, install the codex binary into .local/bin, assert —
+# including a --version execution, so an arch mismatch fails the build too.
+RUN mkdir -p /home/aidc/.local/bin /tmp/codex-pkg \
+    && arch="$(uname -m)" && target="" \
+    && case "$arch" in \
+         x86_64) target="x86_64-unknown-linux-musl" ;; \
+         aarch64 | arm64) target="aarch64-unknown-linux-musl" ;; \
+       esac \
+    && [ -n "$target" ] || { echo "codex: unsupported architecture $arch" >&2; exit 1; } \
+    && pkg="codex-package-$target.tar.gz" \
+    && curl -fsSL "https://releases.openai.com/codex/releases/$CODEX_VERSION/$pkg" -o "/tmp/codex-pkg/$pkg" \
+      || curl -fsSL "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$pkg" -o "/tmp/codex-pkg/$pkg" \
+    && curl -fsSL "https://releases.openai.com/codex/releases/$CODEX_VERSION/codex-package_SHA256SUMS" -o /tmp/codex-pkg/SHA256SUMS \
+    && (cd /tmp/codex-pkg && grep " $pkg\$" SHA256SUMS | sha256sum -c -) \
+    && tar -xzf "/tmp/codex-pkg/$pkg" -C /tmp/codex-pkg \
+    && bin="$(find /tmp/codex-pkg -type f -name codex | head -1)" \
+    && test -n "$bin" \
+    && install -m 755 "$bin" /home/aidc/.local/bin/codex \
+    && test -x /home/aidc/.local/bin/codex \
+    && /home/aidc/.local/bin/codex --version
+FROM base AS agent-codex-0
+RUN mkdir -p /home/aidc/.local/bin
+FROM agent-codex-${WITH_CODEX} AS sel-codex
+
+FROM base AS agent-cursor-agent-1
+RUN mkdir -p /home/aidc/.local/bin \
+    && curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh \
+    && bash /tmp/install-cursor.sh \
+    && { cursor-agent --version || true; } \
+    && test -x /home/aidc/.local/bin/cursor-agent \
+    && rm -f /tmp/install-cursor.sh
+FROM base AS agent-cursor-agent-0
+RUN mkdir -p /home/aidc/.local/bin
+FROM agent-cursor-agent-${WITH_CURSOR_AGENT} AS sel-cursor-agent
+
+FROM base AS agent-grok-1
+ARG GROK_VERSION
+# Upstream installer behavior (verified 2026-10-15): it downloads the
+# versioned binary to $HOME/.grok/downloads/grok-<platform> and creates
+# $GROK_BIN_DIR/{grok,agent} as SYMLINKS to it. The build-stage test -x
+# passes (the target exists inside the stage), but the main stage copies
+# only .local/ — the copied symlink dangles, and the runtime exec fails
+# with "executable file not found in $PATH". So: run the installer, resolve
+# the symlink, REMOVE it, and install the real binary in its place; the
+# trailing --version assert catches any future installer change.
+RUN mkdir -p /home/aidc/.local/bin /home/aidc/.grok \
+    && curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
+    && HOME=/home/aidc GROK_BIN_DIR=/home/aidc/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" || true; \
+    src=""; \
+    [ -L /home/aidc/.local/bin/grok ] && src="$(readlink -f /home/aidc/.local/bin/grok)"; \
+    [ -n "$src" ] || src="$(find /home/aidc/.grok/downloads -type f -name 'grok-*' 2>/dev/null | head -1)"; \
+    [ -n "$src" ] && [ -x "$src" ] || { echo "grok: could not locate the installed binary" >&2; exit 1; }; \
+    rm -f /home/aidc/.local/bin/grok; \
+    install -m 755 "$src" /home/aidc/.local/bin/grok; \
+    test -x /home/aidc/.local/bin/grok; \
+    /home/aidc/.local/bin/grok --version
+FROM base AS agent-grok-0
+RUN mkdir -p /home/aidc/.local/bin
+FROM agent-grok-${WITH_GROK} AS sel-grok
+
+FROM base AS agent-omp-1
+ARG OMP_VERSION
+RUN mkdir -p /home/aidc/.local/bin \
+    && curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh \
+    && PI_INSTALL_DIR=/home/aidc/.local/bin sh /tmp/install-omp.sh --binary --ref "v$OMP_VERSION" \
+    && test -x /home/aidc/.local/bin/omp \
+    && rm -f /tmp/install-omp.sh
+FROM base AS agent-omp-0
+RUN mkdir -p /home/aidc/.local/bin
+FROM agent-omp-${WITH_OMP} AS sel-omp
+
+# Final (tagged) stage: merge the selected agent payloads back onto base.
+# Binaries land at the SAME ~/.local/bin etc. paths the monolithic install
+# used, so PATH, named-volume layout, and the CI pin probes are unchanged.
+# Multiple COPY merges into .local/ are safe: agent binary names never collide.
+FROM base AS main
+COPY --from=sel-opencode --chown=aidc:aidc /home/aidc/.opencode /home/aidc/.opencode
+COPY --from=sel-opencode --chown=aidc:aidc /home/aidc/.local/ /home/aidc/.local/
+COPY --from=sel-claude --chown=aidc:aidc /home/aidc/.local/ /home/aidc/.local/
+COPY --from=sel-codex --chown=aidc:aidc /home/aidc/.local/ /home/aidc/.local/
+COPY --from=sel-cursor-agent --chown=aidc:aidc /home/aidc/.local/ /home/aidc/.local/
+COPY --from=sel-grok --chown=aidc:aidc /home/aidc/.local/ /home/aidc/.local/
+COPY --from=sel-omp --chown=aidc:aidc /home/aidc/.local/ /home/aidc/.local/
+
+# Every path a named volume mounts over is pre-created here, as aidc: Docker
 # seeds a fresh named volume from the image directory at its target, inheriting
 # that directory's ownership. Miss one and the volume materialises root-owned,
-# leaving the (non-root) vscode user unable to write into it — which is exactly
+# leaving the (non-root) aidc user unable to write into it — which is exactly
 # how rtk's history.db silently never got created.
 RUN mkdir -p \
-      /home/vscode/.local/bin \
-      /home/vscode/.claude \
-      /home/vscode/.codex \
-      /home/vscode/.config/opencode \
-      /home/vscode/.local/share/opencode \
-      /home/vscode/.local/share/rtk \
-      /home/vscode/.cursor \
-      /home/vscode/.grok \
-      /home/vscode/.omp \
-    && agents="${AIDC_AGENTS:-all}" \
-    && if [ "$agents" = "all" ]; then agents="claude,codex,opencode,cursor-agent,grok,omp"; fi \
-    && for agent in $(echo "$agents" | tr ',' ' '); do \
-         case "$agent" in \
-           claude) \
-             curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh && \
-             bash /tmp/install-claude.sh "$CLAUDE_VERSION" ;; \
-           codex) \
-             curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh && \
-             sh /tmp/install-codex.sh --release "$CODEX_VERSION" ;; \
-           opencode) \
-             curl -fsSL https://opencode.ai/install -o /tmp/install-opencode.sh && \
-             VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path && \
-             ln -sf /home/vscode/.opencode/bin/opencode /home/vscode/.local/bin/opencode ;; \
-           cursor-agent) \
-             curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh && \
-             bash /tmp/install-cursor.sh && \
-             { cursor-agent --version || true; } ;; \
-           grok) \
-             curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh && \
-             GROK_BIN_DIR=/home/vscode/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" ;; \
-           omp) \
-             curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh && \
-             PI_INSTALL_DIR=/home/vscode/.local/bin sh /tmp/install-omp.sh --binary --ref "v$OMP_VERSION" ;; \
-           *) \
-             echo "aidc: unknown agent '$agent' (skipped)" >&2 ;; \
-         esac; \
-       done \
-    && rm -f /tmp/install-*.sh
+      /home/aidc/.local/bin \
+      /home/aidc/.claude \
+      /home/aidc/.codex \
+      /home/aidc/.config/opencode \
+      /home/aidc/.local/share/opencode \
+      /home/aidc/.local/share/rtk \
+      /home/aidc/.cursor \
+      /home/aidc/.grok \
+      /home/aidc/.omp

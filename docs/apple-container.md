@@ -97,7 +97,7 @@ gap. **Bind mounts and `compose exec` TTY are the highest-risk items.**
 | `docker compose exec` **with TTY** | every `aidc <agent>` / `shell` / `exec` | ? |
 | Port publish (loopback) | `aidc opencode-web` | ? |
 | `/dev/shm` (tmpfs) | Claude OAuth token delivery | ? |
-| `init: true`, `user: vscode` | base compose | ? |
+| `init: true`, `user: aidc` | base compose | ? |
 | `pids_limit`, `mem_limit`, `cpus` | resource caps | ? |
 | `cap_add` (NET_ADMIN/NET_RAW) | firewall override | ? |
 | `security_opt: no-new-privileges` | hardened override | ? |

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# aidc-managed
+# Cursor `stop` hook wrapper: bridge Cursor's hooks.json contract onto the
+# shared review-gate check (aidc-review-hook.sh --check).
+#
+# Cursor protocol (https://cursor.com/docs/agent/hooks): the hook receives a
+# JSON payload on stdin; printing {"followup_message": "..."} auto-continues
+# the agent with that message — Cursor's equivalent of Claude Code's
+# stop-block feedback. The stop hook's own loop_limit bounds re-triggering
+# (configured alongside the registration in bootstrap-state.sh).
+#
+# This wrapper ALWAYS exits 0 and prints nothing unless it is gating: Cursor
+# treats other exit codes as hook failures, and the gate's whole posture is
+# fail-open (non-aidc projects, non-git workspaces, missing helper, disabled
+# knob — all silently allow).
+set -uo pipefail
+
+payload="$(cat 2>/dev/null || true)"
+[[ -n "$payload" ]] || exit 0
+
+# Only gate clean completions — errors/aborts get the user's attention anyway.
+status="$(printf '%s' "$payload" | python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get("status", ""))
+except Exception:
+    print("")' 2>/dev/null || true)"
+[[ "$status" == "completed" ]] || exit 0
+
+# Gate the first workspace root; in an aidc container that is /workspace.
+ws="$(printf '%s' "$payload" | python3 -c 'import json,sys
+try:
+    roots = json.load(sys.stdin).get("workspace_roots") or []
+    print(roots[0] if roots else "")
+except Exception:
+    print("")' 2>/dev/null || true)"
+ws="${ws:-/workspace}"
+
+out="$(AIDC_REVIEW_HOOK_WORKSPACE="$ws" \
+  bash "$ws/.devcontainer/scripts/aidc-review-hook.sh" --check 2>/dev/null)"
+rc=$?
+
+# 0 = allow (or knob off / docs-only / debounce), 2 = fail-open skip.
+[[ "$rc" -eq 1 ]] || exit 0
+
+python3 - "$out" <<'PY'
+import json, sys
+print(json.dumps({"followup_message": sys.argv[1]}))
+PY

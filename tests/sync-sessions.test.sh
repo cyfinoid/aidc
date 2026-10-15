@@ -42,8 +42,8 @@ fail() { printf 'FAIL: %s\n' "$1" >&2; failed=$((failed + 1)); }
 # Container plumbing stubs. Function names resolve at call time, so redefining
 # after sourcing is enough. Both stubs receive the sync path's argv as
 # `<ws> exec -T workspace <cmd...>`; they drop the compose prefix, rewrite any
-# /home/vscode-prefixed path in <cmd> to point into the fixture tree (which
-# mirrors the container's /home/vscode layout), and run the command locally —
+# /home/aidc-prefixed path in <cmd> to point into the fixture tree (which
+# mirrors the container's /home/aidc layout), and run the command locally —
 # so the gate probe (`test ...`) and the tar stream behave as if in-container.
 CONTAINER_ROOT=""
 STUB_ARGV=()
@@ -52,7 +52,7 @@ stub_translate_argv() {
   local a
   for a in "$@"; do
     case "$a" in
-      /home/vscode|/home/vscode/*) a="$CONTAINER_ROOT${a#/home/vscode}" ;;
+      /home/aidc|/home/aidc/*) a="$CONTAINER_ROOT${a#/home/aidc}" ;;
     esac
     STUB_ARGV+=("$a")
   done
@@ -67,10 +67,15 @@ aidc::compose() {
   stub_translate_argv "$@"
   "${STUB_ARGV[@]}"
 }
-aidc::log() { :; }
+# aidc::log output is part of the contract this suite asserts (the
+# schema-skip line must name its cause), so capture every message; cases that
+# care truncate LOGS before their sync call and grep it after.
+LOGS="$TMP_ROOT/messages.log"
+: >"$LOGS"
+aidc::log() { printf '%s\n' "$*" >>"$LOGS"; }
 
 # Build a fresh container-side fixture (standing in for the container's
-# /home/vscode) and point HOME at a clean host tree. Sets CONTAINER_ROOT, HOME
+# /home/aidc) and point HOME at a clean host tree. Sets CONTAINER_ROOT, HOME
 # and host_dst (claude transcripts) in the caller's shell — must NOT run in a
 # subshell or the exports are lost.
 setup_case() {
@@ -273,12 +278,19 @@ if command -v sqlite3 >/dev/null 2>&1; then
   mkdir -p "$HOME/.local/share/opencode"
   mk_session_db "$HOME/.local/share/opencode/opencode.db" \
     "INSERT INTO session VALUES ('hostA', '{}');"
+  : >"$LOGS"
   aidc::sync_session_tool "/home/alice/app" opencode
   n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
   if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
     ok "opencode.db: schema drift skips merge, host db untouched, quarantine kept"
   else
     fail "opencode.db schema-drift not skipped safely: host session count=$n"
+  fi
+  if grep -Fq "column/type drift between container and host (first on table 'session')" "$LOGS" \
+     && ! grep -Fq "newer schema epoch" "$LOGS"; then
+    ok "opencode.db: drift skip names column drift (with table), not a schema epoch"
+  else
+    fail "opencode.db drift skip message wrong: $(cat "$LOGS")"
   fi
 
   # ── 11. no sqlite3 on host → merge skipped, host db untouched ───────────────
@@ -363,12 +375,211 @@ if command -v sqlite3 >/dev/null 2>&1; then
      CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
      INSERT INTO session VALUES ('hostA', '{}');
      INSERT INTO migration VALUES ('m1', 1);"
+  : >"$LOGS"
   aidc::sync_session_tool "/home/alice/app" opencode
   n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
   if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
     ok "opencode.db: container migration-journal ahead of host → skipped, quarantine kept"
   else
     fail "opencode.db journal-ahead not skipped safely: host session count=$n"
+  fi
+  # The skip must say WHICH mismatch and carry the remedy (upgrade the host),
+  # not the old conflated "newer than host, or column/type drift" guess.
+  if grep -Fq "newer schema epoch than the host's (migration journal 1 id(s) ahead" "$LOGS" \
+     && grep -Fq "upgrade the host's opencode" "$LOGS" \
+     && ! grep -Fq "column/type drift" "$LOGS"; then
+    ok "opencode.db: epoch-ahead skip names the cause, gap size, and upgrade remedy"
+  else
+    fail "opencode.db epoch-ahead skip message wrong: $(cat "$LOGS")"
+  fi
+
+  # ── 14b. journal ahead AND a drifted shared table → epoch-ahead wins ────────
+  # A newer opencode build typically ALTERs shared tables too (that is how the
+  # schema grows), so the pair is both journal-ahead and column-drifted. The
+  # journal gap is the root cause with the upgrade remedy; reporting drift
+  # here would bury the remedy — the exact conflation this split fixes.
+  setup_case oc-merge-journal-ahead-plus-drift
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT, extra TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session VALUES ('contB', '{}', 'x');
+     INSERT INTO migration VALUES ('m1', 1), ('m2_new', 2);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO migration VALUES ('m1', 1);"
+  : >"$LOGS"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
+  if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
+    ok "opencode.db: journal-ahead+drift still skips safely, quarantine kept"
+  else
+    fail "opencode.db journal-ahead+drift not skipped safely: host session count=$n"
+  fi
+  if grep -Fq "newer schema epoch" "$LOGS" && ! grep -Fq "column/type drift" "$LOGS"; then
+    ok "opencode.db: epoch-ahead takes precedence over column drift (root cause + remedy)"
+  else
+    fail "opencode.db precedence wrong (drift should lose to epoch-ahead): $(cat "$LOGS")"
+  fi
+
+  # ── 14c. verified-additive journal gap → degraded merge (host cols) ────────
+  # The live 2.0.25-host vs 2.0.29-container shape: gap = one allowlisted
+  # additive migration; container's `project` has the added column; payload
+  # tables identical. Must MERGE (not skip) using the host's column list.
+  ADD_ID="20261010180456_project_time_archived"   # on the verified allowlist
+  setup_case oc-merge-additive-gap
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT, time_archived INTEGER);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('contB', '{\"cwd\":\"/workspace/proj\"}');
+     INSERT INTO project VALUES ('projNew', 'from-container', 1759971600);
+     INSERT INTO project VALUES ('dup', 'CONTAINERVERSION', 1);
+     INSERT INTO migration VALUES ('m1', 1), ('$ADD_ID', 2);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('hostA', '{}');
+     INSERT INTO project VALUES ('dup', 'HOSTVERSION');
+     INSERT INTO migration VALUES ('m1', 1);"
+  : >"$LOGS"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  got_b="$(sqlite3 "$bdb" "SELECT data FROM session_v2 WHERE id='contB';")"
+  got_new="$(sqlite3 "$bdb" "SELECT name FROM project WHERE id='projNew';")"
+  got_dup="$(sqlite3 "$bdb" "SELECT name FROM project WHERE id='dup';")"
+  if [[ "$got_b" == '{"cwd":"/home/alice/app/proj"}' \
+     && "$got_new" == "from-container" \
+     && "$got_dup" == "HOSTVERSION" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session_v2;")" == "2" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM migration;")" == "1" ]]; then
+    ok "opencode.db: additive gap merges (sessions + new project row land, host row wins, journal untouched)"
+  else
+    fail "opencode.db additive-gap merge wrong: contB=$got_b projNew=$got_new dup=$got_dup"
+  fi
+  if grep -Fq "gap verified additive-only" "$LOGS" \
+     && grep -Fq "merged opencode sessions into" "$LOGS" \
+     && ! grep -Fq "skipping merge" "$LOGS"; then
+    ok "opencode.db: additive-gap merge logs the degraded mode, no skip"
+  else
+    fail "opencode.db additive-gap messages wrong: $(cat "$LOGS")"
+  fi
+
+  # ── 14d. NON-allowlisted gap id (a real reshaping migration) → skip ────────
+  # Fail-safe: only source-verified ids merge; everything else keeps the
+  # conservative epoch-ahead skip.
+  setup_case oc-merge-additive-unlisted
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('contB', '{}');
+     INSERT INTO migration VALUES ('m1', 1), ('20260622170816_reset_v2_session_state', 2);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('hostA', '{}');
+     INSERT INTO migration VALUES ('m1', 1);"
+  : >"$LOGS"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session_v2;")"
+  if [[ "$n" == "1" ]] && grep -Fq "newer schema epoch" "$LOGS" \
+     && ! grep -Fq "additive-only" "$LOGS"; then
+    ok "opencode.db: unlisted gap id still refuses (epoch-ahead), no degraded merge"
+  else
+    fail "opencode.db unlisted-gap case wrong: count=$n logs=$(cat "$LOGS")"
+  fi
+
+  # ── 14e. allowlisted gap but NOT purely additive (host-only column) → skip ─
+  # The runtime shape check must catch an allowlist that lied or drifted data.
+  setup_case oc-merge-additive-shape
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('contB', '{}');
+     INSERT INTO migration VALUES ('m1', 1), ('$ADD_ID', 2);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT, host_only TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('hostA', '{}');
+     INSERT INTO migration VALUES ('m1', 1);"
+  : >"$LOGS"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session_v2;")"
+  if [[ "$n" == "1" ]] && grep -Fq "column/type drift between container and host (first on table 'project')" "$LOGS"; then
+    ok "opencode.db: allowlisted gap with non-additive shape refuses (drift named)"
+  else
+    fail "opencode.db additive-shape case wrong: count=$n logs=$(cat "$LOGS")"
+  fi
+
+  # ── 14f. AIDC_OPENCODE_ADDITIVE_MIGRATIONS='' disables degraded merging ────
+  setup_case oc-merge-additive-off
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT, time_archived INTEGER);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('contB', '{}');
+     INSERT INTO migration VALUES ('m1', 1), ('$ADD_ID', 2);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT);
+     CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('hostA', '{}');
+     INSERT INTO migration VALUES ('m1', 1);"
+  : >"$LOGS"
+  AIDC_OPENCODE_ADDITIVE_MIGRATIONS="" aidc::sync_session_tool "/home/alice/app" opencode
+  n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session_v2;")"
+  if [[ "$n" == "1" ]] && grep -Fq "newer schema epoch" "$LOGS"; then
+    ok "opencode.db: explicitly-empty allowlist knob restores the conservative skip"
+  else
+    fail "opencode.db knob-off case wrong: count=$n logs=$(cat "$LOGS")"
+  fi
+
+  # ── 14g. case-variant journal table name → still never merged ─────────────
+  # SQL addresses tables case-insensitively (`SELECT id FROM migration` reads
+  # a `Migration`-cased table fine), so the merge's journal exclusion must not
+  # be an exact bash match such a db could slip past — that would insert the
+  # gap id into the host journal (the falsification the exclusion exists for).
+  setup_case oc-merge-additive-journal-case
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE Migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('contB', '{}');
+     INSERT INTO Migration VALUES ('m1', 1), ('$ADD_ID', 2);"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE Migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
+     INSERT INTO session_v2 VALUES ('hostA', '{}');
+     INSERT INTO Migration VALUES ('m1', 1);"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  ns="$(sqlite3 "$bdb" "SELECT count(*) FROM session_v2;")"
+  nj="$(sqlite3 "$bdb" "SELECT count(*) FROM Migration;")"
+  if [[ "$ns" == "2" && "$nj" == "1" ]]; then
+    ok "opencode.db: case-variant journal table excluded from merge (gap id never lands)"
+  else
+    fail "opencode.db case-variant journal merged: session_v2=$ns journal=$nj"
   fi
 
   # ── 15. migration journal: host ahead (container a subset) → merge proceeds ─
@@ -386,6 +597,7 @@ if command -v sqlite3 >/dev/null 2>&1; then
      CREATE TABLE migration (id TEXT PRIMARY KEY, time_completed INTEGER NOT NULL);
      INSERT INTO session VALUES ('hostA', '{}');
      INSERT INTO migration VALUES ('m1', 1), ('m2_new', 2);"
+  : >"$LOGS"
   aidc::sync_session_tool "/home/alice/app" opencode
   bdb="$HOME/.local/share/opencode/opencode.db"
   got="$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")"
@@ -394,6 +606,11 @@ if command -v sqlite3 >/dev/null 2>&1; then
     ok "opencode.db: host journal ahead → merged, journal stays host-complete"
   else
     fail "opencode.db journal-behind merge wrong: contB=$got migration_rows=$nj"
+  fi
+  if ! grep -Fq "skipping merge" "$LOGS"; then
+    ok "opencode.db: host-ahead merge logs no schema skip"
+  else
+    fail "opencode.db host-ahead merge logged a skip: $(cat "$LOGS")"
   fi
 
   # ── 16. journal on one side only → skip (can't reason about the epoch) ─────
@@ -408,12 +625,244 @@ if command -v sqlite3 >/dev/null 2>&1; then
   mkdir -p "$HOME/.local/share/opencode"
   mk_session_db "$HOME/.local/share/opencode/opencode.db" \
     "INSERT INTO session VALUES ('hostA', '{}');"
+  : >"$LOGS"
   aidc::sync_session_tool "/home/alice/app" opencode
   n="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")"
   if [[ "$n" == "1" ]] && [[ -f "$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db" ]]; then
     ok "opencode.db: journal present on one side only → skipped, quarantine kept"
   else
     fail "opencode.db one-sided journal not skipped safely: host session count=$n"
+  fi
+  if grep -Fq "migration journal present on only one side" "$LOGS"; then
+    ok "opencode.db: one-sided-journal skip names its cause"
+  else
+    fail "opencode.db one-sided skip message wrong: $(cat "$LOGS")"
+  fi
+
+  # ── 17. auto_sync_sessions_fresh: the post-exit sync runs ON-DISK code ────
+  # The 2026-10-14 scenario in miniature: a wrapper that sourced its sync
+  # functions before an edit must still sync with the code now on disk.
+  setup_case oc-fresh-reload
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  mk_session_db "$oc_data/opencode.db" \
+    "INSERT INTO session VALUES ('contB', '{\"cwd\":\"/workspace/proj\"}');"
+  mkdir -p "$HOME/.local/share/opencode"
+  mk_session_db "$HOME/.local/share/opencode/opencode.db" \
+    "INSERT INTO session VALUES ('hostA', '{}');"
+  # auto_sync_sessions probes for a running container first — satisfy it.
+  aidc::compose_capture() {
+    if [[ "$2" == "ps" ]]; then printf 'fake-container\n'; return 0; fi
+    shift 4  # <ws> exec -T workspace
+    stub_translate_argv "$@"
+    "${STUB_ARGV[@]}"
+  }
+  # Shadow the sync implementation the way a stale in-memory copy differs
+  # from disk: if the parent's definition runs, only a marker is written.
+  shadow_ran="$TMP_ROOT/shadow-ran"
+  aidc::sync_session_tool() { printf 'stale\n' >>"$shadow_ran"; }
+  # AIDC_ROOT set (as bin/aidc exports): the fresh path re-sources the
+  # on-disk module in a subshell — the REAL sync must run, not the shadow.
+  AIDC_ROOT="$REPO_ROOT"
+  # shellcheck disable=SC2218  # defined via the sourced lib, not lexically
+  aidc::auto_sync_sessions_fresh "/home/alice/app" opencode
+  got="$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT data FROM session WHERE id='contB';" 2>/dev/null || true)"
+  if [[ "$got" == '{"cwd":"/home/alice/app/proj"}' && ! -e "$shadow_ran" ]]; then
+    ok "auto_sync_sessions_fresh re-sources the on-disk module (stale shadow ignored)"
+  else
+    fail "fresh sync did not run on-disk code: contB=$got shadow=$([[ -e "$shadow_ran" ]] && echo yes || echo no)"
+  fi
+  # Without AIDC_ROOT (tests source the lib without bin/aidc): the parent's
+  # definitions — here the shadow — are the intended ones.
+  AIDC_ROOT=""
+  # shellcheck disable=SC2218  # defined via the sourced lib, not lexically
+  aidc::auto_sync_sessions_fresh "/home/alice/app" opencode
+  if [[ -e "$shadow_ran" ]]; then
+    ok "auto_sync_sessions_fresh falls back to in-process sync without AIDC_ROOT"
+  else
+    fail "fallback path did not use the parent's definitions"
+  fi
+  # The opt-out knob gates the fresh path itself (AIDC_ROOT re-set — the
+  # previous sub-case left it empty, which would only exercise the fallback).
+  rm -f "$shadow_ran"
+  AIDC_ROOT="$REPO_ROOT"
+  AIDC_AUTO_SYNC_SESSIONS=0
+  # shellcheck disable=SC2218  # defined via the sourced lib, not lexically
+  aidc::auto_sync_sessions_fresh "/home/alice/app" opencode
+  if [[ ! -e "$shadow_ran" ]] \
+     && [[ "$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")" == "2" ]]; then
+    ok "AIDC_AUTO_SYNC_SESSIONS=0 gates the fresh post-exit sync"
+  else
+    fail "knob-off not honored on the fresh path"
+  fi
+  unset AIDC_AUTO_SYNC_SESSIONS
+  # A broken tree must SKIP, never fall through to the parent's (stale)
+  # definitions: an unparseable module (bash -n gate) and a missing module
+  # both leave the shadow unrun and the host db untouched.
+  broken_root="$TMP_ROOT/broken-aidc-root"
+  mkdir -p "$broken_root/lib/aidc"
+  printf 'if [[ -n "broken"; then\n' >"$broken_root/lib/aidc/sync.sh"
+  AIDC_ROOT="$broken_root"
+  # shellcheck disable=SC2218  # defined via the sourced lib, not lexically
+  aidc::auto_sync_sessions_fresh "/home/alice/app" opencode
+  rm -f "$broken_root/lib/aidc/sync.sh"
+  # shellcheck disable=SC2218  # defined via the sourced lib, not lexically
+  aidc::auto_sync_sessions_fresh "/home/alice/app" opencode
+  if [[ ! -e "$shadow_ran" ]] \
+     && [[ "$(sqlite3 "$HOME/.local/share/opencode/opencode.db" "SELECT count(*) FROM session;")" == "2" ]]; then
+    ok "auto_sync_sessions_fresh skips on unparseable/missing module (no stale fallback)"
+  else
+    fail "broken-module case ran stale code: shadow=$([[ -e "$shadow_ran" ]] && echo yes || echo no)"
+  fi
+  unset AIDC_ROOT
+  # Restore the real definitions shadowed above (the same mechanism the
+  # fresh helper uses) and the original compose_capture stub, so nothing
+  # leaks past this section.
+  # shellcheck disable=SC1090,SC1091
+  . "$REPO_ROOT/lib/aidc/sync.sh"
+  aidc::compose_capture() {
+    shift 4  # <ws> exec -T workspace
+    stub_translate_argv "$@"
+    "${STUB_ARGV[@]}"
+  }
+
+  # ── 18. auth/credential tables NEVER merge container → host ────────────────
+  # Since opencode v2, provider logins land in the db (credential/account
+  # tables), not auth.json. The merge must never carry them host-ward: the
+  # host is the source of truth for credentials. Covers both guards — the
+  # known-tables list and the schema-driven token-column catch — while
+  # proving session tables still merge.
+  setup_case oc-merge-auth-excluded
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     CREATE TABLE account (id TEXT PRIMARY KEY, access_token TEXT, refresh_token TEXT);
+     CREATE TABLE future_auth (id TEXT PRIMARY KEY, access_token TEXT);
+     INSERT INTO session VALUES ('contB', '{}');
+     INSERT INTO credential VALUES ('ctr-1', 'OpenAI', 'CONTAINER-SECRET');
+     INSERT INTO account VALUES ('acct-1', 'CONTAINER-TOKEN', 'CONTAINER-REFRESH');
+     INSERT INTO future_auth VALUES ('fa-1', 'CONTAINER-TOKEN');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     CREATE TABLE account (id TEXT PRIMARY KEY, access_token TEXT, refresh_token TEXT);
+     CREATE TABLE future_auth (id TEXT PRIMARY KEY, access_token TEXT);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO credential VALUES ('host-1', 'Z.AI', 'HOST-SECRET');"
+  aidc::opencode_db_merge "$oc_data/opencode.db" "$HOME/.local/share/opencode/opencode.db"
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session;")" == "2" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")" == "{}" ]]; then
+    ok "auth-table guard: session rows still merge normally"
+  else
+    fail "auth-table guard over-blocked session merge"
+  fi
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")" == "1" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT value FROM credential WHERE id='host-1';")" == "HOST-SECRET" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM account;")" == "0" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM future_auth;")" == "0" ]]; then
+    ok "auth-table guard: credential/account/token-column tables never merge host-ward"
+  else
+    fail "auth tables leaked into the host db: credential=$(sqlite3 "$bdb" "SELECT count(*) FROM credential;") account=$(sqlite3 "$bdb" "SELECT count(*) FROM account;") future_auth=$(sqlite3 "$bdb" "SELECT count(*) FROM future_auth;")"
+  fi
+
+  # ── 19. the synced quarantine copy is scrubbed of credential rows ──────────
+  # "Credentials never leave the container" must hold for the at-rest
+  # quarantine on host disk too, not just the host db. End-to-end through the
+  # real sync path (the scrub runs right after the tar extract). The host
+  # fixture carries its own credential row so the host-db assertion is
+  # falsifiable (a schema-less host table would make it pass vacuously).
+  setup_case oc-sync-scrubs-quarantine
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('contB', '{\"cwd\":\"/workspace/proj\"}');
+     INSERT INTO credential VALUES ('ctr-1', 'OpenAI', 'CONTAINER-SECRET');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO credential VALUES ('host-1', 'Z.AI', 'HOST-SECRET');"
+  aidc::sync_session_tool "/home/alice/app" opencode
+  qdb="$(echo "$HOME"/.local/share/aidc/sessions/opencode/*/)opencode.db"
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  if [[ "$(sqlite3 "$qdb" "SELECT count(*) FROM credential;" 2>/dev/null)" == "0" ]] \
+     && [[ "$(sqlite3 "$qdb" "SELECT count(*) FROM session;" 2>/dev/null)" == "1" ]]; then
+    ok "quarantine opencode.db is scrubbed of credential rows (sessions kept)"
+  else
+    fail "quarantine still holds credential rows (count=$(sqlite3 "$qdb" "SELECT count(*) FROM credential;" 2>/dev/null))"
+  fi
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session;")" == "2" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT value FROM credential WHERE id='host-1';")" == "HOST-SECRET" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")" == "1" ]]; then
+    ok "host db still receives sessions and never container credentials"
+  else
+    fail "host db wrong after scrubbed sync: session=$(sqlite3 "$bdb" "SELECT count(*) FROM session;") credential=$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")"
+  fi
+
+  # ── 20. scrub helper: token-column tables are scrubbed under any name ──────
+  setup_case oc-scrub-token-columns
+  sdb="$TMP_ROOT/scrub-fixture.db"
+  sqlite3 "$sdb" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, value TEXT);
+     CREATE TABLE some_future_store (id TEXT PRIMARY KEY, access_token TEXT);
+     INSERT INTO session VALUES ('s1', '{}');
+     INSERT INTO credential VALUES ('c1', 'SECRET');
+     INSERT INTO some_future_store VALUES ('f1', 'TOKEN');"
+  aidc::opencode_scrub_auth "$sdb"
+  if [[ "$(sqlite3 "$sdb" "SELECT count(*) FROM credential;")" == "0" ]] \
+     && [[ "$(sqlite3 "$sdb" "SELECT count(*) FROM some_future_store;")" == "0" ]] \
+     && [[ "$(sqlite3 "$sdb" "SELECT count(*) FROM session;")" == "1" ]]; then
+    ok "scrub drops credential + token-column tables, leaves sessions"
+  else
+    fail "scrub wrong: credential=$(sqlite3 "$sdb" "SELECT count(*) FROM credential;") future=$(sqlite3 "$sdb" "SELECT count(*) FROM some_future_store;") session=$(sqlite3 "$sdb" "SELECT count(*) FROM session;")"
+  fi
+
+  # ── 21. the auth guard holds in restricted-additive mode too, and logs ─────
+  # The skip sits before the mode branch; this pins that placement. The src
+  # session table carries a src-only `extra` column — the actual restricted
+  # -mode discriminator: full mode would build the column list from src and
+  # the INSERT would error against dst lacking the column, while restricted
+  # mode derives the list from dst and silently drops the value. Asserting
+  # the merge SUCCEEDED with rows landed proves restricted mode ran, and the
+  # credential exclusion proves the guard sits before all of it.
+  setup_case oc-merge-auth-restricted
+  oc_data="$CONTAINER_ROOT/.local/share/opencode"
+  mkdir -p "$oc_data"
+  sqlite3 "$oc_data/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT, extra TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('contB', '{}', 'SRC-ONLY');
+     INSERT INTO credential VALUES ('ctr-1', 'OpenAI', 'CONTAINER-SECRET');"
+  mkdir -p "$HOME/.local/share/opencode"
+  sqlite3 "$HOME/.local/share/opencode/opencode.db" \
+    "CREATE TABLE session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE credential (id TEXT PRIMARY KEY, label TEXT, value TEXT);
+     INSERT INTO session VALUES ('hostA', '{}');
+     INSERT INTO credential VALUES ('host-1', 'Z.AI', 'HOST-SECRET');"
+  : >"$LOGS"
+  aidc::opencode_db_merge "$oc_data/opencode.db" \
+    "$HOME/.local/share/opencode/opencode.db" restrict
+  bdb="$HOME/.local/share/opencode/opencode.db"
+  if [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM session;")" == "2" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT data FROM session WHERE id='contB';")" == "{}" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")" == "1" ]] \
+     && [[ "$(sqlite3 "$bdb" "SELECT value FROM credential;")" == "HOST-SECRET" ]]; then
+    ok "restricted mode: gap-column row merges (src-only column dropped), credential rows never do"
+  else
+    fail "restricted-mode auth guard wrong: session=$(sqlite3 "$bdb" "SELECT count(*) FROM session;") credential=$(sqlite3 "$bdb" "SELECT count(*) FROM credential;")"
+  fi
+  if grep -Fq "excluded auth tables from the host merge (host owns credentials): credential" "$LOGS"; then
+    ok "excluded auth tables are named in the sync log"
+  else
+    fail "auth-exclusion log line missing: $(cat "$LOGS")"
   fi
 
 else

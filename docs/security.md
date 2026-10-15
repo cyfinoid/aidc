@@ -141,8 +141,65 @@ Designed to be invisible when things are fine:
 
 Outcomes log to `.ai-container/scan-hook.log`; `aidc insights` summarizes
 them (clean passes / blocked / infra errors). Coverage matrix: Claude Code —
-enforced via hook; codex/opencode/grok/omp — prose guardrail in AGENTS.md only
-(their runtimes lack an equivalent hook point today).
+enforced via hook; codex/opencode/grok/omp — prose guardrail in AGENTS.md
+only. (opencode and cursor do have hook points — they carry the review gate
+below — but the scan gate is not wired there yet; scanners are heavier than
+the checklist and a blocked stop that re-runs semgrep on every nudge is
+poor value at today's speeds. A `--check`-style scan hook is a possible
+follow-up.)
+
+## Review-gate enforcement (Claude Code)
+
+Deterministic gates cannot catch semantic bugs — the class external AI PR
+reviewers (Greptile, CodeRabbit) kept finding on *already pushed* branches:
+fallback-defeating error paths, double-counted aggregations, code that
+contradicts the change's own stated intent, ignored repo directives. The
+seeded CLAUDE.md/AGENTS.md "Pre-completion review" section turns those into a
+ritual: review the diff against a fixed checklist (self-review, then a
+fresh-eyes subagent pass when the runtime can spawn one), fix or flag every
+finding, and record the outcome with `aidc-review-record "<summary>"`.
+
+The ritual is enforced **mechanically** on every agent surface aidc can
+hook — one shared check (`aidc-review-hook.sh`), three front ends:
+
+- **Claude Code** — a Stop hook (`aidc-review-hook.sh`, registered in
+  settings.json): blocks the stop (exit 2) with the checklist on stderr when
+  non-documentation code changed without a matching record; honors
+  `stop_hook_active` as its loop guard.
+- **opencode** — a plugin (`aidc-review-gate.ts`, installed into
+  `~/.config/opencode/plugins/` by the bootstrap): on turn-end events
+  (`session.execution.succeeded|failed|interrupted`, plus `session.idle` for
+  TUI-lifecycle coverage) it runs the same check and injects the checklist as
+  a user prompt, so the agent continues into the review instead of returning
+  control. Loop protection: a session is only nudged for tree states it has
+  not already been nudged for, capped at 3 nudges per session, and
+  overlapping turn-end events are serialized per session (opencode has no
+  native stop-hook loop guard).
+- **cursor-agent** — a `stop` entry in `~/.cursor/hooks.json`
+  (`aidc-review-gate-cursor.sh`): on clean completions it returns
+  `followup_message` with the checklist, which Cursor auto-continues;
+  Cursor's own `loop_limit` (5) bounds re-triggering.
+
+All three front ends behave the same: **block the "I'm done" moment** when
+non-doc code changed without a review record, and **re-arm on any edit** —
+the record keys a tree signature that includes tracked diffs, status lines,
+*and the content of untracked files*, so an unreviewed late tweak cannot ride
+an old review past the gate.
+
+- **Docs-only diffs skip it** (markdown, logs, plans, changelogs, LICENSE,
+  images — the checklist's bug classes do not live there).
+- **Fails open on every surface** (missing scripts, broken git, disabled
+  knob), matching the scan hook's posture.
+- **Opt-out**: `AIDC_ENFORCE_REVIEW_HOOK=0` (project.env or config.env)
+  disables the gate for all agents — the Claude hook is removed from
+  settings.json on the next container start, and the opencode/cursor front
+  ends degrade to cheap no-ops.
+
+codex, grok, and omp have no feed-back hook point today (codex `notify`
+cannot inject into the turn); for them the gate remains the AGENTS.md prose
+guardrail. The gate cannot verify review *quality* — it makes skipping the
+review a deliberate, logged act (`.ai-container/review-hook.log` and the
+marker's summary line) instead of a silent one.
 
 ## MCP servers
 
@@ -202,9 +259,10 @@ yet validated end-to-end — see `docs/apple-container.md`.
 
 ## Exposing the opencode web UI (`aidc opencode-web`)
 
-`aidc opencode-web` runs opencode's browser UI (`opencode web`) inside the
-container. This is the **only** aidc feature that publishes a container port to
-the host, so its posture is deliberately conservative:
+`aidc opencode-web` runs opencode's server + web UI (`opencode serve` in v2 —
+v1's `opencode web` subcommand was renamed) inside the container. This is the
+**only** aidc feature that publishes a container port to the host, so its
+posture is deliberately conservative:
 
 - **Loopback-only host publish.** The `compose.opencode-web.yaml` override (added
   only when `AIDC_OPENCODE_WEB=1`, which `aidc opencode-web` sets) publishes
@@ -212,13 +270,15 @@ the host, so its posture is deliberately conservative:
   cannot. opencode itself binds `0.0.0.0` *inside* the container, which is
   required for the forwarded port to reach it; keeping the **host** publish on
   `127.0.0.1` is what keeps the agent off the network.
-- **Auth on by default.** A random `OPENCODE_SERVER_PASSWORD` is generated,
-  delivered to the container by env-key reference (never on any argv), and
-  printed once for you to use. Export your own `OPENCODE_SERVER_PASSWORD`
-  beforehand to pin it; `--username` overrides the default `opencode` user.
-- **`--no-auth`** removes the password. It is safe *only* because the publish is
-  loopback-only; do not pair it with any host-side reverse proxy or port
-  re-forward that would widen the exposure.
+- **Auth: v2 always enforces a server password.** A random `OPENCODE_PASSWORD`
+  is generated, delivered to the container by env-key reference (never on any
+  argv), and printed once for you to use. Export your own `OPENCODE_PASSWORD`
+  beforehand to pin it (a v1-era `OPENCODE_SERVER_PASSWORD` is honored and
+  reused for compatibility). There is no username: v2's scheme is
+  password-only, so `--username` is accepted but ignored.
+- **`--no-auth`** no longer disables authentication (v2 has no authless mode):
+  it means aidc ships no password and opencode mints and prints its own on
+  startup. The loopback-only publish still applies.
 - **Port default 4096** (`--port N` or `AIDC_OPENCODE_WEB_PORT`; validated to
   1024–65535). Opting in (re)creates the container to attach the port, and a
   later plain `aidc <tool>` recreates it back without the port — the same
@@ -240,7 +300,10 @@ floating branch or unpinned `latest`:
   is fetched to a file and executed (never piped): `claude` (positional
   version; the installer verifies the binary against its manifest SHA256),
   `codex` (`--release`, artifacts from the vendor's GitHub releases),
-  `opencode` (`VERSION` env, GitHub releases), `grok` (positional version),
+  `opencode` (`VERSION` env; v2 ships through the vendor's npm-backed install
+  channel `https://opencode.ai/v2/install`, latest resolved from the vendor's
+  update API — the v1-era GitHub-releases channel only serves the v1 line),
+  `grok` (positional version),
   `omp` (`--binary --ref v<X.Y.Z>` → pinned `github.com/can1357/oh-my-pi`
   release binary, installed to `~/.local/bin/omp`).
 
@@ -288,10 +351,17 @@ read-only at `/host-seed/<tool>`) into the agent's per-repo volume:
 | Cursor | `~/.cursor` | `~/.cursor` | `cli-config.json` **(settings only)** — the login token is in the macOS Keychain and can't be seeded; use `CURSOR_API_KEY` |
 
 Re-sync after changing host config with `aidc sync-config <claude|codex|opencode|grok|omp|cursor|all>`.
-Because the seed is read-only and only specific files are copied, the agents
+**OpenCode is the exception — its `opencode.json` and `auth.json` re-seed from
+the host on *every* startup**, not just the first, so a host-side
+`opencode auth login` or an apiKey rotated in `opencode.json` reaches new
+container sessions without a manual re-sync (a missing host file is skipped, so
+state that exists only inside the container still survives). Because the seed
+is read-only and only specific files are copied, the agents
 reuse your existing logins without the container being able to write back to the
 host. After interactive login *inside* the container, credentials persist in the
-named volume across restarts (and are wiped by `aidc destroy`).
+named volume across restarts (and are wiped by `aidc destroy`) — for opencode,
+until the host grows its own credential file, which then wins on the next
+start.
 
 A couple of agents keep state *outside* the single dir you'd naively persist, so
 the volume mounts are placed deliberately:
@@ -301,7 +371,7 @@ the volume mounts are placed deliberately:
   volume, else logins and history would vanish on recreation.
 - **Claude Code** writes its global config to `~/.claude.json`, a *sibling* file
   of `~/.claude` and thus outside the `claude_home` volume. The container sets
-  `CLAUDE_CONFIG_DIR=/home/vscode/.claude` so `.claude.json` (and, on Linux,
+  `CLAUDE_CONFIG_DIR=/home/aidc/.claude` so `.claude.json` (and, on Linux,
   `.credentials.json`) land inside that volume and persist across recreation
   along with the rest of Claude's state.
 - **cursor-agent** keeps file state under `~/.cursor` (persisted), but its
@@ -322,11 +392,33 @@ reassigning `AIDC_PASSTHROUGH_ENV_KEYS` (`lib/aidc/common.sh`) in
 **Which agents inherit a host login automatically?** With a host login present,
 Claude (Keychain → tmpfs token), Codex (`~/.codex/auth.json`), Grok
 (`~/.grok/auth.json`), omp (`~/.omp/agent/agent.db`), and OpenCode
-(`~/.local/share/opencode/auth.json`) are all seeded on first `aidc up`, and any
+(`~/.local/share/opencode/auth.json`) are all seeded on `aidc up` — OpenCode's
+on **every** start, so a host re-login or key rotation propagates to new
+sessions without a manual `aidc sync-config opencode` — and any
 in-container login persists in the agent's named volume. **Cursor is the
 exception** — its interactive-login token is stored in the macOS Keychain (not a
 copyable file), so it can't be seeded; authenticate cursor-agent in containers
 with `CURSOR_API_KEY` (forwarded above).
+
+**opencode v2 — auth moved into the db, and both directions are handled.**
+Since opencode v2, new `opencode auth login`s update `opencode.db`
+(`credential`/`account` tables), not `auth.json`. Seeding follows: on every
+compose env pass the host writes a small auth snapshot
+(`.aidc-auth-seed.json`, 0600, auth tables only) into the opencode data dir,
+and the container's bootstrap applies it into the volume db — fresher-wins
+upsert on `time_updated`, so a host re-login propagates and a fresher
+container-side token refresh is never downgraded. `AIDC_OPENCODE_SYNC_AUTH=0`
+disables both halves. Fallback for a pre-v2 container volume (no auth
+tables): `opencode auth login` inside the container (device-code flow — open
+the printed URL on the host; the credential persists in that repo's volume).
+The direction stays one-way: session syncing scrubs credential tables from
+the synced db copy (secure-deleting DELETEs) and never merges them
+host-ward, so container auth state never reaches the host. Known residual:
+on v1-era builds the legacy `storage/` session JSON is folder-copied
+as-is — v1 kept credentials only in `auth.json` (tar-excluded); if a future
+opencode writes auth elsewhere than the db, the sync excludes need
+revisiting (see `docs/opencode-schema-epochs.md` for the db versioning
+machinery).
 
 Only env vars actually set in `aidc`'s own process are forwarded — the value is
 read at exec time and lives only for the duration of that `docker compose exec`,
@@ -356,8 +448,12 @@ the macOS Keychain on demand (service `claude-code-oauth-token`, your `$USER`
 account) so the token never has to be exported into every shell via `~/.zshrc`.
 Override the service name or disable the lookup with
 `AIDC_CLAUDE_OAUTH_KEYCHAIN_SERVICE` (set it empty to disable). The lookup is a
-no-op on hosts without the `security` tool. See `docs/claude-profiles.md` for
-setup.
+no-op on hosts without the `security` tool. Because the read can stall silently
+— a Keychain access dialog hidden behind other windows, or a slow `securityd` —
+a watchdog prints a hint (no `--debug` needed) once the read outlives 5 seconds;
+retune with `AIDC_KEYCHAIN_HINT_DELAY` (seconds; `0` or a non-numeric value
+disables). See
+`docs/claude-profiles.md` for setup.
 
 **How the token reaches the agent (file delivery).** The full path is:
 Keychain → aidc's process (only for the duration of the run) → the exec's
@@ -391,7 +487,7 @@ Verify:
 ```bash
 aidc exec -- rtk --version
 aidc exec -- rtk gain                                                     # token savings so far
-aidc exec -- cat /home/vscode/.claude/settings.json | jq '.hooks // {}'   # rtk PreToolUse/Bash + SessionEnd reporter + aidc Stop hook
+aidc exec -- cat /home/aidc/.claude/settings.json | jq '.hooks // {}'   # rtk PreToolUse/Bash + SessionEnd reporter + aidc Stop hook
 ```
 
 ### Which agents get rtk

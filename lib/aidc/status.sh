@@ -595,4 +595,35 @@ aidc::cmd_status_global() {
     "$C_LBL" "$C_RST" "$total" \
     "$C_OK" "$running" "$C_RST" \
     "$C_WARN" "$stopped" "$C_RST"
+  aidc::status_host_disk "$C_HDR" "$C_LBL" "$C_DIM" "$C_RST"
+}
+
+# Deduplicated host disk picture from `docker system df`. The per-image and
+# per-container numbers above sum shared base layers once per image (an
+# OrbStack/Docker Desktop images tab shows the same illusion — a dozen thin
+# images each "3.4GB"), so this block is the honest number. `aidc clean`
+# reclaims the images/build-cache shares.
+aidc::status_host_disk() {
+  local C_HDR="$1" C_LBL="$2" C_DIM="$3" C_RST="$4"
+  local df_rows
+  df_rows="$(docker system df --format '{{.Type}}|{{.Size}}|{{.Reclaimable}}' 2>/dev/null)" || return 0
+  [[ -n "$df_rows" ]] || return 0
+
+  printf '\n'
+  printf '  %sdocker disk%s (deduplicated — the per-image sizes above double-count shared layers)\n' "$C_HDR" "$C_RST"
+  local type size reclaim note
+  while IFS='|' read -r type size reclaim; do
+    [[ -z "$type" ]] && continue
+    reclaim="${reclaim%% (*}" # "8.704GB (49%)" -> "8.704GB"
+    note=""
+    case "$type" in
+      Images)      note="reclaimable ${reclaim:-?} — 'aidc clean' shows what" ;;
+      Containers)  note="reclaimable ${reclaim:-?} (exited containers)" ;;
+      "Local Volumes") note="persisted state — not touched by cleanup" ;;
+      "Build Cache") note="'aidc clean --cache' reclaims" ;;
+    esac
+    printf '  %s%-13s%s %s' "$C_LBL" "$type" "$C_RST" "${size:-?}"
+    [[ -n "$note" ]] && printf '   %s(%s)%s' "$C_DIM" "$note" "$C_RST"
+    printf '\n'
+  done <<<"$df_rows"
 }

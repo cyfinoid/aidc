@@ -33,10 +33,10 @@ jobs:
           # no unpinned installer scripts. To bump: pick the new version from
           # the tool's GitHub releases page, take the linux_amd64 sha256 from
           # its checksums.txt asset, and update the four values below.
-          SYFT_VERSION=v1.18.1
-          SYFT_SHA256=066c251652221e4d44fcc4d115ce3df33a91769da38c830a8533199db2f65aab
-          GRYPE_VERSION=v0.87.0
-          GRYPE_SHA256=be710d15f5477e5c77ce03d14e480263415d7ab135e04b8483663f688823087d
+          SYFT_VERSION=v1.54.1
+          SYFT_SHA256=c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+          GRYPE_VERSION=v0.120.1
+          GRYPE_SHA256=0a9ee97ef5ae2ee953b0a80098105052e846cdbe319a57d808b519c33cd1343d
           mkdir -p "$HOME/.local/bin"
           curl -fsSL "https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/syft_${SYFT_VERSION#v}_linux_amd64.tar.gz" -o /tmp/syft.tar.gz
           echo "$SYFT_SHA256  /tmp/syft.tar.gz" | sha256sum -c -
