@@ -453,6 +453,7 @@ RUN mkdir -p /home/aidc/.local/bin /home/aidc/.opencode \
     && curl -fsSL https://opencode.ai/v2/install -o /tmp/install-opencode.sh \
     && VERSION="$OPENCODE_VERSION" bash /tmp/install-opencode.sh --no-modify-path \
     && ln -sf /home/aidc/.opencode/bin/opencode /home/aidc/.local/bin/opencode \
+    && test -x /home/aidc/.local/bin/opencode \
     && rm -f /tmp/install-opencode.sh
 FROM base AS agent-opencode-0
 # Not selected: only pre-create the directories the final stage COPY reads, so
@@ -465,6 +466,7 @@ ARG CLAUDE_VERSION
 RUN mkdir -p /home/aidc/.local/bin \
     && curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
     && bash /tmp/install-claude.sh "$CLAUDE_VERSION" \
+    && test -x /home/aidc/.local/bin/claude \
     && rm -f /tmp/install-claude.sh
 FROM base AS agent-claude-0
 RUN mkdir -p /home/aidc/.local/bin
@@ -472,9 +474,16 @@ FROM agent-claude-${WITH_CLAUDE} AS sel-claude
 
 FROM base AS agent-codex-1
 ARG CODEX_VERSION
+# Upstream installer behavior (verified 2026-10-15): it symlinks
+# $CODEX_INSTALL_DIR/codex -> $HOME/.codex/packages/standalone/current/bin/codex
+# and defaults HOME to /root in a build stage — both leave the binary outside
+# the paths the main stage copies. Pin HOME + install dir, then replace the
+# symlink with the real binary (its target under .codex/ is NOT copied).
 RUN mkdir -p /home/aidc/.local/bin \
     && curl -fsSL https://chatgpt.com/codex/install.sh -o /tmp/install-codex.sh \
-    && sh /tmp/install-codex.sh --release "$CODEX_VERSION" \
+    && HOME=/home/aidc CODEX_INSTALL_DIR=/home/aidc/.local/bin sh /tmp/install-codex.sh --release "$CODEX_VERSION" \
+    && install -m 755 "$(readlink -f /home/aidc/.local/bin/codex)" /home/aidc/.local/bin/codex \
+    && test -x /home/aidc/.local/bin/codex \
     && rm -f /tmp/install-codex.sh
 FROM base AS agent-codex-0
 RUN mkdir -p /home/aidc/.local/bin
@@ -485,6 +494,7 @@ RUN mkdir -p /home/aidc/.local/bin \
     && curl -fsS https://cursor.com/install -o /tmp/install-cursor.sh \
     && bash /tmp/install-cursor.sh \
     && { cursor-agent --version || true; } \
+    && test -x /home/aidc/.local/bin/cursor-agent \
     && rm -f /tmp/install-cursor.sh
 FROM base AS agent-cursor-agent-0
 RUN mkdir -p /home/aidc/.local/bin
@@ -492,10 +502,17 @@ FROM agent-cursor-agent-${WITH_CURSOR_AGENT} AS sel-cursor-agent
 
 FROM base AS agent-grok-1
 ARG GROK_VERSION
-RUN mkdir -p /home/aidc/.local/bin \
+# Upstream installer behavior (verified 2026-10-15): GROK_BIN_DIR is ignored —
+# the versioned binary downloads to $HOME/.grok/downloads/grok-<platform> and
+# PATH setup goes through shell rc files (absent in a build). Install the
+# downloaded binary into .local/bin ourselves and assert it — a silent skip
+# here is how the CI pin check ended up reporting "executable file not found".
+RUN mkdir -p /home/aidc/.local/bin /home/aidc/.grok \
     && curl -fsSL https://x.ai/cli/install.sh -o /tmp/install-grok.sh \
-    && GROK_BIN_DIR=/home/aidc/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" \
-    && rm -f /tmp/install-grok.sh
+    && HOME=/home/aidc GROK_BIN_DIR=/home/aidc/.local/bin bash /tmp/install-grok.sh "$GROK_VERSION" || true; \
+    src="$(find /home/aidc/.grok/downloads -type f -name 'grok-*' 2>/dev/null | head -1)"; \
+    if [ -n "$src" ]; then install -m 755 "$src" /home/aidc/.local/bin/grok; fi; \
+    test -x /home/aidc/.local/bin/grok
 FROM base AS agent-grok-0
 RUN mkdir -p /home/aidc/.local/bin
 FROM agent-grok-${WITH_GROK} AS sel-grok
@@ -505,6 +522,7 @@ ARG OMP_VERSION
 RUN mkdir -p /home/aidc/.local/bin \
     && curl -fsSL https://omp.sh/install -o /tmp/install-omp.sh \
     && PI_INSTALL_DIR=/home/aidc/.local/bin sh /tmp/install-omp.sh --binary --ref "v$OMP_VERSION" \
+    && test -x /home/aidc/.local/bin/omp \
     && rm -f /tmp/install-omp.sh
 FROM base AS agent-omp-0
 RUN mkdir -p /home/aidc/.local/bin

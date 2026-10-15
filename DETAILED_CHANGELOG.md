@@ -94,6 +94,42 @@ opencode dir at 0600, the same trust domain as the `auth.json` beside it.
 
 ---
 
+## 2026-10-15 — CI pin-check: codex + grok missing from the sbom image (installer drift)
+
+**Summary:** The sbom workflow's `check-image-pins` failed on the PR:
+`codex` and `grok` were "executable file not found" in the built
+`aidc-image-scan:ci` while the image build itself had succeeded. Both
+upstream install scripts changed behavior under the agent stages'
+assumptions. Fixed by pinning assumptions explicitly and adding build-time
+assertions so future installer drift fails the BUILD, not the pin check.
+
+**Diagnosis (empirical, ran both installers in sandbox HOMEs):**
+- codex (chatgpt.com/codex/install.sh): with `--release`, the current
+  installer writes the binary under `$HOME/.codex/packages/standalone/…` and
+  symlinks `$CODEX_INSTALL_DIR/codex` (default `$HOME/.local/bin`). In the
+  build stage `HOME=/root`, so everything landed under `/root/…` — outside
+  every path the main stage copies.
+- grok (x.ai/cli/install.sh): `GROK_BIN_DIR` is ignored; the versioned
+  binary downloads to `$HOME/.grok/downloads/grok-<platform>` and PATH setup
+  goes through shell rc files a build never sources. The installer exits 0
+  regardless — hence a green build with missing agents.
+
+**How:** both agent stages now set `HOME=/home/aidc`, install explicitly
+into `/home/aidc/.local/bin` (codex dereferences the symlink with
+`install $(readlink -f …)` since `.codex/` is not a copied path), and end
+with `test -x` on the binary — as do all six agent stages now (drift
+detector: upstream installer changes fail the image build, where they're
+diagnosable, instead of the pin check). New suite cases in
+`tests/base-image-stages.test.sh` (32 → 38) assert every agent-1 stage
+carries its `test -x` guard.
+
+**Verification:** sandbox-ran both installers before and after the fix
+(codex-cli 0.162.1 and grok 1.0.52 binaries produced at the expected paths
+and executable); stage suite 38/38; full loop 40/40; shellcheck + aidc-scan
+clean. The definitive validation is the CI sbom build on push.
+
+---
+
 ## 2026-10-15 — v3.0.0: final renumber of the first tagged release + retro-tagging plan
 
 **Summary:** At the user's instruction, the first tagged release lands as

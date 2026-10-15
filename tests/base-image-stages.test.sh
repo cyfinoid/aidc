@@ -81,6 +81,21 @@ for a in $AGENTS; do
   ok "$a: agent-1 stage is self-sufficient (mkdir first)"
 done
 
+# ── 2b. every agent-1 stage asserts its binary exists after install ───────────
+# Third-party installers drift (codex symlinks into ~/.codex/packages with
+# HOME=/root in a build stage; the x.ai installer ignores GROK_BIN_DIR and
+# drops the binary in ~/.grok/downloads) — a silent skip surfaces only later
+# as the CI pin check's "executable file not found". Each agent-1 stage must
+# end with a test -x guard naming its binary so the BUILD fails instead.
+for a in $AGENTS; do
+  if awk -v a="$a" 'BEGIN{keep=0} $0 == "FROM base AS agent-" a "-1" {keep=1; next} keep && $0 ~ /^FROM / {exit} keep {print}' "$DF" \
+     | grep -qF "test -x /home/aidc/.local/bin/$a"; then
+    ok "$a: agent-1 stage asserts test -x on its binary (installer-drift guard)"
+  else
+    fail "$a: agent-1 stage has no test -x drift guard (silent installer skips resurface as pin-check failures)"
+  fi
+done
+
 # ── 3. global ARGs declared before the first FROM ─────────────────────────────
 first_from_line="$(grep -n '^FROM ' "$DF" | head -1 | cut -d: -f1)"
 for arg in AIDC_AGENTS WITH_CLAUDE WITH_CODEX WITH_OPENCODE WITH_CURSOR_AGENT WITH_GROK WITH_OMP \
