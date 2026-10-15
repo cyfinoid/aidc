@@ -138,6 +138,23 @@ clean. The definitive validation is the CI sbom build on push.
 
 ---
 
+## 2026-10-15 — GitHub Actions updated to latest + dependabot
+
+**Summary:** All six pinned actions updated to their latest releases —
+checkout v6→v7.0.1, upload-artifact v4→v7.0.2, cache v4.3.0→v6.1.0,
+setup-buildx v3.9.0→v4.4.1, scorecard-action v2.4.3→v2.5.0, codeql-action
+v3.36.3→v4.38.3 — and `.github/dependabot.yml` added (actions ecosystem,
+weekly) so they stay current.
+
+**How:** latest tags verified authoritatively via `git ls-remote --tags`
+per action repo; SHA pins updated to the peeled commit SHAs (repo
+convention: `@<sha> # vX.Y.Z`), applied across all 8 workflows (checkout
+×9, upload-artifact ×3, the rest ×1 — 16 `uses:` total, all SHA-pinned).
+`AIDC_OPENCODE_SYNC_AUTH` untouched. Dependabot cannot run the workflows,
+so the first CI run on each bump PR stays the validation.
+
+---
+
 ## 2026-10-15 — v3.0.0: final renumber of the first tagged release + retro-tagging plan
 
 **Summary:** At the user's instruction, the first tagged release lands as

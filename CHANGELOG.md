@@ -24,6 +24,8 @@ The first tagged release. The 2.2.0–2.5.0 sections below document the developm
 ### Changed
 
 - **All aidc and bootstrap messages are timestamped** (`[aidc 2026-10-15 09:12:33] …` / `[bootstrap …] warn: …`) — sync/merge lines land in scrollback and `docker logs` and get triaged later; the wall clock makes that triage possible. Message contracts in the suites grep substrings, which a prefix doesn't break.
+- **All GitHub Actions updated to their latest releases** — checkout v6→v7.0.1, upload-artifact v4→v7.0.2, cache v4.3.0→v6.1.0, setup-buildx v3.9.0→v4.4.1, scorecard-action v2.4.3→v2.5.0, codeql-action v3.36.3→v4.38.3 (four major bumps) — still SHA-pinned with version comments per the repo convention. **And they stay current**: a new `.github/dependabot.yml` (actions ecosystem, weekly) opens update PRs against the pinned SHAs; the bump PR's own CI run remains the validation.
+
 - **README refreshed for the release:** release/tests/shellcheck/Scorecard badges, a "What's new in v3.0.0" highlights section, and accuracy updates — the credential-direction contract (host→container seeding; never container→host) is now stated where session sync is described.
 
 ## [2.5.0] - 2026-10-14
