@@ -127,11 +127,11 @@ fi
 rm -f "$HDB" "$SNAP"
 
 # ── container side ───────────────────────────────────────────────────────────
-# Extract seed_opencode_auth from the template and repoint its seed-mount path
-# at a fixture directory (the real path lives behind a read-only bind mount).
+# Extract seed_opencode_auth (and its seed_opencode_auth_json helper) from the
+# template and repoint its seed-mount path at a fixture directory.
 SEED_DIR="$TMP_ROOT/host-seed"
 mkdir -p "$SEED_DIR"
-sed -n '/^seed_opencode_auth()/,/^}/p' "$TMPL" \
+sed -n '/^seed_opencode_auth()/,/^}/p; /^seed_opencode_auth_json()/,/^}/p' "$TMPL" \
   | sed "s|/host-seed/opencode-data|$SEED_DIR|g" >"$TMP_ROOT/func.sh"
 grep -q '^seed_opencode_auth()' "$TMP_ROOT/func.sh" \
   || { echo "could not extract seed_opencode_auth from template" >&2; exit 1; }
@@ -139,6 +139,12 @@ grep -q '^seed_opencode_auth()' "$TMP_ROOT/func.sh" \
 home_dir="$TMP_ROOT/container"
 mkdir -p "$home_dir/.local/share/opencode"
 bootstrap_warn() { printf '[bootstrap] warn: %s\n' "$*" >&2; }
+# The kick (`timeout 30 opencode run "/exit"`) is stubbed: `timeout` strips its
+# duration, `opencode` defaults to a no-op (kick failed → warn path). Cases
+# that need a successful kick override `opencode` to create the db schema the
+# way opencode's own initialization would (empty auth tables, no rows).
+timeout() { local d="$1"; shift; "$@"; }
+opencode() { :; }
 # shellcheck disable=SC1090
 . "$TMP_ROOT/func.sh"
 
@@ -217,6 +223,31 @@ else
   fail "seed disturbed a pre-v2 container db"
 fi
 
+# 9b. fresh volume: the kick (stubbed opencode = successful init) creates the
+#     empty db, and the seed applies the snapshot rows into it — so the FIRST
+#     session already carries the host's logins.
+rm -f "$CDB"
+printf '{"openai": {"type": "oauth", "access": "STALE", "expires": 1}}' \
+  >"$home_dir/.local/share/opencode/auth.json"
+write_snap '{"tables": {"credential": [
+  {"id":"c1","integration_id":"openai","label":"OAuth","value":"{\"type\":\"oauth\",\"access\":\"FRESH\",\"refresh\":\"R\",\"expires\":999}","time_updated":500},
+  {"id":"c2","integration_id":"synth-provider","label":"API key","value":"{\"type\":\"api\",\"key\":\"SYNTH-KEY\"}","time_updated":500}]}}'
+opencode() {
+  sqlite3 "$CDB" \
+    "CREATE TABLE IF NOT EXISTS session (id TEXT PRIMARY KEY, data TEXT);
+     CREATE TABLE IF NOT EXISTS credential (id TEXT PRIMARY KEY, label TEXT, value TEXT, time_updated INTEGER);
+     CREATE TABLE IF NOT EXISTS account (id TEXT PRIMARY KEY, email TEXT, access_token TEXT, refresh_token TEXT, token_expiry INTEGER, time_updated INTEGER);"
+}
+seed_opencode_auth
+unset -f opencode
+if [[ "$(sqlite3 "$CDB" "SELECT count(*) FROM credential;")" == "2" ]] \
+   && [[ "$(sqlite3 "$CDB" "SELECT value FROM credential WHERE id='c1';")" == '{"type":"oauth","access":"FRESH","refresh":"R","expires":999}' ]] \
+   && [[ "$(sqlite3 "$CDB" "SELECT count(*) FROM session;")" == "0" ]]; then
+  ok "fresh volume: kick creates the db, snapshot rows land before the agent starts"
+else
+  fail "fresh-volume kick+seed wrong: credential=$(sqlite3 "$CDB" "SELECT count(*) FROM credential;" 2>&1)"
+fi
+
 # 10. knob off → no-op (discriminating: the snapshot row is FRESHER than the
 #     container's, so knob-on would update it — knob-off must leave it).
 mk_container_db
@@ -240,7 +271,7 @@ fi
 unset AIDC_OPENCODE_SYNC_AUTH
 rm -f "$CDB"
 if out="$(seed_opencode_auth 2>&1)"; then
-  if printf '%s' "$out" | grep -q 'not initialized yet'; then
+  if printf '%s' "$out" | grep -q 'still absent after the init run'; then
     ok "seed: missing container db skips with the init hint (no error)"
   else
     fail "missing-db path lost its hint: $out"

@@ -351,8 +351,18 @@ seed_opencode_auth() {
   local snap="/host-seed/opencode-data/.aidc-auth-seed.json"
   [[ -f "$snap" ]] || return 0
   if [[ ! -f "$db" ]]; then
-    bootstrap_warn "container opencode.db not initialized yet — skipping auth seed (opencode imports auth.json on first run)"
-    return 0
+    # Fresh volume: the db is created by opencode itself, and the seed needs
+    # it to exist. Force it with a throwaway headless run — `opencode run`
+    # initializes the db + schema BEFORE any model call, so the run may fail
+    # right after (no credentials yet) with the db left initialized. The
+    # managed-service port is free at bootstrap (the agent's service starts
+    # later). If the kick fails, the HOST watches for the db and applies the
+    # snapshot itself (aidc::opencode_auth_seed_wait → seed-auth mode).
+    timeout 30 opencode run "/exit" >/dev/null 2>&1 || true
+    if [[ ! -f "$db" ]]; then
+      bootstrap_warn "container opencode.db still absent after the init run — the host applies the auth snapshot as soon as opencode creates it"
+      return 0
+    fi
   fi
   command -v python3 >/dev/null 2>&1 || return 0
   AIDC_AUTH_DB="$db" AIDC_AUTH_SNAP="$snap" python3 - <<'PY' || bootstrap_warn "could not apply the host auth snapshot to $db"
@@ -413,10 +423,20 @@ try:
                     con.execute(f'UPDATE "{table}" SET {sets} WHERE {pk_test}', vals)
                     counts[table] = counts.get(table, 0) + 1
     con.commit()
+    # Totals AFTER the apply — how many credentials the container can actually
+    # see (the number to compare against the host snapshot's count). Tables
+    # missing from a pre-v2 db report 0.
+    now = {}
+    for t in ("credential", "account"):
+        try:
+            now[t] = con.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0]
+        except sqlite3.Error:
+            now[t] = 0
 finally:
     con.close()
 detail = ", ".join(f"{t}: {n}" for t, n in counts.items()) or "nothing new"
-print(f"[bootstrap {datetime.now():%Y-%m-%d %H:%M:%S}] seeded host auth rows into the container db ({detail})")
+now_s = ", ".join(f"{t}={n}" for t, n in now.items()) or "auth tables absent"
+print(f"[bootstrap {datetime.now():%Y-%m-%d %H:%M:%S}] seeded host auth rows into the container db ({detail}); container db now has {now_s}")
 PY
 }
 
@@ -811,8 +831,18 @@ if [[ "${BASH_SOURCE[0]:-}" == "${0:-}" ]]; then
       ensure_rtk_data_dir
       sync_tool "$tool"
       ;;
+    seed-auth)
+      # One-shot host→container credential apply, for the moment a fresh
+      # volume's db first EXISTS: opencode creates opencode.db (empty) on its
+      # first run — too late for this bootstrap, which ran before the agent —
+      # so the HOST waits for that file (aidc::opencode_auth_seed_wait) and
+      # execs this mode the moment it appears. Applies the auth snapshot into
+      # the now-real db; synthesis covered the first run via auth.json —
+      # which v2 does not read, so this apply is what actually arms the db.
+      seed_opencode_auth
+      ;;
     *)
-      echo "usage: bootstrap-state.sh [init|sync] [claude|codex|opencode|grok|omp|cursor|all]" >&2
+      echo "usage: bootstrap-state.sh [init|sync|seed-auth] [claude|codex|opencode|grok|omp|cursor|all]" >&2
       exit 1
       ;;
   esac

@@ -32,15 +32,33 @@ surfaced as explicit decision points, not folded silently into a release.
   by the existing read-only opencode-data seed mount, no new mounts.
   `cmp`-quiet (rewrites only on content change — an early draft included a
   `generated` epoch that defeated this; dropped, no consumer read it).
-- Container half (`seed_opencode_auth`, `bootstrap-state.sh.tmpl`, called
-  from `sync_opencode`): python3 + sqlite3 (parameter binding — token values
-  never touch shell escaping or logs). Version-tolerant column intersection
-  with the volume db's schema; PK-conflict upsert on `time_updated` recency
-  (fresher host login wins, fresher container-side refresh kept);
-  `INSERT OR IGNORE` for `account_state` (no timestamps); pre-v2 volume dbs
-  (no auth tables) are a clean no-op with the init hint. Counts logged,
-  values never.
+- Container half (`seed_opencode_auth` + `seed_opencode_auth_json`,
+  `bootstrap-state.sh.tmpl`, called from `sync_opencode`): python3 + sqlite3
+  (parameter binding — token values never touch shell escaping or logs).
+  Volume db present: version-tolerant column intersection with the db's
+  schema; PK-conflict upsert on `time_updated` recency (fresher host login
+  wins, fresher container-side refresh kept); `INSERT OR IGNORE` for
+  `account_state` (no timestamps); pre-v2 volume dbs are a clean no-op with
+  the init hint. Volume db ABSENT (fresh folder): bootstrap KICKS opencode
+  headlessly (`timeout 30 opencode run "/exit" || true` — `run` initializes
+  the db + schema before any model call, and the managed-service port is
+  still free at bootstrap) and then applies the snapshot rows into the
+  now-real db, so the FIRST session carries current host logins. Empirically
+  established and load-bearing: v2 ignores `auth.json` entirely (fresh db +
+  populated auth.json → zero credential rows, `auth list` empty), so an
+  earlier auth.json-synthesis intermediate was removed as dead code. Counts
+  logged, values never. Backstop: `aidc::opencode_auth_seed_wait` (host,
+  called on every agent launch) watches for the container db and execs
+  `bootstrap-state.sh seed-auth` (new mode) the moment it appears — also
+  gives RUNNING containers new host logins without a restart.
 - Knob: `AIDC_OPENCODE_SYNC_AUTH=0` gates both halves.
+- Observability (user request): the host snapshot line carries the auth-table
+  counts (`opencode host auth snapshot current (host db: credential=8,
+  account=0)`), logged on refresh and on the cmp-quiet path; the container
+  apply line logs what was pushed AND post-apply totals (`container db now
+  has credential=N, account=M`); the synthesis line logs how many provider
+  entries it wrote. Bootstrap output goes to `docker logs` (it is the
+  container start command); host output to the terminal.
 - Timestamps: `aidc::log`/`warn`/`die` → `[aidc YYYY-MM-DD HH:MM:SS] …`;
   the template's 11 `[bootstrap]` echoes → a timestamped `bootstrap_warn`
   helper. Suite message contracts grep substrings, so prefixes break

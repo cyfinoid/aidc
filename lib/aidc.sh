@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 
-if [[ -n "${AIDC_LIB_LOADED:-}" ]]; then
+# Double-load guard for THIS process only. Deliberately NOT exported: an
+# exported flag leaks to child processes (e.g. `aidc update` → install.sh →
+# a fresh `bin/aidc sync-claude-aliases`), which must load the lib fresh —
+# the guard made every `aidc update` abort install.sh with
+# "aidc::main: command not found". Keyed on $$ (portable to macOS bash 3.2;
+# BASHPID is 4.0+): same process re-sourcing is a no-op, a child process has
+# a different $$ and loads normally. Do not export this variable.
+if [[ "${AIDC_LIB_LOADED:-}" == "$$" ]]; then
   return 0
 fi
-export AIDC_LIB_LOADED=1
+AIDC_LIB_LOADED=$$
+# shellcheck disable=SC2034  # guard value is the interface, see above
 
 # aidc entry point: loads the modules and dispatches commands.
 # Layering: common first (constants + helpers used everywhere), then the

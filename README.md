@@ -16,7 +16,7 @@ If you're already running these agents directly on your Mac and have been quietl
 
 First tagged release. Highlights since the 2.6.0 changelog cut (this tag) — full notes in [`CHANGELOG.md`](CHANGELOG.md):
 
-- **Host logins now seed container-ward — the missing half of the credential contract.** opencode v2 keeps logins in its database, so the file seed couldn't carry them: the host now writes a small auth snapshot on every start and the container applies it into its volume db (fresher-wins upsert, values never logged). `AIDC_OPENCODE_SYNC_AUTH=0` opts out.
+- **Host logins now seed container-ward — the missing half of the credential contract.** opencode v2 keeps logins in its database, so the file seed couldn't carry them: the host now writes a small auth snapshot on every start and the container applies it into its volume db (fresher-wins upsert, values never logged) — **and fresh folders get it on the very first run** (bootstrap initializes the db with a one-shot headless opencode run, then applies the snapshot before the session starts). `AIDC_OPENCODE_SYNC_AUTH=0` opts out.
 - **Credentials flow one way: host → container, never back.** The session sync's db merge previously could carry container credential rows into the host's own db; it now skips auth tables entirely and the synced db copy is scrubbed before it rests on host disk — with secure-delete, so the secret isn't recoverable.
 - **Host config re-seeds on every container start** (opencode `opencode.json` + `auth.json`): a host-side key rotation reaches new sessions without `aidc sync-config`.
 - **The unit suites run in CI** — 40 hermetic test suites on every push/PR — and all aidc/bootstrap messages are timestamped for triage.

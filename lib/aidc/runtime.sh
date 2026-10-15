@@ -718,6 +718,34 @@ fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=openco
   aidc::log "agent '$tool' is ready"
 }
 
+# Wait (bounded, background) for a fresh volume's opencode.db to appear, then
+# apply the auth snapshot in-container (bootstrap-state.sh seed-auth). v2
+# keeps credentials ONLY in the db — auth.json is v1 legacy and unread — and
+# the db is created by the agent's first run, i.e. after the bootstrap that
+# seeds everything else. Runs detached: never blocks or fails the launch.
+aidc::opencode_auth_seed_wait() {
+  [[ "${AIDC_OPENCODE_SYNC_AUTH:-1}" == "1" ]] || return 0
+  local workspace="$1"
+  [[ -f "$HOME/.local/share/opencode/.aidc-auth-seed.json" ]] || return 0
+  (
+    set +e
+    local tries=0 out
+    while (( tries < 30 )); do
+      if aidc::compose "$workspace" exec -T workspace test -f /home/aidc/.local/share/opencode/opencode.db 2>/dev/null; then
+        out="$(aidc::compose "$workspace" exec -T workspace \
+          bash /workspace/.devcontainer/scripts/bootstrap-state.sh seed-auth 2>&1)"
+        [[ -n "$out" ]] \
+          && aidc::log "opencode auth seed applied in-container: $out"
+        return 0
+      fi
+      sleep 3
+      tries=$((tries + 1))
+    done
+    aidc::log "opencode auth seed pending: the container db did not appear within 90s (applies at the next start)"
+  ) &
+  disown
+}
+
 aidc::run_tool() {
   local tool="$1"
   local profile="$2"
@@ -760,6 +788,12 @@ fix: add it to AIDC_AGENTS in .ai-container/project.env (e.g. AIDC_AGENTS=openco
   if ! aidc::agent_installed "$workspace" "$tool"; then
     aidc::install_missing_agent "$workspace" "$tool"
   fi
+  # v2 opencode keeps credentials ONLY in its db, and on a fresh volume that
+  # db is created by the agent's first run — after this bootstrap. Wait
+  # (bounded, background) for it and apply the host snapshot in-container, so
+  # the first session picks the host's logins up; on an existing db this
+  # applies immediately (new host logins without a restart).
+  aidc::opencode_auth_seed_wait "$workspace"
 
   if [[ "$tool" == "claude" ]]; then
     aidc::resolve_claude_oauth_token
@@ -1239,7 +1273,7 @@ aidc::opencode_auth_snapshot() {
   command -v "$sqlite" >/dev/null 2>&1 || return 0
 
   local tmp="$out.tmp.$$"
-  local t js first=1 ok=1
+  local t js first=1 ok=1 counts=""
   # The tmp is created 0600 up front (install, not redirect): the file carries
   # secret values from the first written byte, and a kill between write and
   # chmod must never leave it over-permissive. mv preserves the mode.
@@ -1252,15 +1286,25 @@ aidc::opencode_auth_snapshot() {
       [[ $first -eq 1 ]] || printf ','
       first=0
       printf '"%s": %s' "$t" "${js:-[]}"
+      counts+="${counts:+, }$t=$("$sqlite" "$db" "SELECT count(*) FROM \"$t\";" 2>/dev/null)"
     done
     printf '}}\n'
   } >"$tmp" 2>/dev/null
 
-  if [[ $ok -eq 1 && -s "$tmp" ]] && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$tmp" >/dev/null 2>&1; then
-    if cmp -s "$tmp" "$out" 2>/dev/null; then
+  if [[ $ok -eq 1 && -s "$tmp" ]]; then
+    # Validate JSON when python3 is available; without it, accept the file —
+    # hard-requiring python3 here would silently disable the whole seed on
+    # macOS hosts without it, and the container side re-validates anyway
+    # (json.load failure → warn → skip; fail-safe both directions).
+    if command -v python3 >/dev/null 2>&1 \
+       && ! python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$tmp" >/dev/null 2>&1; then
       rm -f "$tmp"
+      aidc::warn "generated opencode auth snapshot is not valid JSON ($out); container auth seed not refreshed"
+    elif cmp -s "$tmp" "$out" 2>/dev/null; then
+      rm -f "$tmp"
+      aidc::log "opencode host auth snapshot current (host db: $counts)"
     elif chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$out" 2>/dev/null; then
-      aidc::log "refreshed the opencode auth seed for containers ($out)"
+      aidc::log "refreshed the opencode auth seed for containers (host db: $counts)"
     else
       rm -f "$tmp"
       aidc::warn "could not install the opencode auth snapshot ($out); container auth seed not refreshed"
