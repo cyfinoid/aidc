@@ -1,7 +1,7 @@
 name: release
 
 # Tag-driven releases. Push a tag `vX.Y.Z` and this workflow:
-#   1. asserts the tag matches AIDC_VERSION in lib/aidc.sh,
+#   1. asserts the tag matches AIDC_VERSION in lib/aidc/common.sh,
 #   2. asserts CHANGELOG.md has a `## [X.Y.Z]` section,
 #   3. creates a GitHub Release with that section as the body.
 # Procedure: docs/releasing.md. Uses the runner's preinstalled `gh` (no

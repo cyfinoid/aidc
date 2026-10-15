@@ -8,6 +8,115 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-15 — host→container opencode auth seeding + timestamped messages (completes the credential contract)
+
+**Summary:** The user tested the staged 2.6.0 work and hit the gap: host
+opencode-v2 logins still never reached containers — the file seed carries
+`auth.json`, which v2 no longer writes. Implemented the designed
+host→container seeding in both halves, plus the user-requested timestamps on
+every aidc/bootstrap message. Release renumbered 2.6.0 → 2.7.0 at the user's
+call (never tagged; the seeding belongs in the first release).
+
+**Why / process note:** The seeding had been deferred out of the 2.6.0
+release prep without putting that scoping decision back to the user — they
+rightly expected it in 2.6.0. Process correction recorded here and honored
+going forward: deferrals, scope cuts, and version/naming decisions get
+surfaced as explicit decision points, not folded silently into a release.
+
+**How:**
+
+- Host half (`aidc::opencode_auth_snapshot`, `lib/aidc/runtime.sh`, called
+  from `aidc::export_compose_env`): 4 read-only SELECTs off the host db
+  (WAL readers never block opencode) → `.aidc-auth-seed.json` (0600, auth
+  tables only) inside `~/.local/share/opencode/` — exposed to the container
+  by the existing read-only opencode-data seed mount, no new mounts.
+  `cmp`-quiet (rewrites only on content change — an early draft included a
+  `generated` epoch that defeated this; dropped, no consumer read it).
+- Container half (`seed_opencode_auth`, `bootstrap-state.sh.tmpl`, called
+  from `sync_opencode`): python3 + sqlite3 (parameter binding — token values
+  never touch shell escaping or logs). Version-tolerant column intersection
+  with the volume db's schema; PK-conflict upsert on `time_updated` recency
+  (fresher host login wins, fresher container-side refresh kept);
+  `INSERT OR IGNORE` for `account_state` (no timestamps); pre-v2 volume dbs
+  (no auth tables) are a clean no-op with the init hint. Counts logged,
+  values never.
+- Knob: `AIDC_OPENCODE_SYNC_AUTH=0` gates both halves.
+- Timestamps: `aidc::log`/`warn`/`die` → `[aidc YYYY-MM-DD HH:MM:SS] …`;
+  the template's 11 `[bootstrap]` echoes → a timestamped `bootstrap_warn`
+  helper. Suite message contracts grep substrings, so prefixes break
+  nothing (verified by the full run).
+
+**Commands:** `bash tests/opencode-auth-seed.test.sh` (14 passed) · full
+suite 40/40 green · `shellcheck --severity=warning` clean · `aidc-scan`
+clean.
+
+**Verification:** New suite covers both halves: snapshot shape/0600/knob/
+no-host-db/partial-schema/cmp-quiet; seed insert/upsert/downgrade-protection/
+account_state idempotency/column-intersection/pre-v2 no-op/knob/missing-db
+hint/corrupt-snapshot rollback (14 cases — the knob cases are discriminating
+in both directions: knob-off asserted non-application, knob-on contrast
+asserts the same snapshot applies). The suite caught two real bugs in
+the first draft (the `generated` field breaking cmp-quiet; a column-0 `}` in
+the embedded python breaking function extraction). Fresh-eyes review found
+no P1s; adopted fixes: the snapshot tmp is created 0600 via `install` and
+the mv/chmod install path is guarded (a kill mid-write or a perms accident
+can no longer leave the secret file over-permissive or abort an aidc
+command); `AIDC_OPENCODE_SYNC_AUTH` is forwarded through compose
+`environment:` so one setting in config.env *or* project.env gates both
+halves; both knob tests made discriminating; a corrupt-snapshot rollback
+case added; the python success line, `aidc::debug` and the trace banner
+timestamped too; changelog range/suite-count wording corrected.
+
+**Notes:** Host-to-container runs only at bootstrap (container start), so a
+host login made mid-session lands at the next session — the snapshot
+regenerates on every compose-env pass regardless. The container-side counts
+log what changed, never values; the snapshot file sits in the host's own
+opencode dir at 0600, the same trust domain as the `auth.json` beside it.
+
+---
+
+## 2026-10-15 — v2.7.0 release prep: version bump, README refresh, tests CI
+
+**Summary:** Pre-tag work for the first tagged release: `AIDC_VERSION`
+2.5.0 → 2.6.0 → 2.7.0 across this session, landing on a single `## [2.7.0]` changelog section (first-tag framing; the
+auth-direction fix moved there from the 2.5.0 cut), a README refresh
+(release/tests/shellcheck/Scorecard badges, "What's new in v2.7.0",
+credential-direction accuracy), and a new `tests` GitHub Actions workflow
+running the 40 hermetic unit suites on every push/PR — the one `.github` gap
+found while double-checking the release machinery.
+
+**Why:** The 2.5.0 label was a changelog cut, never a tag; the post-cut fixes
+(the opencode host-credential re-seed, the auth-direction guards) justified a
+renumber to 2.7.0 when the seeding feature landed, so the first tag carries it. The release workflow is
+tag-driven and validates two invariants — tag == `AIDC_VERSION` (parsed from
+`lib/aidc/common.sh` only; grep confirmed no other copy) and a non-empty
+`## [X.Y.Z]` CHANGELOG section — both pre-checked locally before pushing.
+The tests workflow closes a real gap: suites exercising merge gates, scrub
+guards, seed contracts, and scaffold structure ran only when a human
+remembered, on one machine.
+
+**How:** version bump (single line); `tests.yml` (ubuntu-latest, no Docker —
+the suites stub the container plumbing; checkout pinned to the same v6 SHA
+the other workflows pin; read-only permissions; per-suite output with
+`::error` annotation on failure); release.yml comment-drift fix; CHANGELOG
+surgery (new section, auth bullet moved, Added/Changed entries); README
+badge block + highlights + two accuracy edits (feature bullet, session-sync
+paragraph — both now state the one-way credential contract and the v2
+auth-in-db caveat with the device-code interim).
+
+**Verification:** full suite 39/39 (version bump safe — suites use their own
+fixtures), `shellcheck --severity=warning` clean, `aidc-scan` clean,
+`release.yml` invariants pre-checked (version line parses; `[2.7.0]` section
+non-empty).
+
+**Notes:** after merge: `git tag v2.7.0 && git push origin main v2.7.0` —
+the workflow publishes the Release from the changelog section. Scorecard
+badge populates on its next scheduled run. Follow-ups: host→container db
+auth seeding (next minor), host `opencode auth list` audit for
+container-originated duplicates.
+
+---
+
 ## 2026-10-15 — auth direction: container credential rows never flow to the host (opencode v2 keeps auth in the db)
 
 **Summary:** The user's constraint — "only creds from host to container, never
@@ -53,7 +162,7 @@ wrong way on every auto-sync trigger.
   warn-and-name-the-directory on failure. This makes the at-rest quarantine
   honest again: the docs' "credentials never leave the container" was already
   untrue for v2 dbs.
-- Direction contract for the planned host→container auth seeding (2.6.0):
+- Direction contract completed in the same release — host→container auth seeding (see the 2.7.0 Added entry):
   read host rows, insert into the container volume's db with
   `INSERT OR IGNORE`/time-updated-wins, epoch-gated like the session merge,
   `AIDC_OPENCODE_SYNC_AUTH=0` opt-out. Never the reverse.

@@ -7,7 +7,7 @@
 # lints each module file in isolation and cannot see those uses.
 # shellcheck disable=SC2034
 
-AIDC_VERSION="${AIDC_VERSION:-2.5.0}"
+AIDC_VERSION="${AIDC_VERSION:-2.7.0}"
 
 AIDC_CONTAINER_USER="${AIDC_CONTAINER_USER:-aidc}"
 
@@ -338,16 +338,19 @@ fix with: chmod 600 $path"
   esac
 }
 
+# Timestamped: sync/merge messages land in scrollback and get triaged later,
+# so every line carries the wall clock (the tests that assert message
+# contracts grep substrings, which a prefix doesn't break).
 aidc::log() {
-  printf '[aidc] %s\n' "$*"
+  printf '[aidc %s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
 
 aidc::warn() {
-  printf '[aidc] warn: %s\n' "$*" >&2
+  printf '[aidc %s] warn: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 
 aidc::die() {
-  printf '[aidc] error: %s\n' "$*" >&2
+  printf '[aidc %s] error: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
   exit 1
 }
 
@@ -356,7 +359,7 @@ aidc::die() {
 # Never pass secret values here.
 aidc::debug() {
   [[ "${AIDC_DEBUG:-0}" == "1" ]] || return 0
-  printf '[aidc] debug: %s\n' "$*" >&2
+  printf '[aidc %s] debug: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
 }
 
 # Secret-region guard. `--debug` turns on shell xtrace, which would otherwise

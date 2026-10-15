@@ -43,7 +43,7 @@ aidc::main() {
     # file:line prefix so the trace pinpoints where a run stalls; secrets are
     # suppressed at their source via aidc::secret_begin/secret_end.
     export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
-    printf '[aidc] debug: tracing enabled (file:line prefixed; secret values suppressed)\n' >&2
+    printf '[aidc %s] debug: tracing enabled (file:line prefixed; secret values suppressed)\n' "$(date '+%Y-%m-%d %H:%M:%S')" >&2
     set -x
   fi
 

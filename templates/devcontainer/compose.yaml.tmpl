@@ -39,6 +39,11 @@ services:
       # relocates .claude.json (and .credentials.json) INSIDE it, so all of
       # Claude's global state persists like every other agent's.
       CLAUDE_CONFIG_DIR: /home/aidc/.claude
+      # Gates BOTH halves of the opencode auth seed (host-side snapshot
+      # generation + this bootstrap's apply). Resolved from the host env at
+      # up-time — aidc::export_compose_env fills it from config.env /
+      # project.env — so one setting in either place covers both directions.
+      AIDC_OPENCODE_SYNC_AUTH: ${AIDC_OPENCODE_SYNC_AUTH:-1}
     command:
       - /bin/bash
       - -lc

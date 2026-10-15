@@ -1,0 +1,38 @@
+name: tests
+
+# The repo's hermetic unit suites (tests/*.test.sh). They stub the container
+# plumbing (docker/compose calls, tar streams, host seed mounts), so no Docker
+# service or macOS runner is needed — bash, sqlite3, python3 and rsync are all
+# preinstalled on ubuntu-latest. One shellcheck-independent gate the repo
+# previously only ran by hand: `for t in tests/*.test.sh; do bash "$t"; done`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Run the unit suites
+        run: |
+          set -uo pipefail
+          failed=0
+          for t in tests/*.test.sh; do
+            echo "── $t"
+            if out="$(bash "$t" 2>&1)"; then
+              printf '%s\n' "$out" | tail -1
+            else
+              failed=1
+              printf '%s\n' "$out"
+              echo "::error::$t failed"
+            fi
+          done
+          exit "$failed"

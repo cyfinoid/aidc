@@ -978,6 +978,10 @@ aidc::write_devcontainer_env() {
     COMPOSE_PROJECT_NAME
     AIDC_BASE_IMAGE AIDC_TOOLCHAINS AIDC_SECURITY_TOOLS AIDC_AGENTS
     AIDC_PIDS_LIMIT AIDC_MEM_LIMIT AIDC_CPU_LIMIT
+    # opencode auth seed knob: compose interpolates ${AIDC_OPENCODE_SYNC_AUTH:-1}
+    # into the container's environment, so config.env OR project.env gates both
+    # halves (host snapshot generation AND the in-container apply).
+    AIDC_OPENCODE_SYNC_AUTH
     AIDC_WORKSPACE AIDC_DEVCONTAINER_DIR AIDC_CORE_LOGICS_WORKTREE
     AIDC_HOST_SEED_CLAUDE AIDC_HOST_SEED_CODEX AIDC_HOST_SEED_OPENCODE
     AIDC_HOST_SEED_OPENCODE_DATA AIDC_HOST_SEED_GROK AIDC_HOST_SEED_OMP AIDC_HOST_SEED_CURSOR
@@ -1212,6 +1216,61 @@ aidc::tools_status() {
   done
 }
 
+# Generate the host→container auth seed for opencode v2. Since v2, provider
+# logins land in the host's opencode.db (credential/account tables), NOT in
+# auth.json — so the auth.json file seed can no longer carry them. This writes
+# a small JSON snapshot of JUST the auth tables where the existing read-only
+# opencode-data seed mount exposes it to the container; the container's
+# bootstrap applies it into the volume db (see seed_opencode_auth in
+# bootstrap-state.sh.tmpl). The file includes the secret values and lives
+# 0600 in the host's own opencode data dir — the same trust domain as
+# auth.json next to it. Read-only SELECTs: WAL readers never block the
+# host's opencode. Best-effort and cmp-quiet: regenerated on every compose
+# env pass, logged only when content actually changed. Direction contract:
+# this is the sanctioned host→container half; the container→host session
+# merge independently refuses auth tables.
+aidc::opencode_auth_snapshot() {
+  [[ "${AIDC_OPENCODE_SYNC_AUTH:-1}" == "1" ]] || return 0
+  local base="$HOME/.local/share/opencode"
+  local db="$base/opencode.db"
+  local out="$base/.aidc-auth-seed.json"
+  [[ -f "$db" ]] || return 0
+  local sqlite="${AIDC_SQLITE3:-sqlite3}"
+  command -v "$sqlite" >/dev/null 2>&1 || return 0
+
+  local tmp="$out.tmp.$$"
+  local t js first=1 ok=1
+  # The tmp is created 0600 up front (install, not redirect): the file carries
+  # secret values from the first written byte, and a kill between write and
+  # chmod must never leave it over-permissive. mv preserves the mode.
+  install -m 600 /dev/null "$tmp" 2>/dev/null || { aidc::warn "could not create the auth snapshot tmp file"; return 0; }
+  {
+    printf '{"tables": {'
+    for t in credential account account_state control_account; do
+      [[ -n "$("$sqlite" "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='${t//\'/\'\'}' LIMIT 1;" 2>/dev/null)" ]] || continue
+      js="$("$sqlite" -json "$db" "SELECT * FROM \"$t\";" 2>/dev/null)" || { ok=0; break; }
+      [[ $first -eq 1 ]] || printf ','
+      first=0
+      printf '"%s": %s' "$t" "${js:-[]}"
+    done
+    printf '}}\n'
+  } >"$tmp" 2>/dev/null
+
+  if [[ $ok -eq 1 && -s "$tmp" ]] && python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$tmp" >/dev/null 2>&1; then
+    if cmp -s "$tmp" "$out" 2>/dev/null; then
+      rm -f "$tmp"
+    elif chmod 600 "$tmp" 2>/dev/null && mv -f "$tmp" "$out" 2>/dev/null; then
+      aidc::log "refreshed the opencode auth seed for containers ($out)"
+    else
+      rm -f "$tmp"
+      aidc::warn "could not install the opencode auth snapshot ($out); container auth seed not refreshed"
+    fi
+  else
+    rm -f "$tmp"
+    aidc::warn "could not generate the opencode auth snapshot ($out); container auth seed not refreshed"
+  fi
+}
+
 aidc::export_compose_env() {
   local workspace="$1"
   # Capture any CLI/ambient overrides before project.env is sourced, so
@@ -1235,6 +1294,10 @@ aidc::export_compose_env() {
   AIDC_HOST_SEED_OPENCODE="$(aidc::mount_dir_or_empty "$HOME/.config/opencode" "opencode")"
   export AIDC_HOST_SEED_OPENCODE_DATA
   AIDC_HOST_SEED_OPENCODE_DATA="$(aidc::mount_dir_or_empty "$HOME/.local/share/opencode" "opencode-data")"
+  # Host → container auth seed (opencode v2 keeps logins in the db, so the
+  # auth.json file seed can't carry them). Writes a small auth-tables JSON
+  # into the opencode-data seed dir; the container's bootstrap applies it.
+  aidc::opencode_auth_snapshot
   export AIDC_HOST_SEED_GROK
   AIDC_HOST_SEED_GROK="$(aidc::mount_dir_or_empty "$HOME/.grok" "grok")"
   export AIDC_HOST_SEED_OMP
