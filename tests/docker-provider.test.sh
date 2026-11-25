@@ -21,7 +21,13 @@ failed=0
 ok()   { printf 'ok: %s\n' "$1"; passed=$((passed + 1)); }
 fail() { printf 'FAIL: %s\n' "$1" >&2; failed=$((failed + 1)); }
 
-reset() { unset DOCKER_HOST AIDC_DOCKER_PROVIDER AIDC_APPLE_CONTAINER_SOCKET 2>/dev/null || true; }
+reset() {
+  unset DOCKER_HOST AIDC_DOCKER_PROVIDER AIDC_APPLE_CONTAINER_SOCKET 2>/dev/null || true
+  # Pin the candidate list to paths that never exist: without this the
+  # resolver probes the real host (a brew-services Mac has the /opt/homebrew
+  # socket) and the default-path assertions below become host-dependent.
+  export AIDC_APPLE_CONTAINER_SOCKET_CANDIDATES="/nonexistent/a.sock:/nonexistent/b.sock"
+}
 
 # 1. Default provider (unset) is a no-op — DOCKER_HOST stays unset.
 reset
@@ -40,6 +46,40 @@ if [[ "${DOCKER_HOST:-}" == "unix://$HOME/.socktainer/container.sock" ]]; then
   ok "provider=apple sets the default socktainer DOCKER_HOST"
 else
   fail "apple default DOCKER_HOST='${DOCKER_HOST:-}'"
+fi
+
+# 3b. Socket auto-detection: with no explicit AIDC_APPLE_CONTAINER_SOCKET,
+# the first EXISTING candidate wins — `brew services start socktainer` puts
+# the socket under /opt/homebrew/var/run/..., not ~/.socktainer.
+if command -v python3 >/dev/null 2>&1; then
+  BREW_SOCK="$(mktemp -d)/brew.sock"
+  python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' "$BREW_SOCK"
+  reset
+  export AIDC_APPLE_CONTAINER_SOCKET_CANDIDATES="/nonexistent/one.sock:$BREW_SOCK"
+  got="$(aidc::apple_container_socket)"
+  [[ "$got" == "$BREW_SOCK" ]] \
+    && ok "apple_container_socket picks the first existing candidate" \
+    || fail "socket candidates: got '$got' want '$BREW_SOCK'"
+  AIDC_DOCKER_PROVIDER=apple aidc::apply_docker_provider
+  [[ "${DOCKER_HOST:-}" == "unix://$BREW_SOCK" ]] \
+    && ok "provider=apple uses the detected (brew-service) socket" \
+    || fail "brew socket DOCKER_HOST='${DOCKER_HOST:-}'"
+  unset AIDC_APPLE_CONTAINER_SOCKET_CANDIDATES
+  reset
+  got="$(aidc::apple_container_socket)"
+  [[ "$got" == "$HOME/.socktainer/container.sock" ]] \
+    && ok "no candidate exists → documented default (actionable error messages)" \
+    || fail "default fallback: '$got'"
+  # Explicit socket beats the candidate list (pinned precedence).
+  AIDC_APPLE_CONTAINER_SOCKET="$BREW_SOCK" \
+    AIDC_APPLE_CONTAINER_SOCKET_CANDIDATES="/nonexistent/x.sock"
+  got="$(aidc::apple_container_socket)"
+  [[ "$got" == "$BREW_SOCK" ]] \
+    && ok "explicit AIDC_APPLE_CONTAINER_SOCKET beats the candidate list" \
+    || fail "explicit precedence: '$got'"
+  reset
+else
+  ok "socket auto-detection skipped (no python3)"
 fi
 
 # 4. provider=apple honors a custom socket path.

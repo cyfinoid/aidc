@@ -61,7 +61,8 @@ aidc::doctor_check_docker() {
 # (macOS 26 + Apple Silicon; socktainer must match the `container` version).
 # See docs/apple-container.md.
 aidc::doctor_check_apple_container() {
-  local socket="${AIDC_APPLE_CONTAINER_SOCKET:-$HOME/.socktainer/container.sock}"
+  local socket
+  socket="$(aidc::apple_container_socket)"
   aidc::doctor_report warn provider "AIDC_DOCKER_PROVIDER=apple — experimental/unverified (docs/apple-container.md)"
   if command -v container >/dev/null 2>&1; then
     aidc::doctor_report ok apple-container "'container' CLI present"

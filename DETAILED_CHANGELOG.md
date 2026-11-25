@@ -8,6 +8,323 @@ Add a new entry (newest first) for every meaningful change.
 
 ---
 
+## 2026-10-22 — aidc-apple: the native Apple `container` runtime (no shim, no fallback)
+
+**Summary:** Alongside the socktainer validation effort, the user asked for a
+second, purer path: a script that drives Apple's `container` tooling
+**natively** — no socktainer shim, "hyper optimized" for Apple containers,
+**no other environment support, no fallback, no alternative**. Decisions
+recorded with the user: reuse aidc's shared lib for everything engine-agnostic
+(not self-contained), mirror the **full** command surface (not a lean core),
+and ship **conservative** resource defaults (4G/4 vCPU, builder 4/4G).
+
+**Why:** the shim path inherits socktainer's partial Docker-API emulation and
+its version-matching burden; Apple's own CLI (`container build/run/exec/
+volume`) natively covers everything aidc needs — including the two load-bearing
+pieces (BuildKit builds with sized builders, and `exec -t -i` TTY attach).
+Grounded in Apple's `docs/command-reference.md` (fetched, not memory).
+
+**How:**
+
+- **Architecture — override, don't duplicate.** aidc funnels every container
+  operation through `aidc::compose`/`aidc::compose_capture` plus a handful of
+  image/volume helpers. `bin/aidc-apple` sources `lib/aidc.sh`, captures the
+  stock `cmd_help` via `declare -f` (so `aidc-apple help` renders the real,
+  current command list under its own name — no duplicated help text to drift),
+  neutralizes the provider machinery (`AIDC_PROVIDER_RESOLVED=1`,
+  `AIDC_DOCKER_PROVIDER=docker` → no probing, no DOCKER_HOST ever set), then
+  sources `lib/aidc/apple.sh`, which redefines exactly those chokepoints:
+  - `aidc::compose` gateway translating the verified verb set: `up [-d]
+    [--build]`, `down [−v --rmi local --remove-orphans]`, `exec [-T] [-e
+    KEY]`, `ps -q`, `config --images`. Unknown verbs **die** ("not implemented
+    natively") — by design there is nothing to fall back to.
+  - `ensure_base_image`/`ensure_thin_image` → `container build` with the same
+    build args compose uses; a generation-counter state file
+    (`.ai-container/apple-image-gen`) makes `up` keep compose's no-op fast
+    path AND guarantees a rebuilt image (`--build` or a base change)
+    recreates a running container (the `:latest` tag alone can't express
+    that — caught in self-review).
+  - toolchain store/volume functions → `container build`/`volume`/`run --rm`
+    with `--entrypoint test` ready-marker probes.
+  - `cmd_status` (reuses the engine-agnostic `status_config` block + native
+    state/volumes rows), `cmd_clean` (image/builder prune only — state
+    volumes are NEVER pruned), `doctor_check_docker` (native rows: CLI,
+    `container system status`, builder, memory-default warn).
+- **The run flag set mirrors `compose.yaml.tmpl` exactly**: 12 binds (workspace
+  rw, `.devcontainer` ro overlay, CORE_LOGICS, 8 ro seeds incl. the gitconfig
+  *file* bind), 9 project volumes + read-only shared toolchains store
+  (`--mount type=volume,…,readonly`), the env block, `--init`, `-w`, `--shm-size
+  1G`, `-l aidc.project=<slug>`, `-m/-c`, `--cap-add` when the firewall is on,
+  loopback-only `-p` when `AIDC_OPENCODE_WEB=1`.
+- **The uid problem Docker solves by volume-seeding**: fresh Apple ext4 volumes
+  are root-owned and the image's pre-created uid-1000 dirs do NOT seed them —
+  so the init process runs as root (`-u 0`), chowns the nine volume roots,
+  then drops to uid 1000 via `runuser --preserve-environment` before the same
+  `bootstrap-state.sh init && exec sleep infinity` the docker path runs.
+  `AIDC_APPLE_DROP_USER=0` is the documented root escape hatch. Agent/exec
+  commands always `container exec --user 1000:1000 -w /workspace`.
+- **Resource model**: there is no unlimited in a VM-per-container world (unset
+  ≈ 1 GiB → aidc builds would OOM). Defaults 4G/4; `AIDC_MEM_LIMIT`/
+  `AIDC_CPU_LIMIT` win when set; fractional CPUs **truncate** (Apple floors to
+  whole vCPUs — `%.0f` would round; caught in self-review).
+- **Native gaps are loud, never silent**: `no-new-privileges` (no Apple
+  equivalent) and `AIDC_ISOLATE_VM` (redundant) warn once and are dropped;
+  `pids_limit` has no equivalent (documented).
+- **Naming mirrors compose** (`aidc_<slug>-workspace` container,
+  `aidc_<slug>_<vol>` volumes) so destroy/status semantics stay familiar.
+- Docs: `docs/aidc-apple.md` (mapping table, knobs, and a 7-point
+  hardware-validation checklist — the open question is whether `container
+  build` resolves `FROM <local base tag>` from Apple's image store);
+  README + `docs/apple-container.md` cross-links; `install.sh` links
+  `aidc-apple` next to `aidc`.
+
+**Bugs hit while building (and fixed):**
+
+- *First round (self-review + test runs):* `up --build`/base-change didn't
+  recreate a *running* container — the no-op state didn't change when the
+  image did (`:latest` is constant) → generation-counter state file.
+  `entry=($(…))` word-split the bootstrap command (its quoting must survive
+  as ONE argv) → the helper sets an argv array. Test-stub traps: `grep -vx`
+  returns 1 on an empty result so `grep … && mv` never ran when the last/only
+  line was deleted; flag args parsed as grep options; a stub arm's trailing
+  no-op `if` masked the toolchain probe's rc; `has -- '--init'` passed `--`
+  as the function's `$1`; the scalar `flags` tripped shellcheck's array
+  heuristics; `AIDC_ROOT` is launcher-set so direct-sourcing tests must
+  export it.
+- *Second round (fresh-eyes subagent review — 18 findings, all triaged):*
+  (1) `ensure_toolchain_volumes` (plural — the up/agent-entry path) still
+  shelled to docker → native override; (2) gateway `ps -q` reported STOPPED
+  containers as running, breaking ensure_container_running's self-heal →
+  running-only semantics; (3) `init` required the docker CLI via
+  `need_cmd docker git` → docker dropped from the requirement (the native
+  engine gate owns engine checks); (4) the root-init premise was unpinned —
+  the image ends `USER aidc`, so the entrypoint would NOT have run as root →
+  `--user 0:0` pinned in run_flags; (5) scripted `-T` execs ran as the exec
+  default user → root-owned token files the agent couldn't read → all execs
+  are `--user 1000:1000 -w /workspace`; (6) `AIDC_ISOLATE_VM=1` would have
+  built a Lima VM and hijacked DOCKER_HOST (vm_ensure runs before the gate)
+  → `vm_ensure/stop/destroy` neutralized; (7) `status`'s stock config block
+  read Docker-store volumes → `docker` masked to a failing no-op for exactly
+  that call; (8) doctor's container row probed `docker info` → native
+  override; (9) clean never reclaimed stale tagged `aidc-base:`/store images
+  (dangling-only prune) → keeper-set reclamation with `--apply`; (10) bare
+  `-e KEY` (docker inherit syntax) is key=value-only on Apple exec →
+  host-side expansion, unset keys omitted; (11) resource/caps/port changes
+  on a running container didn't recreate → the run-state identity now
+  encodes shm/memory/cpus/firewall/web/port; (12) `AIDC_CPU_LIMIT=0.5`
+  truncated to a zero-cpu degenerate → floors to 1; (13) lowercase docker
+  memory units passed through unverified → normalized to uppercase; (14)
+  trailing `-e` crashed on an unbound variable → die-with-remedy; (15)
+  silent best-effort state writes → warned; (16) `container --version`
+  fallback detail; (17) a leftover placeholder no-op in run_flags removed;
+  (18) test-honesty: the suite now also pins ps-when-stopped, `-e`
+  expansion/guard, the new overrides, recreate-on-memory-change, and clean
+  keepers — the no-docker guard's claim enumerates the flows actually run.
+
+- *Third round (re-review of the fixes — the gate re-arms on any edit):*
+  (1) **HIGH**: the clean keeper was computed without loading the cwd
+  project's `project.env`, so any multi-agent project (`AIDC_AGENTS` is part
+  of the base tag's content hash) or `AIDC_BASE_IMAGE` pin would have its
+  in-use base DELETED by `clean --apply` — now loaded first, pin honored;
+  (2) the run-state identity missed bind-layout knobs — `up --clipboard` on a
+  running container silently never applied the clipboard bind → clipboard +
+  drop-user now in the identity; (3) the thin-build gen/base state writes
+  were still silent — a failed gen write after `up --build` would silently
+  never deploy the rebuilt image → warned; (4) `-e ''` crashed on an invalid
+  variable name → non-empty guard; (5) the status docker-mask blindly
+  `unset -f docker`, destroying any pre-existing function (a test's
+  no-docker guard) → saved/restored via `declare -f`; dead
+  `default_workspace || pwd` fallback removed. Tests: +2 (status smoke incl.
+  mask restore; clean-with-project.env selection), suite at 44.
+
+**Commands:**
+
+```sh
+bash tests/apple-native.test.sh    # 44 passed, 0 failed
+shellcheck --severity=warning lib/aidc/apple.sh bin/aidc-apple tests/apple-native.test.sh
+for s in tests/*.test.sh; do bash "$s" >/dev/null || echo "FAIL $s"; done   # 42 suites green
+```
+
+**Verification:** new suite green (44 cases: engine gate, naming, defaults
+incl. CPU floor + unit normalization, volume journaling, full run-flag set
+incl. the pinned root init, entrypoint drop, all gateway verbs incl. stopped-
+container ps semantics and `-e` expansion, up fast-path/recreate semantics
+incl. resource- and clipboard-change recreation, down keep-vs-wipe selection,
+toolchain idempotence, the new overrides, clean keepers incl. the
+project.env-selection case, doctor rows, unknown-verb abort, help rendering,
+status smoke incl. the docker-mask restore, and the no-docker invariant — a
+guard `docker` function fails the suite if any path ever shells out); all 42
+suites pass; shellcheck clean at CI severity. Real-hardware run pending
+(9-point checklist in the docs).
+
+**Notes / follow-ups:** completions for `aidc-apple` (share
+`completions/aidc.*` under the new name) are an obvious follow-up; the
+`FROM <local-tag>` BuildKit question gates first real use — if it fails, the
+error message names the gap and the registry-pin workaround. Clean's keeper
+set is per-cwd-project (label-based walks need the on-hardware JSON schema —
+noted in docs); a sibling project pinned to a different base rebuilds it on
+demand.
+
+## 2026-10-22 (addendum) — socktainer socket auto-detection (the Homebrew service path)
+
+**Summary:** The user's first real validator run (brew-installed socktainer
+1.6.0 + container 1.6.0, service started) failed the socket prereq: brew's
+service runs socktainer with `HOME=/opt/homebrew/var/run/socktainer`, so the
+socket is at `/opt/homebrew/var/run/socktainer/.socktainer/container.sock` —
+the `~/.socktainer/` default (from socktainer's README, for manual runs) was
+wrong for every brew user, in aidc's provider/detector/doctor AND the
+validator.
+
+**How:** `aidc::apple_container_socket` (config.sh) — explicit env wins, then
+first existing socket among home-dir + both brew prefixes, then the
+documented default (so absent-socket errors stay actionable). Wired into
+`apply_docker_provider`, `detect_alt_providers`, `doctor_check_apple_container`,
+and the validator's `resolve_socket` (`--socket` still wins). Candidate list
+overridable for tests. A first cut used `local IFS=':'` splitting — semgrep's
+ifs-tampering rule (correctly) blocked it; replaced with `':'`→space +
+default-IFS word splitting. Bonus from the user's output: `brew install
+socktainer` pulls a version-matched `container` as a dependency — documented
+as the easy way to get the pair right.
+
+**Verification:** docker-provider 24/24 (+4 cases, hermetic — the candidate list is pinned so a host with a real brew socket cannot skew them; verified by planting the brew socket at its real path), validate-apple-container
+38/38 (+1), doctor suite unchanged, all 42 suites, shellcheck + semgrep +
+gitleaks clean via aidc-scan.
+
+## 2026-10-21 — Apple-container validation runbook (pre-flip groundwork for making apple the primary provider)
+
+**Summary:** aidc's Apple `container` (socktainer) provider ships
+experimental/unverified — the compatibility matrix in
+`docs/apple-container.md` is all `?` because it was implemented against
+documented behavior, not hardware. The user wants Apple container promoted to
+the **primary** engine with Docker (Desktop/OrbStack/Colima) as secondary, but
+only after it is actually validated. This session adds the validation tooling;
+the precedence flip itself is deliberately deferred until the user runs it on
+their Mac (macOS 26 + Apple Silicon) and confirms.
+
+**Why:** flipping the default to an engine whose bind mounts / TTY exec /
+volume semantics are unproven would gamble every `aidc <agent>` session on a
+community shim. The highest-risk rows (host bind mounts, `compose exec` TTY)
+needed a systematic probe, not ad-hoc typing.
+
+**How:**
+
+- `scripts/validate-apple-container.sh` (bash-3.2-safe, `set -euo pipefail`):
+  two stages, one PASS/FAIL/SKIP row per matrix row.
+  - *Prereq gate*: docker CLI, compose plugin, `container` CLI, socktainer
+    socket, `docker info` through the socket, curl — each FAIL aborts with a
+    remedy before any probe burns time. `container system status` is
+    informational only.
+  - *Engine probes*: one multi-stage alpine image (a `COPY --from` marker
+    proves multi-stage builds — aidc's base image is multi-stage), then four
+    tiny compose projects mirroring the exact knobs in
+    `templates/devcontainer/compose*.yaml.tmpl`: main stack (`init: true`,
+    `user: 1000:1000`, `pids_limit`/`mem_limit`/`cpus`, rw + ro binds, project
+    named volume, `external: true` ro volume — the `aidc_toolchains` shape),
+    plus caps (`cap_add`), hardened (`security_opt`), and port
+    (`127.0.0.1:PORT:PORT` publish with busybox `nc`) stacks. Assertions use
+    runtime proof, not just compose acceptance: limits check `/sys/fs/cgroup/*`
+    AND `docker inspect` (PASS on either — an enforcing shim with imperfect
+    inspect reporting is a reporting gap, not a security one; the detail string
+    records both); capabilities decode CapEff bits 12/13 from
+    `/proc/self/status` (functional `ip link add` is informational); NNP reads
+    `NoNewPrivs`; loopback publish must answer on 127.0.0.1 AND refuse the
+    host's LAN address.
+  - *aidc end-to-end* (this checkout, scratch repo): `doctor` → `init` → `up`
+    → mount assertions via `aidc exec` → claude_home volume persistence across
+    `down`/`up` → `destroy`. `--skip-aidc` skips the stage; interactive-only
+    checks (agent TTY attach, `opencode-web` in a browser) print as a manual
+    checklist.
+  - Same precedence semantics as aidc: explicit `DOCKER_HOST` is honored
+    verbatim and the socket prereq becomes a SKIP row (`docker info` through
+    the preset host is the gate); otherwise `DOCKER_HOST` is set from
+    `--socket` / `AIDC_APPLE_CONTAINER_SOCKET` / `~/.socktainer/container.sock`.
+- `tests/validate-apple-container.test.sh`: 37 hermetic cases. The engine is a
+  `docker` stub dispatching on subcommand + exec code with `VAL_*` failure
+  knobs (pattern: the curl stub in `update-pins.test.sh`); the socket is a real
+  unix socket bound via python3 (`docker-provider.test.sh` pattern; cases
+  needing it skip cleanly without python3). Covers usage errors, each prereq's
+  gating, the happy path (tty SKIP non-interactively; `AIDC_VAL_FORCE_TTY=1` is
+  the documented test seam for the tty probe), every probe's fail injection,
+  the inspect-carries-the-row OR for limits, the stack-down cascade, LAN
+    scoping, DOCKER_HOST precedence, and `--socket` override.
+- `docs/apple-container.md`: the validation checklist now leads with the
+  script (plus its caveats) and keeps a short manual list for the genuinely
+  interactive checks.
+
+**Bugs hit while building (and fixed):**
+
+- *First round (self-review + test runs):* `log_tail` aborted the whole
+  validator under `set -e -o pipefail` when a probe log didn't exist (a
+  skipped short-circuit step leaves no log) — now `|| true`. With
+  `DOCKER_HOST` preset the script still gated on the socktainer socket's
+  existence — contradictory (the preset endpoint is authoritative); now a
+  SKIP row with the API check as the gate. Test-stub traps: a substring
+  `*"-v"*` match for compose `down` fired on EVERY plain `down` because the
+  validator workdir path contains `aidc-val` (token-match `-v` instead);
+  `down -v` must recreate the state dir (stub writes state files without
+  `mkdir -p`); `VAL_TTY_OK=0` is a non-empty string ≠ false (`== "1"`
+  comparison); the missing-CLI gating case must restore a *working*
+  container stub, not an `exit 0` one.
+- *Third round (re-review after the fixes — the review gate re-arms on any
+  edit):* (1) the suite's own `hostname -I` pipe was unguarded — on macOS
+  (BSD hostname, no `-I`) the suite itself aborted under `set -e` before its
+  last five cases; guarded + IPv4-filtered (an IPv6-first listing makes curl
+  fail URL parsing, exit 3 — indistinguishable from a refusal → false-PASS);
+  same filter applied in the validator's LAN row; (2) a fully-green aidc
+  stage ended with a false "could not auto-destroy" warning — the teardown
+  row's `destroy --purge-scaffold` removes the project, but the cleanup trap
+  re-destroyed anyway (flag now reset on successful teardown + guarded on
+  `.ai-container/project.env` existing); (3) port-compose-up failure emitted
+  no scoping row at all → explicit SKIP (row inventory stays 31 in every
+  path); (4) stub `ps` arm never matched `-q` (arg position) — now scanned;
+  (5) dead result-record arrays removed (counters only; nothing iterates
+  them); (6) one stale "35 cases" in this entry's How section → 37.
+- *Second round (fresh-eyes subagent review of the diff, per the repo's
+  pre-completion review gate):* (1) the missing-docker test ran against a
+  PATH including `/usr/bin`, where CI runners have real docker preinstalled —
+  replaced with a curated coreutils symlink dir so absence tests can't see
+  the host engine; (2) uid-1000 `touch` on a ro bind false-PASSes when the
+  host dir is 0755 uid-501-owned (EACCES regardless of ro-ness) — ro-ness
+  and volume-persistence probes now exec `-u 0` (EROWS-vs-success cleanly
+  separates mount semantics from ownership), the workdir is 0755 and the rw
+  bind dir 0777 for the same reason; (3) the LAN-refused half of the port
+  row silently passed when no host IP was discoverable — split into its own
+  `port-lan-refused` row that SKIPs instead; (4) `"${env_args[@]}"` on a
+  possibly-empty array aborts under `set -u` on bash 3.2 (the repo's
+  documented floor) — guarded with `${env_args[@]+"…"}`; (5) the changelog
+  claimed "every probe's fail injection" while `bind-mount-rw` and
+  `curl-cli` had none — both added; (6) `--help` printed one line too many
+  (`sed 2,33p` → `2,32p`); (7) a partial aidc stage could leak the scratch
+  compose project when the workdir was rm -rf'd — cleanup now best-effort
+  `destroy -f`s it and retains the workdir with a printed remedy on failure;
+  (8) the suite inherits a developer's exported `DOCKER_HOST` — `env -u`;
+  (9) the session log's "15 engine probe rows" undercounted (19).
+
+**Commands:**
+
+```sh
+bash tests/validate-apple-container.test.sh   # 37 passed, 0 failed
+for s in tests/*.test.sh; do bash "$s" >/dev/null || echo "FAIL $s"; done   # all green
+shellcheck --severity=warning scripts/validate-apple-container.sh \
+                     tests/validate-apple-container.test.sh               # clean (CI severity)
+bash -n scripts/validate-apple-container.sh tests/validate-apple-container.test.sh
+```
+
+**Verification:** all 41 suites in `tests/` pass; shellcheck clean at the
+CI's `--severity=warning`; module layering check passes. The validator itself
+runs green against the stubbed engine — its real-hardware run is the user's
+next step (see `docs/apple-container.md`).
+
+**Notes / next steps (deferred by design):**
+
+- The flip itself (apple primary, Docker fallback, silent auto-select, remove
+  the prompt/persist machinery — decided with the user this session) happens
+  only after the user reports a green run on real hardware. Red-line rows for
+  the flip: bind mounts (rw + ro), `compose exec` TTY, named + external
+  volumes, loopback publish, `/dev/shm`.
+- The script is deliberately NOT part of CI (needs macOS 26 + Apple Silicon
+  + socktainer); its own logic is what's CI-covered.
+
 ## 2026-10-15 — host→container opencode auth seeding + timestamped messages (completes the credential contract)
 
 **Summary:** The user tested the staged 2.6.0 work and hit the gap: host

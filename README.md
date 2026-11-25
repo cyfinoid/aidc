@@ -97,6 +97,8 @@ Already exporting `CLAUDE_CODE_OAUTH_TOKEN` in your shell still works (it takes 
 - [`docs/security.md`](docs/security.md) — `aidc scan`, scanners, image supply chain, container hardening, agent guardrails (rtk), opt-in egress firewall
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — symptom → cause → fix for the common failures (`aidc doctor` first)
 - [`docs/uninstall.md`](docs/uninstall.md) — per-project and host-wide removal
+- [`docs/apple-container.md`](docs/apple-container.md) — Apple `container` via the socktainer shim (`AIDC_DOCKER_PROVIDER=apple`): setup, compatibility matrix, validation
+- [`docs/aidc-apple.md`](docs/aidc-apple.md) — `aidc-apple`: the same workflow on Apple `container` **natively** (no shim, no fallback)
 - [`docs/releasing.md`](docs/releasing.md) — how releases are cut
 - [`docs/clipboard-bridge.md`](docs/clipboard-bridge.md) — host-clipboard → container PNG paste bridge
 - [`docs/local-ci.md`](docs/local-ci.md) — `aidc ci`: replaying the wrapped project's GitHub workflows locally (opt-in)
@@ -174,7 +176,7 @@ Runs your project inside a Docker container. On macOS, Docker Desktop/OrbStack/C
 
 **This is fine for practically everyone.** The container + VM double boundary on macOS, combined with aidc's always-on scanners, read-only mounts, named volumes (no host home directory access), and optional egress firewall, already provides strong isolation between the AI agent and your host system.
 
-> **Experimental: Apple `container` provider.** On macOS 26 + Apple Silicon you can point aidc at Apple's native [`container`](https://github.com/apple/container) runtime (via the socktainer Docker-API shim) with `AIDC_DOCKER_PROVIDER=apple`. It runs **each container in its own lightweight VM**, so it provides per-container VM isolation without `--isolate-vm`. Unverified end-to-end — see [docs/apple-container.md](docs/apple-container.md).
+> **Experimental: Apple `container` provider.** On macOS 26 + Apple Silicon you can point aidc at Apple's native [`container`](https://github.com/apple/container) runtime two ways: (a) via the socktainer Docker-API shim with `AIDC_DOCKER_PROVIDER=apple` — unverified end-to-end, see [docs/apple-container.md](docs/apple-container.md); or (b) **natively, no shim at all**, with the `aidc-apple` command — the full aidc workflow driving the `container` CLI directly (see [docs/aidc-apple.md](docs/aidc-apple.md)). Both run **each container in its own lightweight VM**, providing per-container VM isolation without `--isolate-vm`.
 
 ### High-security mode (`--isolate-vm`)
 

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# aidc-apple — aidc on Apple's NATIVE `container` runtime.
+#
+# Same commands, same scaffold, same auth/session contract as `aidc`, but the
+# container lifecycle runs on Apple's `container` CLI directly: no socktainer,
+# no Docker API, no fallback engine, no alternatives. macOS 26 + Apple Silicon
+# only (see docs/aidc-apple.md).
+#
+# How: lib/aidc/apple.sh (sourced below) redefines aidc's engine chokepoints
+# (aidc::compose, image/volume helpers, status/clean/doctor rows) with native
+# implementations, so every engine-agnostic aidc feature — scaffold, config,
+# agent auth seeding, session sync, hooks — is shared verbatim with `aidc`.
+set -euo pipefail
+
+aidc_source="${BASH_SOURCE[0]}"
+while [ -L "$aidc_source" ]; do
+  aidc_dir="$(cd -P "$(dirname "$aidc_source")" && pwd)"
+  aidc_link_target="$(readlink "$aidc_source")"
+  if [[ "$aidc_link_target" == /* ]]; then
+    aidc_source="$aidc_link_target"
+  else
+    aidc_source="$aidc_dir/$aidc_link_target"
+  fi
+done
+
+AIDC_ROOT="$(cd -P "$(dirname "$aidc_source")/.." && pwd)"
+export AIDC_ROOT
+
+# Capture the stock help before the apple module replaces its wrapper, so
+# 'aidc-apple help' renders the same command list under its own name without
+# duplicating the text (which would drift).
+# shellcheck disable=SC1091
+. "$AIDC_ROOT/lib/aidc.sh"
+# shellcheck disable=SC1090
+eval "aidc_apple::stock_help()$(declare -f aidc::cmd_help | sed '1d')"
+
+# Native runtime, no fallbacks: the provider machinery must never probe,
+# prompt, or point anything at a Docker/socktainer endpoint — pin it to the
+# no-op provider and mark it resolved so ensure_docker_provider stays inert.
+export AIDC_RUNTIME=apple
+export AIDC_DOCKER_PROVIDER=docker
+export AIDC_PROVIDER_RESOLVED=1
+
+# shellcheck disable=SC1090,SC1091
+. "$AIDC_ROOT/lib/aidc/apple.sh"
+
+aidc::main "$@"

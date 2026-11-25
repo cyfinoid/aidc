@@ -98,11 +98,40 @@ aidc::ensure_global_config() {
 # Container engine ("Docker provider"). Default 'docker' uses your ambient Docker
 # (Docker Desktop / OrbStack / Colima). Set 'apple' to route aidc through Apple's
 # native `container` runtime via a socktainer Docker-API socket — macOS 26 +
-# Apple Silicon, EXPERIMENTAL/unverified (see docs/apple-container.md). An
-# explicit DOCKER_HOST in your environment always wins.
+# Apple Silicon, EXPERIMENTAL/unverified (see docs/apple-container.md). The
+# socktainer socket is auto-detected (home dir, then the Homebrew service
+# locations); override with AIDC_APPLE_CONTAINER_SOCKET. An explicit DOCKER_HOST
+# in your environment always wins.
 # AIDC_DOCKER_PROVIDER=docker
 # AIDC_APPLE_CONTAINER_SOCKET=$HOME/.socktainer/container.sock
 EOF
+}
+
+# Resolve the socktainer Docker-API socket. An explicit
+# AIDC_APPLE_CONTAINER_SOCKET always wins; otherwise the first EXISTING socket
+# among the known locations is used — running the binary from your own HOME
+# creates ~/.socktainer/container.sock, but `brew services start socktainer`
+# runs it with HOME=/opt/homebrew/var/run/socktainer (per the formula's
+# caveat), landing at a different path. The candidate list is overridable
+# (AIDC_APPLE_CONTAINER_SOCKET_CANDIDATES, colon-separated) mostly for tests.
+aidc::apple_container_socket() {
+  if [[ -n "${AIDC_APPLE_CONTAINER_SOCKET:-}" ]]; then
+    printf '%s' "$AIDC_APPLE_CONTAINER_SOCKET"
+    return 0
+  fi
+  local candidates="${AIDC_APPLE_CONTAINER_SOCKET_CANDIDATES:-$HOME/.socktainer/container.sock:/opt/homebrew/var/run/socktainer/.socktainer/container.sock:/usr/local/var/run/socktainer/.socktainer/container.sock}"
+  # The /usr/local candidate is defensive only — the Homebrew formula is
+  # arm64-only, so no supported install puts the socket there.
+  local c
+  # ':'→' ' then default-IFS word splitting (socket paths contain no spaces;
+  # avoids touching IFS — semgrep's ifs-tampering rule is right to insist).
+  # set -f: a candidate with glob characters must stay a literal path.
+  set -f
+  for c in ${candidates//:/ }; do
+    [[ -S "$c" ]] && { set +f; printf '%s' "$c"; return 0; }
+  done
+  set +f
+  printf '%s' "$HOME/.socktainer/container.sock"   # nothing exists: the documented default (error messages name it)
 }
 
 # Route aidc's docker/compose/build/volume calls at the selected engine. aidc
@@ -118,7 +147,8 @@ aidc::apply_docker_provider() {
       : # ambient Docker; nothing to do
       ;;
     apple)
-      local socket="${AIDC_APPLE_CONTAINER_SOCKET:-$HOME/.socktainer/container.sock}"
+      local socket
+      socket="$(aidc::apple_container_socket)"
       if [[ -z "${DOCKER_HOST:-}" ]]; then
         export DOCKER_HOST="unix://$socket"
       fi
@@ -151,8 +181,10 @@ aidc::is_interactive() {
 aidc::detect_alt_providers() {
   local out=""
   command -v docker >/dev/null 2>&1 || { printf ''; return 0; }
-  # apple: Apple's `container` runtime via socktainer's Docker-API socket.
-  local apple_sock="${AIDC_APPLE_CONTAINER_SOCKET:-$HOME/.socktainer/container.sock}"
+  # apple: Apple's `container` runtime via socktainer's Docker-API socket
+  # (home dir or Homebrew-service location — see apple_container_socket).
+  local apple_sock
+  apple_sock="$(aidc::apple_container_socket)"
   if command -v container >/dev/null 2>&1 && [[ -S "$apple_sock" ]]; then
     out+="${out:+ }apple"
   fi

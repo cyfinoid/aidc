@@ -75,6 +75,9 @@ aidc::sync_session_tool() {
       host_dst="$HOME/.local/share/aidc/sessions/opencode/$(aidc::repo_slug "${workspace:-/workspace}")"
       # Session artifacts only: credentials never leave the container, and
       # log/repos/snapshot/tool-output/bin are caches, not sessions.
+      # lost+found: root-owned, in EVERY Apple-container ext4 volume root —
+      # this dir IS a volume root (uid-1000 tar would die on it; harmless on
+      # Docker, which has none).
       src_excludes=(
         --exclude=./auth.json
         --exclude=./log
@@ -82,6 +85,7 @@ aidc::sync_session_tool() {
         --exclude=./snapshot
         --exclude=./tool-output
         --exclude=./bin
+        --exclude=./lost+found
       )
       # The data dir itself always exists (named volume mounts there), so
       # probe for actual session artifacts in either on-disk format.
@@ -107,7 +111,11 @@ aidc::sync_session_tool() {
       # path. tee/ holds raw command-output logs: bulky, not savings data.
       container_src="/home/aidc/.local/share/rtk"
       host_dst="$HOME/.local/share/aidc/rtk/$(aidc::repo_slug "${workspace:-/workspace}")"
-      src_excludes=(--exclude=./tee)
+      # tee/ holds raw command-output logs: bulky, not savings data.
+      # lost+found: root-owned, present in EVERY Apple-container ext4 volume —
+      # the tar runs as uid 1000 and would exit nonzero on it (seen on
+      # hardware; harmless on Docker, which has no lost+found).
+      src_excludes=(--exclude=./tee --exclude=./lost+found)
       gate=(test -f "$container_src/history.db")
       gate_desc="no rtk history.db in $container_src"
       ;;
